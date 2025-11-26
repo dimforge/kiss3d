@@ -44,19 +44,15 @@ impl EguiRenderer {
 
         egui_ctx.set_fonts(fonts);
 
-        // Set default pixels_per_point to avoid DPI warnings
-        // Default to 1.0, will be updated in draw_ui()
-        egui_ctx.set_pixels_per_point(1.0);
+        // Set default pixels_per_point to avoid DPI warnings.
+        // Not using 1.0 exactly so that draw_ui() gets a chance
+        // to initialize it to the actual value (which might be 1)
+        // and trigger a redraw.
+        // TODO: could we avoid this dummy pass completely instead?
+        egui_ctx.set_pixels_per_point(0.987);
 
         // Run a dummy frame to initialize fonts with correct DPI
-        let dummy_input = RawInput {
-            screen_rect: Some(egui::Rect::from_min_size(
-                egui::Pos2::ZERO,
-                egui::vec2(800.0, 600.0),
-            )),
-            time: Some(0.0),
-            ..Default::default()
-        };
+        let dummy_input = RawInput::default();
         egui_ctx.begin_pass(dummy_input);
         let _ = egui_ctx.end_pass(); // This will initialize fonts
 
