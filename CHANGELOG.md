@@ -1,3 +1,7 @@
+# v0.37.2
+
+- Fix the egui UI not rendering if the display’s hidpi factor is exactly 1.0.
+
 # v0.37.1
 
 - Improved documentations.
