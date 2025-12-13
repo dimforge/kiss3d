@@ -4,7 +4,8 @@ use crate::planar_camera::PlanarCamera;
 use crate::prelude::PlanarInstanceData;
 use crate::resource::vertex_index::VertexIndex;
 use crate::resource::{
-    PlanarMaterial, PlanarMaterialManager, PlanarMesh, PlanarMeshManager, Texture, TextureManager,
+    PlanarMaterial, PlanarMaterialManager, PlanarMesh, PlanarMeshManager, PlanarRenderContext,
+    Texture, TextureManager,
 };
 use crate::scene::PlanarObject;
 use std::cell::{Ref, RefCell, RefMut};
@@ -12,6 +13,7 @@ use std::f32;
 use std::mem;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 // XXX: once something like `fn foo(self: Rc<RefCell<PlanarSceneNode>>)` is allowed, this extra struct
 // will not be needed any more.
@@ -82,9 +84,9 @@ impl PlanarSceneNodeData {
     }
 
     /// Render the scene graph rooted by this node.
-    pub fn render(&mut self, camera: &mut dyn PlanarCamera) {
+    pub fn render(&mut self, camera: &mut dyn PlanarCamera, context: &mut PlanarRenderContext) {
         if self.visible {
-            self.do_render(&na::one(), &Vector2::repeat(1.0), camera)
+            self.do_render(&na::one(), &Vector2::repeat(1.0), camera, context)
         }
     }
 
@@ -93,6 +95,7 @@ impl PlanarSceneNodeData {
         transform: &Isometry2<f32>,
         scale: &Vector2<f32>,
         camera: &mut dyn PlanarCamera,
+        context: &mut PlanarRenderContext,
     ) {
         if !self.up_to_date {
             self.up_to_date = true;
@@ -100,14 +103,14 @@ impl PlanarSceneNodeData {
             self.world_scale = scale.component_mul(&self.local_scale);
         }
 
-        if let Some(ref o) = self.object {
-            o.render(&self.world_transform, &self.world_scale, camera)
+        if let Some(ref mut o) = self.object {
+            o.render(&self.world_transform, &self.world_scale, camera, context)
         }
 
         for c in self.children.iter_mut() {
             let mut bc = c.data_mut();
             if bc.visible {
-                bc.do_render(&self.world_transform, &self.world_scale, camera)
+                bc.do_render(&self.world_transform, &self.world_scale, camera, context)
             }
         }
     }
@@ -176,9 +179,12 @@ impl PlanarSceneNodeData {
     }
 
     /// Sets the width of the lines drawn for the objects contained by this node and its children.
+    ///
+    /// If `use_perspective` is true, width is in world units and scales with camera zoom.
+    /// If `use_perspective` is false, width is in screen pixels and stays constant.
     #[inline]
-    pub fn set_lines_width(&mut self, width: f32) {
-        self.apply_to_objects_mut(&mut |o| o.set_lines_width(width))
+    pub fn set_lines_width(&mut self, width: f32, use_perspective: bool) {
+        self.apply_to_objects_mut(&mut |o| o.set_lines_width(width, use_perspective))
     }
 
     /// Sets the color of the lines drawn for the objects contained by this node and its children.
@@ -188,9 +194,18 @@ impl PlanarSceneNodeData {
     }
 
     /// Sets the size of the points drawn for the objects contained by this node and its children.
+    ///
+    /// If `use_perspective` is true, size is in world units and scales with camera zoom.
+    /// If `use_perspective` is false, size is in screen pixels and stays constant.
     #[inline]
-    pub fn set_points_size(&mut self, size: f32) {
-        self.apply_to_objects_mut(&mut |o| o.set_points_size(size))
+    pub fn set_points_size(&mut self, size: f32, use_perspective: bool) {
+        self.apply_to_objects_mut(&mut |o| o.set_points_size(size, use_perspective))
+    }
+
+    /// Sets the color of the points drawn for the objects contained by this node and its children.
+    #[inline]
+    pub fn set_points_color(&mut self, color: Option<Point3<f32>>) {
+        self.apply_to_objects_mut(&mut |o| o.set_points_color(color))
     }
 
     /// Activates or deactivates the rendering of the surfaces of the objects contained by this node and its
@@ -322,7 +337,7 @@ impl PlanarSceneNodeData {
     }
 
     /// Sets the texture of the objects contained by this node and its children.
-    pub fn set_texture(&mut self, texture: Rc<Texture>) {
+    pub fn set_texture(&mut self, texture: Arc<Texture>) {
         self.apply_to_objects_mut(&mut |o| o.set_texture(texture.clone()))
     }
 
@@ -766,8 +781,8 @@ impl PlanarSceneNode {
     //
 
     /// Render the scene graph rooted by this node.
-    pub fn render(&mut self, camera: &mut dyn PlanarCamera) {
-        self.data_mut().render(camera)
+    pub fn render(&mut self, camera: &mut dyn PlanarCamera, context: &mut PlanarRenderContext) {
+        self.data_mut().render(camera, context)
     }
 
     /// Sets the material of the objects contained by this node and its children.
@@ -783,9 +798,12 @@ impl PlanarSceneNode {
     }
 
     /// Sets the width of the lines drawn for the objects contained by this node and its children.
+    ///
+    /// If `use_perspective` is true, width is in world units and scales with camera zoom.
+    /// If `use_perspective` is false, width is in screen pixels and stays constant.
     #[inline]
-    pub fn set_lines_width(&mut self, width: f32) {
-        self.data_mut().set_lines_width(width)
+    pub fn set_lines_width(&mut self, width: f32, use_perspective: bool) {
+        self.data_mut().set_lines_width(width, use_perspective)
     }
 
     /// Sets the color of the lines drawn for the objects contained by this node and its children.
@@ -795,9 +813,18 @@ impl PlanarSceneNode {
     }
 
     /// Sets the size of the points drawn for the objects contained by this node and its children.
+    ///
+    /// If `use_perspective` is true, size is in world units and scales with camera zoom.
+    /// If `use_perspective` is false, size is in screen pixels and stays constant.
     #[inline]
-    pub fn set_points_size(&mut self, size: f32) {
-        self.data_mut().set_points_size(size)
+    pub fn set_points_size(&mut self, size: f32, use_perspective: bool) {
+        self.data_mut().set_points_size(size, use_perspective)
+    }
+
+    /// Sets the color of the points drawn for the objects contained by this node and its children.
+    #[inline]
+    pub fn set_points_color(&mut self, color: Option<Point3<f32>>) {
+        self.data_mut().set_points_color(color)
     }
 
     /// Activates or deactivates the rendering of the surfaces of the objects contained by this node and its
@@ -915,7 +942,7 @@ impl PlanarSceneNode {
     }
 
     /// Sets the texture of the objects contained by this node and its children.
-    pub fn set_texture(&mut self, texture: Rc<Texture>) {
+    pub fn set_texture(&mut self, texture: Arc<Texture>) {
         self.data_mut().set_texture(texture)
     }
 

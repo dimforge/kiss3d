@@ -1,15 +1,12 @@
 //! A resource manager to load textures.
 
-use image::{self, imageops::FilterType, DynamicImage, GenericImageView};
+use image::{self, DynamicImage, GenericImageView};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::Arc;
 
-use crate::{
-    context::{Context, Texture},
-    verify,
-};
+use crate::context::Context;
 
 /// Wrapping parameters for a texture.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
@@ -22,64 +19,216 @@ pub enum TextureWrapping {
     ClampToEdge,
 }
 
-impl From<TextureWrapping> for u32 {
+impl From<TextureWrapping> for wgpu::AddressMode {
     #[inline]
     fn from(val: TextureWrapping) -> Self {
         match val {
-            TextureWrapping::Repeat => Context::REPEAT,
-            TextureWrapping::MirroredRepeat => Context::MIRRORED_REPEAT,
-            TextureWrapping::ClampToEdge => Context::CLAMP_TO_EDGE,
+            TextureWrapping::Repeat => wgpu::AddressMode::Repeat,
+            TextureWrapping::MirroredRepeat => wgpu::AddressMode::MirrorRepeat,
+            TextureWrapping::ClampToEdge => wgpu::AddressMode::ClampToEdge,
         }
     }
+}
+
+/// A GPU texture with its view and sampler.
+pub struct Texture {
+    /// The underlying wgpu texture.
+    pub texture: wgpu::Texture,
+    /// The texture view for binding.
+    pub view: wgpu::TextureView,
+    /// The sampler for the texture.
+    pub sampler: wgpu::Sampler,
+    /// Texture dimensions (width, height).
+    pub size: (u32, u32),
 }
 
 impl Texture {
-    /// Allocates a new texture on the gpu. The texture is not configured.
-    pub fn new() -> Rc<Texture> {
-        let tex = verify!(Context::get()
-            .create_texture()
-            .expect("Could not create texture."));
-        Rc::new(tex)
-    }
-
-    /// Sets the wrapping of this texture along the `s` texture coordinate.
-    pub fn set_wrapping_s(&mut self, wrapping: TextureWrapping) {
+    /// Creates a new texture with the given data.
+    pub fn new(
+        width: u32,
+        height: u32,
+        data: &[u8],
+        format: wgpu::TextureFormat,
+        address_mode: wgpu::AddressMode,
+        generate_mipmaps: bool,
+    ) -> Arc<Texture> {
         let ctxt = Context::get();
-        verify!(ctxt.bind_texture(Context::TEXTURE_2D, Some(self)));
-        let wrap: u32 = wrapping.into();
-        verify!(ctxt.tex_parameteri(Context::TEXTURE_2D, Context::TEXTURE_WRAP_S, wrap as i32));
-    }
 
-    /// Sets the wrapping of this texture along the `t` texture coordinate.
-    pub fn set_wrapping_t(&mut self, wrapping: TextureWrapping) {
-        let ctxt = Context::get();
-        verify!(ctxt.bind_texture(Context::TEXTURE_2D, Some(self)));
-        let wrap: u32 = wrapping.into();
-        verify!(ctxt.tex_parameteri(Context::TEXTURE_2D, Context::TEXTURE_WRAP_T, wrap as i32));
-    }
-}
+        let mip_level_count = if generate_mipmaps {
+            (width.max(height) as f32).log2().floor() as u32 + 1
+        } else {
+            1
+        };
 
-impl Drop for Texture {
-    fn drop(&mut self) {
-        unsafe {
-            let ctxt = Context::get();
-            if verify!(ctxt.is_texture(Some(self))) {
-                verify!(Context::get().delete_texture(Some(self)));
+        let texture = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+
+        let bytes_per_pixel = match format {
+            wgpu::TextureFormat::Rgba8UnormSrgb | wgpu::TextureFormat::Rgba8Unorm => 4,
+            _ => 4, // Default to 4
+        };
+
+        // Upload mip level 0
+        ctxt.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            data,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * bytes_per_pixel),
+                rows_per_image: Some(height),
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+
+        // Generate and upload remaining mip levels
+        if generate_mipmaps && mip_level_count > 1 {
+            let mut current_data = data.to_vec();
+            let mut current_width = width;
+            let mut current_height = height;
+
+            for mip_level in 1..mip_level_count {
+                let new_width = (current_width / 2).max(1);
+                let new_height = (current_height / 2).max(1);
+
+                let new_data =
+                    Self::downsample_rgba(&current_data, current_width, current_height);
+
+                ctxt.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    &new_data,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(new_width * bytes_per_pixel),
+                        rows_per_image: Some(new_height),
+                    },
+                    wgpu::Extent3d {
+                        width: new_width,
+                        height: new_height,
+                        depth_or_array_layers: 1,
+                    },
+                );
+
+                current_data = new_data;
+                current_width = new_width;
+                current_height = new_height;
             }
         }
+
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("texture_sampler"),
+            address_mode_u: address_mode,
+            address_mode_v: address_mode,
+            address_mode_w: address_mode,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: if generate_mipmaps {
+                wgpu::FilterMode::Linear
+            } else {
+                wgpu::FilterMode::Nearest
+            },
+            ..Default::default()
+        });
+
+        Arc::new(Texture {
+            texture,
+            view,
+            sampler,
+            size: (width, height),
+        })
+    }
+
+    /// Downsamples an RGBA image by half using box filtering.
+    fn downsample_rgba(data: &[u8], width: u32, height: u32) -> Vec<u8> {
+        let new_width = (width / 2).max(1);
+        let new_height = (height / 2).max(1);
+        let mut new_data = vec![0u8; (new_width * new_height * 4) as usize];
+
+        for y in 0..new_height {
+            for x in 0..new_width {
+                // Sample 2x2 block from source (or fewer pixels at edges)
+                let src_x = (x * 2) as usize;
+                let src_y = (y * 2) as usize;
+
+                let mut r = 0u32;
+                let mut g = 0u32;
+                let mut b = 0u32;
+                let mut a = 0u32;
+                let mut count = 0u32;
+
+                for dy in 0..2 {
+                    for dx in 0..2 {
+                        let sx = src_x + dx;
+                        let sy = src_y + dy;
+                        if sx < width as usize && sy < height as usize {
+                            let idx = (sy * width as usize + sx) * 4;
+                            r += data[idx] as u32;
+                            g += data[idx + 1] as u32;
+                            b += data[idx + 2] as u32;
+                            a += data[idx + 3] as u32;
+                            count += 1;
+                        }
+                    }
+                }
+
+                let dst_idx = ((y * new_width + x) * 4) as usize;
+                new_data[dst_idx] = (r / count) as u8;
+                new_data[dst_idx + 1] = (g / count) as u8;
+                new_data[dst_idx + 2] = (b / count) as u8;
+                new_data[dst_idx + 3] = (a / count) as u8;
+            }
+        }
+
+        new_data
+    }
+
+    /// Creates a default white 1x1 texture.
+    pub fn new_default() -> Arc<Texture> {
+        let white_pixel: [u8; 4] = [255, 255, 255, 255];
+        Self::new(
+            1,
+            1,
+            &white_pixel,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::AddressMode::Repeat,
+            false,
+        )
     }
 }
-
-// thread_local!(static KEY_TEXTURE_MANAGER: RefCell<Option<TextureManager>> = RefCell::new(Some(TextureManager::new())));
 
 /// The texture manager.
 ///
 /// It keeps a cache of already-loaded textures, and can load new textures.
 pub struct TextureManager {
-    default_texture: Rc<Texture>,
-    textures: HashMap<String, (Rc<Texture>, (u32, u32))>,
-    // If generate_mipmaps is true, mipmaps are generated for textures when they
-    // are loaded.
+    default_texture: Arc<Texture>,
+    textures: HashMap<String, Arc<Texture>>,
     generate_mipmaps: bool,
 }
 
@@ -92,48 +241,11 @@ impl Default for TextureManager {
 impl TextureManager {
     /// Creates a new texture manager.
     pub fn new() -> TextureManager {
-        let ctxt = Context::get();
-        let default_tex = Texture::new();
-        let default_tex_pixels: [u8; 12] = [255; 12];
-        verify!(ctxt.active_texture(Context::TEXTURE0));
-        verify!(ctxt.bind_texture(Context::TEXTURE_2D, Some(&*default_tex)));
-        // verify!(ctxt.tex_parameteri(Context::TEXTURE_2D, Context::TEXTURE_BASE_LEVEL, 0));
-        // verify!(ctxt.tex_parameteri(Context::TEXTURE_2D, Context::TEXTURE_MAX_LEVEL, 0));
-        verify!(ctxt.tex_parameteri(
-            Context::TEXTURE_2D,
-            Context::TEXTURE_WRAP_S,
-            Context::REPEAT as i32
-        ));
-        verify!(ctxt.tex_parameteri(
-            Context::TEXTURE_2D,
-            Context::TEXTURE_WRAP_T,
-            Context::REPEAT as i32
-        ));
-        verify!(ctxt.tex_parameteri(
-            Context::TEXTURE_2D,
-            Context::TEXTURE_MAG_FILTER,
-            Context::LINEAR as i32
-        ));
-        verify!(ctxt.tex_parameteri(
-            Context::TEXTURE_2D,
-            Context::TEXTURE_MIN_FILTER,
-            Context::LINEAR_MIPMAP_LINEAR as i32
-        ));
-
-        verify!(ctxt.tex_image2d(
-            Context::TEXTURE_2D,
-            0,
-            Context::RGB as i32,
-            1,
-            1,
-            0,
-            Context::RGB,
-            Some(&default_tex_pixels)
-        ));
+        let default_texture = Texture::new_default();
 
         TextureManager {
             textures: HashMap::new(),
-            default_texture: default_tex,
+            default_texture,
             generate_mipmaps: false,
         }
     }
@@ -145,151 +257,83 @@ impl TextureManager {
     }
 
     /// Gets the default, completely white, texture.
-    pub fn get_default(&self) -> Rc<Texture> {
+    pub fn get_default(&self) -> Arc<Texture> {
         self.default_texture.clone()
     }
 
     /// Get a texture with the specified name. Returns `None` if the texture is not registered.
-    pub fn get(&mut self, name: &str) -> Option<Rc<Texture>> {
-        self.textures.get(name).map(|t| t.0.clone())
+    pub fn get(&mut self, name: &str) -> Option<Arc<Texture>> {
+        self.textures.get(name).cloned()
     }
 
     /// Get a texture (and its size) with the specified name. Returns `None` if the texture is not registered.
-    pub fn get_with_size(&mut self, name: &str) -> Option<(Rc<Texture>, (u32, u32))> {
-        self.textures.get(name).map(|t| (t.0.clone(), t.1))
+    pub fn get_with_size(&mut self, name: &str) -> Option<(Arc<Texture>, (u32, u32))> {
+        self.textures.get(name).map(|t| (t.clone(), t.size))
     }
 
     /// Allocates a new texture that is not yet configured.
     ///
     /// If a texture with same name exists, nothing is created and the old texture is returned.
-    pub fn add_empty(&mut self, name: &str) -> Rc<Texture> {
+    pub fn add_empty(&mut self, name: &str) -> Arc<Texture> {
         match self.textures.entry(name.to_string()) {
-            Entry::Occupied(entry) => entry.into_mut().0.clone(),
-            Entry::Vacant(entry) => entry.insert((Texture::new(), (0, 0))).0.clone(),
+            Entry::Occupied(entry) => entry.into_mut().clone(),
+            Entry::Vacant(entry) => entry.insert(Texture::new_default()).clone(),
         }
     }
 
     /// Allocates a new texture read from a `DynamicImage` object.
     ///
     /// If a texture with same name exists, nothing is created and the old texture is returned.
-    pub fn add_image(&mut self, image: DynamicImage, name: &str) -> Rc<Texture> {
+    pub fn add_image(&mut self, image: DynamicImage, name: &str) -> Arc<Texture> {
         let generate_mipmaps = self.generate_mipmaps;
         self.textures
             .entry(name.to_string())
-            .or_insert_with(|| {
-                TextureManager::load_texture_into_context(image, generate_mipmaps).unwrap()
-            })
-            .0
+            .or_insert_with(|| TextureManager::load_texture_from_image(image, generate_mipmaps))
             .clone()
     }
 
     /// Allocates a new texture and tries to decode it from bytes array
     /// Panics if unable to do so
     /// If a texture with same name exists, nothing is created and the old texture is returned.
-    pub fn add_image_from_memory(&mut self, image_data: &[u8], name: &str) -> Rc<Texture> {
+    pub fn add_image_from_memory(&mut self, image_data: &[u8], name: &str) -> Arc<Texture> {
         self.add_image(
             image::load_from_memory(image_data).expect("Invalid data"),
             name,
         )
     }
 
-    /// Allocates a new texture read from a file.
-    fn load_texture_from_file(path: &Path, generate_mipmaps: bool) -> (Rc<Texture>, (u32, u32)) {
-        let image = image::open(path)
-            .unwrap_or_else(|e| panic!("Unable to load texture from file {:?}: {:?}", path, e));
-        TextureManager::load_texture_into_context(image, generate_mipmaps)
-            .unwrap_or_else(|e| panic!("Unable to upload texture {:?}: {:?}", path, e))
-    }
-
-    fn load_texture_into_context(
-        image: DynamicImage,
-        generate_mipmaps: bool,
-    ) -> Result<(Rc<Texture>, (u32, u32)), &'static str> {
-        let ctxt = Context::get();
-        let tex = Texture::new();
+    /// Loads a texture from a DynamicImage.
+    fn load_texture_from_image(image: DynamicImage, generate_mipmaps: bool) -> Arc<Texture> {
         let (width, height) = image.dimensions();
 
-        unsafe {
-            verify!(ctxt.active_texture(Context::TEXTURE0));
-            verify!(ctxt.bind_texture(Context::TEXTURE_2D, Some(&*tex)));
-            TextureManager::call_tex_image2d(&ctxt, &image, 0)?;
+        // Convert to RGBA8
+        let rgba_image = image.to_rgba8();
+        let pixels = rgba_image.as_raw();
 
-            let mut min_filter = Context::LINEAR;
-            if generate_mipmaps {
-                let (mut w, mut h) = (width, height);
-                let mut image = image;
-
-                for level in 1.. {
-                    if w == 1 && h == 1 {
-                        break;
-                    }
-                    w = w.div_ceil(2);
-                    h = h.div_ceil(2);
-                    image = image.resize_exact(w, h, FilterType::CatmullRom);
-                    TextureManager::call_tex_image2d(&ctxt, &image, level)?;
-                }
-                min_filter = Context::LINEAR_MIPMAP_LINEAR;
-            }
-
-            verify!(ctxt.tex_parameteri(
-                Context::TEXTURE_2D,
-                Context::TEXTURE_WRAP_S,
-                Context::CLAMP_TO_EDGE as i32
-            ));
-            verify!(ctxt.tex_parameteri(
-                Context::TEXTURE_2D,
-                Context::TEXTURE_WRAP_T,
-                Context::CLAMP_TO_EDGE as i32
-            ));
-            verify!(ctxt.tex_parameteri(
-                Context::TEXTURE_2D,
-                Context::TEXTURE_MIN_FILTER,
-                min_filter as i32,
-            ));
-            verify!(ctxt.tex_parameteri(
-                Context::TEXTURE_2D,
-                Context::TEXTURE_MAG_FILTER,
-                Context::LINEAR as i32
-            ));
-        }
-        Ok((tex, (width, height)))
+        Texture::new(
+            width,
+            height,
+            pixels,
+            wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::AddressMode::ClampToEdge,
+            generate_mipmaps,
+        )
     }
 
-    fn call_tex_image2d(
-        ctxt: &Context,
-        dynamic_image: &DynamicImage,
-        level: i32,
-    ) -> Result<(), &'static str> {
-        let (pixel_format, pixels) = match dynamic_image {
-            DynamicImage::ImageRgb8(image) => (Context::RGB, &image.as_raw()[..]),
-            DynamicImage::ImageRgba8(image) => (Context::RGBA, &image.as_raw()[..]),
-            _ => {
-                return Err("Failed to load texture, unsupported pixel format.");
-            }
-        };
-        let (width, height) = dynamic_image.dimensions();
-
-        verify!(ctxt.tex_image2d(
-            Context::TEXTURE_2D,
-            level,
-            pixel_format as i32,
-            width as i32,
-            height as i32,
-            0,
-            pixel_format,
-            Some(pixels)
-        ));
-        Ok(())
+    /// Allocates a new texture read from a file.
+    fn load_texture_from_file(path: &Path, generate_mipmaps: bool) -> Arc<Texture> {
+        let image = image::open(path)
+            .unwrap_or_else(|e| panic!("Unable to load texture from file {:?}: {:?}", path, e));
+        TextureManager::load_texture_from_image(image, generate_mipmaps)
     }
 
     /// Allocates a new texture read from a file. If a texture with same name exists, nothing is
     /// created and the old texture is returned.
-    pub fn add(&mut self, path: &Path, name: &str) -> Rc<Texture> {
+    pub fn add(&mut self, path: &Path, name: &str) -> Arc<Texture> {
         let generate_mipmaps = self.generate_mipmaps;
         self.textures
             .entry(name.to_string())
             .or_insert_with(|| TextureManager::load_texture_from_file(path, generate_mipmaps))
-            .0
             .clone()
     }
 

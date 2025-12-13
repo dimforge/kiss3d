@@ -9,7 +9,7 @@ use rand::random;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: primitives");
+    let mut window = Window::new("Kiss3d: primitives").await;
 
     let mut c = window.add_cube(1.0, 1.0, 1.0);
     let mut s = window.add_sphere(0.5);

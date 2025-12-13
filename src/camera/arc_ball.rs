@@ -1,6 +1,5 @@
 use crate::camera::Camera;
 use crate::event::{Action, Key, Modifiers, MouseButton, WindowEvent};
-use crate::resource::ShaderUniform;
 use crate::window::Canvas;
 use na::{self, Isometry3, Matrix4, Perspective3, Point3, Unit, UnitQuaternion, Vector2, Vector3};
 use std::f32;
@@ -541,14 +540,8 @@ impl Camera for ArcBall {
     }
 
     #[inline]
-    fn upload(
-        &self,
-        _: usize,
-        proj: &mut ShaderUniform<Matrix4<f32>>,
-        view: &mut ShaderUniform<Matrix4<f32>>,
-    ) {
-        proj.upload(&self.proj);
-        view.upload(&self.view);
+    fn view_transform_pair(&self, _pass: usize) -> (Isometry3<f32>, Matrix4<f32>) {
+        (self.view_transform(), self.proj)
     }
 
     fn transformation(&self) -> Matrix4<f32> {

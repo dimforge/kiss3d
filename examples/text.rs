@@ -7,7 +7,7 @@ use na::{Point2, Point3};
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: text");
+    let mut window = Window::new("Kiss3d: text").await;
     let font = Font::default();
 
     while window.render().await {

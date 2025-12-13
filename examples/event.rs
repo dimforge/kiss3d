@@ -6,7 +6,7 @@ use kiss3d::window::Window;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: events");
+    let mut window = Window::new("Kiss3d: events").await;
 
     while window.render().await {
         for mut event in window.events().iter() {

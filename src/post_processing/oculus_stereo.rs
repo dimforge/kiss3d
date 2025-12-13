@@ -1,26 +1,38 @@
 //! Post processing effect to support the Oculus Rift.
 
-use na::Vector2;
-
 use crate::context::Context;
-use crate::post_processing::post_processing_effect::PostProcessingEffect;
-use crate::resource::{
-    AllocationType, BufferType, Effect, GPUVec, RenderTarget, ShaderAttribute, ShaderUniform,
-};
-use crate::verify;
+use crate::post_processing::post_processing_effect::{PostProcessingContext, PostProcessingEffect};
+use crate::resource::RenderTarget;
+use bytemuck::{Pod, Zeroable};
+
+/// Vertex data for full-screen quad.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct QuadVertex {
+    position: [f32; 2],
+}
+
+/// Uniforms for Oculus stereo effect.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct OculusUniforms {
+    kappa_0: f32,
+    kappa_1: f32,
+    kappa_2: f32,
+    kappa_3: f32,
+    scale: [f32; 2],
+    scale_in: [f32; 2],
+}
 
 /// An post-processing effect to support the oculus rift.
 pub struct OculusStereo {
-    shader: Effect,
-    fbo_vertices: GPUVec<Vector2<f32>>,
-    fbo_texture: ShaderUniform<i32>,
-    v_coord: ShaderAttribute<Vector2<f32>>,
-    kappa_0: ShaderUniform<f32>,
-    kappa_1: ShaderUniform<f32>,
-    kappa_2: ShaderUniform<f32>,
-    kappa_3: ShaderUniform<f32>,
-    scale: ShaderUniform<Vector2<f32>>,
-    scale_in: ShaderUniform<Vector2<f32>>,
+    pipeline: wgpu::RenderPipeline,
+    texture_bind_group_layout: wgpu::BindGroupLayout,
+    #[allow(dead_code)]
+    uniform_bind_group_layout: wgpu::BindGroupLayout,
+    uniform_buffer: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
     w: f32,
     h: f32,
 }
@@ -34,35 +46,157 @@ impl Default for OculusStereo {
 impl OculusStereo {
     /// Creates a new OculusStereo post processing effect.
     pub fn new() -> OculusStereo {
-        let fbo_vertices: Vec<Vector2<f32>> = vec![
-            Vector2::new(-1.0, -1.0),
-            Vector2::new(1.0, -1.0),
-            Vector2::new(-1.0, 1.0),
-            Vector2::new(1.0, 1.0),
+        let ctxt = Context::get();
+
+        // Create bind group layout for texture + sampler
+        let texture_bind_group_layout =
+            ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("oculus_texture_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        // Create bind group layout for uniforms
+        let uniform_bind_group_layout =
+            ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("oculus_uniform_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("oculus_pipeline_layout"),
+            bind_group_layouts: &[&texture_bind_group_layout, &uniform_bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Load shader
+        let shader = ctxt.create_shader_module(
+            Some("oculus_shader"),
+            include_str!("../builtin/oculus.wgsl"),
+        );
+
+        // Vertex buffer layout
+        let vertex_buffer_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            }],
+        };
+
+        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("oculus_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_buffer_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: ctxt.surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Create full-screen quad vertices
+        let vertices = [
+            QuadVertex {
+                position: [-1.0, -1.0],
+            },
+            QuadVertex {
+                position: [1.0, -1.0],
+            },
+            QuadVertex {
+                position: [-1.0, 1.0],
+            },
+            QuadVertex {
+                position: [1.0, 1.0],
+            },
         ];
 
-        let mut fbo_vertices =
-            GPUVec::new(fbo_vertices, BufferType::Array, AllocationType::StaticDraw);
-        fbo_vertices.load_to_gpu();
-        fbo_vertices.unload_from_ram();
+        let vertex_buffer = ctxt.create_buffer_init(
+            Some("oculus_vertex_buffer"),
+            bytemuck::cast_slice(&vertices),
+            wgpu::BufferUsages::VERTEX,
+        );
 
-        let mut shader = Effect::new_from_str(VERTEX_SHADER, FRAGMENT_SHADER);
+        // Create uniform buffer
+        let uniform_buffer = ctxt.create_buffer_simple(
+            Some("oculus_uniform_buffer"),
+            std::mem::size_of::<OculusUniforms>() as u64,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
 
-        shader.use_program();
+        // Create uniform bind group
+        let uniform_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("oculus_uniform_bind_group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
 
         OculusStereo {
-            fbo_texture: shader.get_uniform("fbo_texture").unwrap(),
-            fbo_vertices,
-            v_coord: shader.get_attrib("v_coord").unwrap(),
-            kappa_0: shader.get_uniform("kappa_0").unwrap(),
-            kappa_1: shader.get_uniform("kappa_1").unwrap(),
-            kappa_2: shader.get_uniform("kappa_2").unwrap(),
-            kappa_3: shader.get_uniform("kappa_3").unwrap(),
-            scale: shader.get_uniform("Scale").unwrap(),
-            scale_in: shader.get_uniform("ScaleIn").unwrap(),
-            shader,
-            h: 1f32, // will be updated in the first update
-            w: 1f32, // ditto
+            pipeline,
+            texture_bind_group_layout,
+            uniform_bind_group_layout,
+            uniform_buffer,
+            uniform_bind_group,
+            vertex_buffer,
+            h: 1.0, // will be updated in the first update
+            w: 1.0, // ditto
         }
     }
 }
@@ -73,114 +207,72 @@ impl PostProcessingEffect for OculusStereo {
         self.h = h;
     }
 
-    fn draw(&mut self, target: &RenderTarget) {
+    fn draw(&mut self, target: &RenderTarget, context: &mut PostProcessingContext) {
         let ctxt = Context::get();
+
+        // Get the source texture and sampler from the render target
+        let (color_view, sampler) = match target {
+            RenderTarget::Offscreen(o) => (&o.color_view, &o.sampler),
+            RenderTarget::Screen => return, // Can't post-process the screen directly
+        };
+
+        // Compute effect parameters
         let scale_factor = 0.9f32; // firebox: in Oculus SDK example it's "1.0f/Distortion.Scale"
-        let aspect = (self.w / 2.0f32) / (self.h); // firebox: rift's "half screen aspect ratio"
+        let aspect = (self.w / 2.0) / self.h; // firebox: rift's "half screen aspect ratio"
 
-        self.shader.use_program();
+        let kappa = [1.0f32, 1.7f32, 0.7f32, 15.0f32];
 
-        self.v_coord.enable();
+        // Update uniforms
+        let uniforms = OculusUniforms {
+            kappa_0: kappa[0],
+            kappa_1: kappa[1],
+            kappa_2: kappa[2],
+            kappa_3: kappa[3],
+            scale: [0.5f32, aspect],
+            scale_in: [2.0f32 * scale_factor, 1.0f32 / aspect * scale_factor],
+        };
+        ctxt.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-        /*
-         * Configure the post-process effect.
-         */
-        let kappa = [1.0, 1.7, 0.7, 15.0];
-        self.kappa_0.upload(&kappa[0]);
-        self.kappa_1.upload(&kappa[1]);
-        self.kappa_2.upload(&kappa[2]);
-        self.kappa_3.upload(&kappa[3]);
-        self.scale.upload(&Vector2::new(0.5f32, aspect));
-        self.scale_in.upload(&Vector2::new(
-            2.0f32 * scale_factor,
-            1.0f32 / aspect * scale_factor,
-        ));
+        // Create texture bind group for this frame
+        let texture_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("oculus_texture_bind_group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
 
-        /*
-         * Finalize draw
-         */
-        verify!(ctxt.clear_color(0.0, 0.0, 0.0, 1.0));
-        verify!(ctxt.clear(Context::COLOR_BUFFER_BIT | Context::DEPTH_BUFFER_BIT));
+        // Create render pass to the output view
+        {
+            let mut render_pass = context
+                .encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("oculus_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: context.output_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
 
-        verify!(ctxt.bind_texture(Context::TEXTURE_2D, target.texture_id()));
-
-        self.fbo_texture.upload(&0);
-
-        self.v_coord.bind(&mut self.fbo_vertices);
-
-        verify!(ctxt.draw_arrays(Context::TRIANGLE_STRIP, 0, 4));
-
-        self.v_coord.disable();
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &texture_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.draw(0..4, 0..1);
+        }
     }
 }
-
-static VERTEX_SHADER: &str = "
-#version 100
-attribute vec2    v_coord;
-uniform sampler2D fbo_texture;
-varying vec2      f_texcoord;
-
-void main(void) {
-  gl_Position = vec4(v_coord, 0.0, 1.0);
-  f_texcoord  = (v_coord + 1.0) / 2.0;
-}
-";
-
-static FRAGMENT_SHADER: &str = "
-#version 100
-#ifdef GL_FRAGMENT_PRECISION_HIGH
-   precision highp float;
-#else
-   precision mediump float;
-#endif
-
-uniform sampler2D fbo_texture;
-uniform float kappa_0;
-uniform float kappa_1;
-uniform float kappa_2;
-uniform float kappa_3;
-const vec2 LensCenterLeft = vec2(0.25, 0.5);
-const vec2 LensCenterRight = vec2(0.75, 0.5);
-uniform vec2 Scale;
-uniform vec2 ScaleIn;
-
-varying vec2 v_coord;
-varying vec2 f_texcoord;
-
-void main()
-{
-    vec2 theta;
-    float rSq;
-    vec2 rvector;
-    vec2 tc;
-    bool left_eye;
-
-    if (f_texcoord.x < 0.5) {
-        left_eye = true;
-    } else {
-        left_eye = false;
-    }
-
-    if (left_eye) {
-        theta = (f_texcoord - LensCenterLeft) * ScaleIn;
-    } else {
-        theta = (f_texcoord - LensCenterRight) * ScaleIn;
-    }
-    rSq = theta.x * theta.x + theta.y * theta.y;
-    rvector = theta * (kappa_0 + kappa_1 * rSq + kappa_2 * rSq * rSq + kappa_3 * rSq * rSq * rSq);
-    if (left_eye) {
-        tc = LensCenterLeft + Scale * rvector;
-    } else {
-        tc = LensCenterRight + Scale * rvector;
-    }
-
-    //keep within bounds of texture
-    if ((left_eye && (tc.x < 0.0 || tc.x > 0.5)) ||
-        (!left_eye && (tc.x < 0.5 || tc.x > 1.0)) ||
-        tc.y < 0.0 || tc.y > 1.0) {
-        discard;
-    }
-
-    gl_FragColor = texture2D(fbo_texture, tc);
-}
-";

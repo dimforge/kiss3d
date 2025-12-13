@@ -1,10 +1,7 @@
 use std::sync::mpsc::Sender;
 
 use crate::event::{Action, Key, MouseButton, WindowEvent};
-#[cfg(not(target_arch = "wasm32"))]
-use crate::window::GLCanvas as CanvasImpl;
-#[cfg(target_arch = "wasm32")]
-use crate::window::WebGLCanvas as CanvasImpl;
+use crate::window::WgpuCanvas;
 use image::{GenericImage, Pixel};
 
 /// The possible number of samples for multisample anti-aliasing.
@@ -45,18 +42,18 @@ impl NumSamples {
 pub struct CanvasSetup {
     /// Is vsync enabled?
     pub vsync: bool,
-    /// Number of AA sambles.
+    /// Number of AA samples.
     pub samples: NumSamples,
 }
 
 /// An abstract structure representing a window for native applications, and a canvas for web applications.
 pub struct Canvas {
-    canvas: CanvasImpl,
+    canvas: WgpuCanvas,
 }
 
 impl Canvas {
-    /// Open a new window, and initialize the OpenGL/WebGL context.
-    pub fn open(
+    /// Open a new window, and initialize the wgpu context.
+    pub async fn open(
         title: &str,
         hide: bool,
         width: u32,
@@ -65,7 +62,7 @@ impl Canvas {
         out_events: Sender<WindowEvent>,
     ) -> Self {
         Canvas {
-            canvas: CanvasImpl::open(title, hide, width, height, canvas_setup, out_events),
+            canvas: WgpuCanvas::open(title, hide, width, height, canvas_setup, out_events).await,
         }
     }
 
@@ -74,9 +71,34 @@ impl Canvas {
         self.canvas.poll_events()
     }
 
-    /// If double-buffering is supported, swap the buffers.
-    pub fn swap_buffers(&mut self) {
-        self.canvas.swap_buffers()
+    /// Gets the current surface texture for rendering.
+    pub fn get_current_texture(&self) -> Result<wgpu::SurfaceTexture, wgpu::SurfaceError> {
+        self.canvas.get_current_texture()
+    }
+
+    /// Presents the current frame.
+    pub fn present(&self, frame: wgpu::SurfaceTexture) {
+        self.canvas.present(frame)
+    }
+
+    /// Gets the depth texture view for rendering.
+    pub fn depth_view(&self) -> &wgpu::TextureView {
+        self.canvas.depth_view()
+    }
+
+    /// Gets the MSAA texture view if MSAA is enabled.
+    pub fn msaa_view(&self) -> Option<&wgpu::TextureView> {
+        self.canvas.msaa_view()
+    }
+
+    /// Gets the sample count for MSAA.
+    pub fn sample_count(&self) -> u32 {
+        self.canvas.sample_count()
+    }
+
+    /// Gets the surface format.
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.canvas.surface_format()
     }
 
     /// The size of the window.
@@ -141,31 +163,15 @@ impl Canvas {
     pub fn get_key(&self, key: Key) -> Action {
         self.canvas.get_key(key)
     }
-}
 
-pub(crate) trait AbstractCanvas {
-    fn open(
-        title: &str,
-        hide: bool,
-        width: u32,
-        height: u32,
-        window_setup: Option<CanvasSetup>,
-        out_events: Sender<WindowEvent>,
-    ) -> Self;
-    fn poll_events(&mut self);
-    fn swap_buffers(&mut self);
-    fn size(&self) -> (u32, u32);
-    fn cursor_pos(&self) -> Option<(f64, f64)>;
-    fn scale_factor(&self) -> f64;
+    /// Copies the frame texture to the readback texture for later reading.
+    pub fn copy_frame_to_readback(&self, frame: &wgpu::SurfaceTexture) {
+        self.canvas.copy_frame_to_readback(frame)
+    }
 
-    fn set_title(&mut self, title: &str);
-    fn set_icon(&mut self, icon: impl GenericImage<Pixel = impl Pixel<Subpixel = u8>>);
-    fn set_cursor_grab(&self, grab: bool);
-    fn set_cursor_position(&self, x: f64, y: f64);
-    fn hide_cursor(&self, hide: bool);
-    fn hide(&mut self);
-    fn show(&mut self);
-
-    fn get_mouse_button(&self, button: MouseButton) -> Action;
-    fn get_key(&self, key: Key) -> Action;
+    /// Reads pixels from the readback texture into the provided buffer.
+    /// Returns RGB data (3 bytes per pixel).
+    pub fn read_pixels(&self, out: &mut Vec<u8>, x: usize, y: usize, width: usize, height: usize) {
+        self.canvas.read_pixels(out, x, y, width, height)
+    }
 }

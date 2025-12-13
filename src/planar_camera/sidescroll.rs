@@ -1,10 +1,8 @@
 use crate::event::{Action, MouseButton, WindowEvent};
 use crate::planar_camera::PlanarCamera;
-use crate::resource::ShaderUniform;
 use crate::window::Canvas;
 use na::{self, Matrix3, Point2, Translation2, Vector2};
 use num::Pow;
-use std::f32;
 
 /// A 2D camera that can be zoomed and panned.
 #[derive(Clone, Debug)]
@@ -161,13 +159,8 @@ impl PlanarCamera for Sidescroll {
     }
 
     #[inline]
-    fn upload(
-        &self,
-        proj: &mut ShaderUniform<Matrix3<f32>>,
-        view: &mut ShaderUniform<Matrix3<f32>>,
-    ) {
-        proj.upload(&self.scaled_proj);
-        view.upload(&self.view);
+    fn view_transform_pair(&self) -> (Matrix3<f32>, Matrix3<f32>) {
+        (self.view, self.scaled_proj)
     }
 
     fn update(&mut self, _: &Canvas) {}

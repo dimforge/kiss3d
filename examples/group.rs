@@ -7,7 +7,7 @@ use na::{Translation3, UnitQuaternion, Vector3};
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: cube");
+    let mut window = Window::new("Kiss3d: cube").await;
 
     let mut g1 = window.add_group();
     let mut g2 = window.add_group();

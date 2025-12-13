@@ -8,7 +8,7 @@ use na::{UnitQuaternion, Vector3};
 #[kiss3d::main]
 async fn main() {
     env_logger::init();
-    let mut window = Window::new("Kiss3d: cube");
+    let mut window = Window::new("Kiss3d: cube").await;
     let mut c = window.add_cube(1.0, 1.0, 1.0);
 
     c.set_color(1.0, 0.0, 0.0);

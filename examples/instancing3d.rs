@@ -9,7 +9,7 @@ use na::{Matrix3, Point3, UnitQuaternion, Vector3};
 #[kiss3d::main]
 async fn main() {
     env_logger::init();
-    let mut window = Window::new("Kiss3d: instancing 3D");
+    let mut window = Window::new("Kiss3d: instancing 3D").await;
     let mut c = window.add_cube(1.0, 1.0, 1.0);
     let mut instances = vec![];
 
@@ -19,15 +19,17 @@ async fn main() {
                 let ii = i as f32;
                 let jj = j as f32;
                 let kk = k as f32;
+                let color = [ii / 100.0, jj / 100.0, kk / 100.0 + 0.1, 1.0];
                 instances.push(InstanceData {
                     position: Point3::new(ii, jj, kk) * 1.5,
-                    color: [ii / 100.0, jj / 100.0, kk / 100.0 + 0.1, 1.0],
+                    color,
                     #[rustfmt::skip]
                     deformation: Matrix3::new(
                         1.0, ii * 0.004, kk * 0.004,
                         ii * 0.004, 1.0, jj * 0.004,
                         kk * 0.004, jj * 0.004, 1.0,
                     ),
+                    ..Default::default()
                 });
             }
         }

@@ -1,17 +1,14 @@
-//! A renderer for egui UI.
+//! A renderer for egui UI using wgpu.
 
-use crate::context::{Context, VertexArray};
+use crate::context::Context;
 use egui::{Context as EguiContext, RawInput};
-use egui_glow::Painter;
-use std::sync::Arc;
 
 /// Structure which manages the egui UI rendering.
 pub struct EguiRenderer {
     egui_ctx: EguiContext,
-    painter: Painter,
+    renderer: egui_wgpu::Renderer,
     shapes: Vec<egui::epaint::ClippedShape>,
     textures_delta: egui::TexturesDelta,
-    kiss3d_vao: Option<VertexArray>,
 }
 
 impl EguiRenderer {
@@ -48,43 +45,29 @@ impl EguiRenderer {
         // Not using 1.0 exactly so that draw_ui() gets a chance
         // to initialize it to the actual value (which might be 1)
         // and trigger a redraw.
-        // TODO: could we avoid this dummy pass completely instead?
         egui_ctx.set_pixels_per_point(0.987);
 
         // Run a dummy frame to initialize fonts with correct DPI
         let dummy_input = RawInput::default();
         egui_ctx.begin_pass(dummy_input);
-        let _ = egui_ctx.end_pass(); // This will initialize fonts
+        let _ = egui_ctx.end_pass();
 
         let ctxt = Context::get();
 
-        // Get the Arc<glow::Context> from the kiss3d Context
-        // kiss3d Context wraps a GLContext which has an Arc<glow::Context>
-        let glow_ctx = Arc::clone(&ctxt.ctxt.context);
-
-        // Use proper shader version for both desktop and web
-        #[cfg(target_arch = "wasm32")]
-        let shader_version = egui_glow::ShaderVersion::Es100;
-        #[cfg(not(target_arch = "wasm32"))]
-        let shader_version = egui_glow::ShaderVersion::Gl140; // OpenGL 3.1+, works on macOS
-
-        let painter = Painter::new(glow_ctx, "", Some(shader_version), false)
-            .expect("Failed to create egui painter");
-
-        // // Clear any GL errors that might have been generated during painter initialization
-        // let ctxt = Context::get();
-        // while ctxt.get_error() != 0 {}  // Clear all pending errors
-
-        // Create a VAO for kiss3d to use. We'll rebind this after egui renders.
-        let kiss3d_vao = ctxt.create_vertex_array();
-        ctxt.bind_vertex_array(kiss3d_vao.as_ref());
+        // Create the egui-wgpu renderer
+        let renderer = egui_wgpu::Renderer::new(
+            &ctxt.device,
+            ctxt.surface_format,
+            Some(Context::depth_format()),
+            1, // sample count
+            true, // dithering
+        );
 
         EguiRenderer {
             egui_ctx,
-            painter,
+            renderer,
             shapes: Vec::new(),
             textures_delta: Default::default(),
-            kiss3d_vao,
         }
     }
 
@@ -121,59 +104,90 @@ impl EguiRenderer {
     }
 
     /// Actually renders the UI.
-    pub fn render(&mut self, width: f32, height: f32, scale_factor: f32) {
-        use crate::verify;
-
+    pub fn render(
+        &mut self,
+        color_view: &wgpu::TextureView,
+        depth_view: &wgpu::TextureView,
+        width: u32,
+        height: u32,
+        scale_factor: f32,
+    ) {
         let ctxt = Context::get();
-
-        // Save and setup GL state for egui rendering
-        // egui_glow's painter should handle this, but we'll ensure proper state
-        verify!(ctxt.disable(Context::DEPTH_TEST));
-        verify!(ctxt.enable(Context::BLEND));
-        verify!(ctxt.blend_func_separate(
-            Context::ONE,
-            Context::ONE_MINUS_SRC_ALPHA,
-            Context::ONE,
-            Context::ONE_MINUS_SRC_ALPHA,
-        ));
-        verify!(ctxt.disable(Context::CULL_FACE));
-        verify!(ctxt.enable(Context::SCISSOR_TEST));
 
         // Update textures
         for (id, image_delta) in &self.textures_delta.set {
-            self.painter.set_texture(*id, image_delta);
+            self.renderer
+                .update_texture(&ctxt.device, &ctxt.queue, *id, image_delta);
         }
 
         // Prepare clipped primitives
         let clipped_primitives = self.egui_ctx.tessellate(self.shapes.clone(), scale_factor);
 
-        // Render
-        self.painter.paint_primitives(
-            [width as u32, height as u32],
-            scale_factor,
+        // Create screen descriptor
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [width, height],
+            pixels_per_point: scale_factor,
+        };
+
+        // Create our own encoder for egui rendering to avoid lifetime issues
+        let mut encoder = ctxt.create_command_encoder(Some("egui_command_encoder"));
+
+        // Update buffers
+        self.renderer.update_buffers(
+            &ctxt.device,
+            &ctxt.queue,
+            &mut encoder,
             &clipped_primitives,
+            &screen_descriptor,
         );
+
+        // Render
+        {
+            let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // egui-wgpu requires 'static lifetime, so we use forget_lifetime
+            // SAFETY: The render pass will be dropped before the encoder is finished,
+            // and we don't use the encoder for anything else after this.
+            let mut render_pass = render_pass.forget_lifetime();
+
+            self.renderer
+                .render(&mut render_pass, &clipped_primitives, &screen_descriptor);
+        }
+
+        // Submit the egui commands
+        ctxt.submit(std::iter::once(encoder.finish()));
 
         // Free textures
         for id in &self.textures_delta.free {
-            self.painter.free_texture(*id);
+            self.renderer.free_texture(id);
         }
 
         self.textures_delta.clear();
-
-        // Restore kiss3d's GL state after egui rendering
-        verify!(ctxt.enable(Context::DEPTH_TEST));
-        verify!(ctxt.disable(Context::BLEND));
-        verify!(ctxt.enable(Context::CULL_FACE));
-
-        // Restore kiss3d's VAO after egui rendering
-        // This is crucial because egui binds its own VAO, and kiss3d expects its VAO to be bound
-        ctxt.bind_vertex_array(self.kiss3d_vao.as_ref());
     }
 }
 
-impl Drop for EguiRenderer {
-    fn drop(&mut self) {
-        self.painter.destroy();
+impl Default for EguiRenderer {
+    fn default() -> Self {
+        Self::new()
     }
 }

@@ -6,7 +6,7 @@ use kiss3d::window::Window;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: add_remove");
+    let mut window = Window::new("Kiss3d: add_remove").await;
     let mut c = window.add_cube(1.0, 1.0, 1.0);
     let mut added = true;
 

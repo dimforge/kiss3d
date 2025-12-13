@@ -1,9 +1,7 @@
 use crate::event::WindowEvent;
 use crate::planar_camera::PlanarCamera;
-use crate::resource::ShaderUniform;
 use crate::window::Canvas;
-use na::{self, Matrix3, Point2, Vector2, Vector3};
-use std::f32;
+use na::{Matrix3, Point2, Vector2, Vector3};
 
 /// A camera that cannot move.
 #[derive(Clone, Debug)]
@@ -46,14 +44,8 @@ impl PlanarCamera for PlanarFixedView {
     }
 
     #[inline]
-    fn upload(
-        &self,
-        proj: &mut ShaderUniform<Matrix3<f32>>,
-        view: &mut ShaderUniform<Matrix3<f32>>,
-    ) {
-        let view_mat = Matrix3::identity();
-        proj.upload(&self.proj);
-        view.upload(&view_mat);
+    fn view_transform_pair(&self) -> (Matrix3<f32>, Matrix3<f32>) {
+        (Matrix3::identity(), self.proj)
     }
 
     fn update(&mut self, _: &Canvas) {}

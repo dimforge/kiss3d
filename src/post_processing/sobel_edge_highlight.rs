@@ -1,68 +1,245 @@
 //! A post-processing effect to highlight edges.
 
-use na::Vector2;
-
 use crate::context::Context;
-use crate::post_processing::post_processing_effect::PostProcessingEffect;
-use crate::resource::{
-    AllocationType, BufferType, Effect, GPUVec, RenderTarget, ShaderAttribute, ShaderUniform,
-};
-use crate::verify;
+use crate::post_processing::post_processing_effect::{PostProcessingContext, PostProcessingEffect};
+use crate::resource::RenderTarget;
+use bytemuck::{Pod, Zeroable};
+
+/// Vertex data for full-screen quad.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct QuadVertex {
+    position: [f32; 2],
+}
+
+/// Uniforms for Sobel edge highlight effect.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct SobelUniforms {
+    nx: f32, // 2.0 / width (pixel step in x)
+    ny: f32, // 2.0 / height (pixel step in y)
+    znear: f32,
+    zfar: f32,
+    threshold: f32,
+    _padding: [f32; 3],
+}
 
 /// Post processing effect which draws detected edges on top of the original buffer.
 pub struct SobelEdgeHighlight {
+    pipeline: wgpu::RenderPipeline,
+    color_bind_group_layout: wgpu::BindGroupLayout,
+    depth_bind_group_layout: wgpu::BindGroupLayout,
+    #[allow(dead_code)]
+    uniform_bind_group_layout: wgpu::BindGroupLayout,
+    uniform_buffer: wgpu::Buffer,
+    uniform_bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    depth_sampler: wgpu::Sampler,
     shiftx: f32,
     shifty: f32,
     zn: f32,
     zf: f32,
     threshold: f32,
-    shader: Effect,
-    gl_nx: ShaderUniform<f32>,
-    gl_ny: ShaderUniform<f32>,
-    gl_fbo_depth: ShaderUniform<i32>,
-    gl_fbo_texture: ShaderUniform<i32>,
-    gl_znear: ShaderUniform<f32>,
-    gl_zfar: ShaderUniform<f32>,
-    gl_threshold: ShaderUniform<f32>,
-    gl_v_coord: ShaderAttribute<Vector2<f32>>,
-    gl_fbo_vertices: GPUVec<Vector2<f32>>,
 }
 
 impl SobelEdgeHighlight {
     /// Creates a new SobelEdgeHighlight post processing effect.
     pub fn new(threshold: f32) -> SobelEdgeHighlight {
-        let fbo_vertices: Vec<Vector2<f32>> = vec![
-            Vector2::new(-1.0, -1.0),
-            Vector2::new(1.0, -1.0),
-            Vector2::new(-1.0, 1.0),
-            Vector2::new(1.0, 1.0),
+        let ctxt = Context::get();
+
+        // Create bind group layout for color texture + sampler
+        let color_bind_group_layout =
+            ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sobel_color_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        // Create bind group layout for depth texture + sampler
+        let depth_bind_group_layout =
+            ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sobel_depth_bind_group_layout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                        count: None,
+                    },
+                ],
+            });
+
+        // Create bind group layout for uniforms
+        let uniform_bind_group_layout =
+            ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("sobel_uniform_bind_group_layout"),
+                entries: &[wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }],
+            });
+
+        let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("sobel_pipeline_layout"),
+            bind_group_layouts: &[
+                &color_bind_group_layout,
+                &depth_bind_group_layout,
+                &uniform_bind_group_layout,
+            ],
+            push_constant_ranges: &[],
+        });
+
+        // Load shader
+        let shader =
+            ctxt.create_shader_module(Some("sobel_shader"), include_str!("../builtin/sobel.wgsl"));
+
+        // Vertex buffer layout
+        let vertex_buffer_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            }],
+        };
+
+        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("sobel_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_buffer_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: ctxt.surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Create full-screen quad vertices
+        let vertices = [
+            QuadVertex {
+                position: [-1.0, -1.0],
+            },
+            QuadVertex {
+                position: [1.0, -1.0],
+            },
+            QuadVertex {
+                position: [-1.0, 1.0],
+            },
+            QuadVertex {
+                position: [1.0, 1.0],
+            },
         ];
 
-        let mut fbo_vertices =
-            GPUVec::new(fbo_vertices, BufferType::Array, AllocationType::StaticDraw);
-        fbo_vertices.load_to_gpu();
-        fbo_vertices.unload_from_ram();
+        let vertex_buffer = ctxt.create_buffer_init(
+            Some("sobel_vertex_buffer"),
+            bytemuck::cast_slice(&vertices),
+            wgpu::BufferUsages::VERTEX,
+        );
 
-        let mut shader = Effect::new_from_str(VERTEX_SHADER, FRAGMENT_SHADER);
+        // Create uniform buffer
+        let uniform_buffer = ctxt.create_buffer_simple(
+            Some("sobel_uniform_buffer"),
+            std::mem::size_of::<SobelUniforms>() as u64,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
 
-        shader.use_program();
+        // Create uniform bind group
+        let uniform_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sobel_uniform_bind_group"),
+            layout: &uniform_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Create sampler for depth texture (must use Nearest for NonFiltering sampler type)
+        let depth_sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("sobel_depth_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            compare: None,
+            ..Default::default()
+        });
 
         SobelEdgeHighlight {
+            pipeline,
+            color_bind_group_layout,
+            depth_bind_group_layout,
+            uniform_bind_group_layout,
+            uniform_buffer,
+            uniform_bind_group,
+            vertex_buffer,
+            depth_sampler,
             shiftx: 0.0,
             shifty: 0.0,
             zn: 0.0,
             zf: 0.0,
             threshold,
-            gl_nx: shader.get_uniform("nx").unwrap(),
-            gl_ny: shader.get_uniform("ny").unwrap(),
-            gl_fbo_depth: shader.get_uniform("fbo_depth").unwrap(),
-            gl_fbo_texture: shader.get_uniform("fbo_texture").unwrap(),
-            gl_znear: shader.get_uniform("znear").unwrap(),
-            gl_zfar: shader.get_uniform("zfar").unwrap(),
-            gl_threshold: shader.get_uniform("threshold").unwrap(),
-            gl_v_coord: shader.get_attrib("v_coord").unwrap(),
-            gl_fbo_vertices: fbo_vertices,
-            shader,
         }
     }
 }
@@ -75,125 +252,83 @@ impl PostProcessingEffect for SobelEdgeHighlight {
         self.zf = zfar;
     }
 
-    fn draw(&mut self, target: &RenderTarget) {
+    fn draw(&mut self, target: &RenderTarget, context: &mut PostProcessingContext) {
         let ctxt = Context::get();
-        self.gl_v_coord.enable();
 
-        /*
-         * Finalize draw
-         */
-        verify!(ctxt.clear(Context::COLOR_BUFFER_BIT | Context::DEPTH_BUFFER_BIT));
+        // Get the source textures and sampler from the render target
+        let (color_view, depth_view, sampler) = match target {
+            RenderTarget::Offscreen(o) => (&o.color_view, &o.depth_view, &o.sampler),
+            RenderTarget::Screen => return, // Can't post-process the screen directly
+        };
 
-        self.shader.use_program();
+        // Update uniforms
+        let uniforms = SobelUniforms {
+            nx: self.shiftx,
+            ny: self.shifty,
+            znear: self.zn,
+            zfar: self.zf,
+            threshold: self.threshold,
+            _padding: [0.0; 3],
+        };
+        ctxt.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
 
-        self.gl_threshold.upload(&self.threshold);
-        self.gl_nx.upload(&self.shiftx);
-        self.gl_ny.upload(&self.shifty);
-        self.gl_znear.upload(&self.zn);
-        self.gl_zfar.upload(&self.zf);
+        // Create color texture bind group for this frame
+        let color_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sobel_color_bind_group"),
+            layout: &self.color_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
 
-        verify!(ctxt.active_texture(Context::TEXTURE0));
-        verify!(ctxt.bind_texture(Context::TEXTURE_2D, target.texture_id()));
+        // Create depth texture bind group for this frame
+        let depth_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("sobel_depth_bind_group"),
+            layout: &self.depth_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(depth_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.depth_sampler),
+                },
+            ],
+        });
 
-        self.gl_fbo_texture.upload(&0);
+        // Create render pass to the output view
+        {
+            let mut render_pass = context
+                .encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("sobel_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: context.output_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
 
-        verify!(ctxt.active_texture(Context::TEXTURE1));
-        verify!(ctxt.bind_texture(
-            Context::TEXTURE_2D,
-            target.depth_id().and_then(|id| id.as_ref().left())
-        ));
-
-        self.gl_fbo_depth.upload(&1);
-
-        self.gl_v_coord.bind(&mut self.gl_fbo_vertices);
-
-        verify!(ctxt.draw_arrays(Context::TRIANGLE_STRIP, 0, 4));
-
-        self.gl_v_coord.disable();
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &color_bind_group, &[]);
+            render_pass.set_bind_group(1, &depth_bind_group, &[]);
+            render_pass.set_bind_group(2, &self.uniform_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.draw(0..4, 0..1);
+        }
     }
 }
-
-static VERTEX_SHADER: &str = "#version 100
-    attribute vec2    v_coord;
-    uniform sampler2D fbo_depth;
-    uniform sampler2D fbo_texture;
-    uniform float     nx;
-    uniform float     ny;
-    uniform float     znear;
-    uniform float     zfar;
-    uniform float     threshold;
-    varying vec2      f_texcoord;
-
-    void main(void) {
-        gl_Position = vec4(v_coord, 0.0, 1.0);
-        f_texcoord  = (v_coord + 1.0) / 2.0;
-    }";
-
-static FRAGMENT_SHADER: &str = "#version 100
-#ifdef GL_FRAGMENT_PRECISION_HIGH
-   precision highp float;
-#else
-   precision mediump float;
-#endif
-
-    uniform sampler2D fbo_depth;
-    uniform sampler2D fbo_texture;
-    uniform float     nx;
-    uniform float     ny;
-    uniform float     znear;
-    uniform float     zfar;
-    uniform float     threshold;
-    varying vec2      f_texcoord;
-
-    float lin_depth(vec2 uv) {
-        float nlin_depth = texture2D(fbo_depth, uv).x;
-
-        return znear * zfar / ((nlin_depth * (zfar - znear)) - zfar);
-    }
-
-    void main(void) {
-        vec2 texcoord  = f_texcoord;
-
-        float KX[9];
-        KX[0] = 1.0; KX[1] = 0.0; KX[2] = -1.0;
-        KX[3] = 2.0; KX[4] = 0.0; KX[5] = -2.0;
-        KX[6] = 1.0; KX[7] = 0.0; KX[8] = -1.0;
-
-        float gx = 0.0;
-
-        for (int i = -1; i < 2; ++i) {
-            for (int j = -1; j < 2; ++j) {
-                int off = (i + 1) * 3 + j + 1;
-                gx += KX[off] * lin_depth(vec2(f_texcoord.x + float(i) * nx, f_texcoord.y + float(j) * ny));
-            }
-        }
-
-        float KY[9];
-        KY[0] = 1.0;  KY[1] = 2.0;  KY[2] = 1.0;
-        KY[3] = 0.0;  KY[4] = 0.0;  KY[5] = 0.0;
-        KY[6] = -1.0; KY[7] = -2.0; KY[8] = -1.0;
-
-        float gy = 0.0;
-
-        for (int i = -1; i < 2; ++i) {
-            for (int j = -1; j < 2; ++j) {
-                int off = (i + 1) * 3 + j + 1;
-                gy += KY[off] * lin_depth(vec2(f_texcoord.x + float(i) * nx, f_texcoord.y + float(j) * ny));
-            }
-        }
-
-        float gradient = sqrt(gx * gx + gy * gy);
-
-        float edge;
-
-        if (gradient > threshold) {
-            edge = 0.0;
-        }
-        else {
-            edge = 1.0 - gradient / threshold;
-        }
-
-        vec4 color = texture2D(fbo_texture, texcoord);
-
-        gl_FragColor = vec4(edge * color.xyz, 1.0);
-    }";

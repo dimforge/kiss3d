@@ -8,7 +8,7 @@ use rand::random;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: quad");
+    let mut window = Window::new("Kiss3d: quad").await;
 
     let mut c = window.add_quad(5.0, 4.0, 100, 100);
 

@@ -1,5 +1,4 @@
 use crate::event::WindowEvent;
-use crate::resource::ShaderUniform;
 use crate::window::Canvas;
 use na::{Isometry3, Matrix4, Point2, Point3, Point4, Vector2, Vector3};
 
@@ -91,20 +90,20 @@ pub trait Camera {
     /// * `canvas` - Reference to the rendering canvas
     fn update(&mut self, canvas: &Canvas);
 
-    /// Uploads the camera's view and projection matrices to the GPU.
+    /// Returns the view and projection matrices for a given rendering pass.
     ///
-    /// This can be called multiple times during the render loop for multi-pass rendering.
+    /// This method provides the matrices that materials use to transform objects
+    /// for rendering. For single-pass cameras, pass 0 is typically the only pass.
+    /// For stereo cameras, pass 0 might be the left eye and pass 1 the right eye.
     ///
     /// # Arguments
     /// * `pass` - The current rendering pass index
-    /// * `proj` - Shader uniform for the projection matrix
-    /// * `view` - Shader uniform for the view matrix
-    fn upload(
-        &self,
-        pass: usize,
-        proj: &mut ShaderUniform<Matrix4<f32>>,
-        view: &mut ShaderUniform<Matrix4<f32>>,
-    );
+    ///
+    /// # Returns
+    /// A tuple `(view_transform, projection_matrix)` where:
+    /// - `view_transform` is the camera's view transformation (world → camera space)
+    /// - `projection_matrix` is the projection matrix (camera space → NDC)
+    fn view_transform_pair(&self, pass: usize) -> (Isometry3<f32>, Matrix4<f32>);
 
     /// Returns the number of rendering passes required by this camera.
     ///

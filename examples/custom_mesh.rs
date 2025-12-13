@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: custom_mesh");
+    let mut window = Window::new("Kiss3d: custom_mesh").await;
 
     let a = Point3::new(-1.0, -1.0, 0.0);
     let b = Point3::new(1.0, -1.0, 0.0);

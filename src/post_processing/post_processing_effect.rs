@@ -2,28 +2,19 @@
 
 use crate::resource::RenderTarget;
 
+/// Context passed to post-processing effects during draw.
+pub struct PostProcessingContext<'a> {
+    /// The command encoder for this frame.
+    pub encoder: &'a mut wgpu::CommandEncoder,
+    /// The output color view to render to.
+    pub output_view: &'a wgpu::TextureView,
+}
+
 /// Trait for implementing custom post-processing effects.
 ///
 /// Post-processing effects are applied after the 3D scene has been rendered to a texture.
 /// Only one post-processing effect can be active at a time. Implement this trait to create
 /// custom effects like bloom, blur, edge detection, etc.
-///
-/// # Example
-/// ```no_run
-/// # use kiss3d::post_processing::PostProcessingEffect;
-/// # use kiss3d::resource::RenderTarget;
-/// struct MyEffect;
-///
-/// impl PostProcessingEffect for MyEffect {
-///     fn update(&mut self, dt: f32, w: f32, h: f32, znear: f32, zfar: f32) {
-///         // Update effect parameters based on time and screen dimensions
-///     }
-///
-///     fn draw(&mut self, target: &RenderTarget) {
-///         // Apply the effect by rendering a full-screen quad with custom shader
-///     }
-/// }
-/// ```
 pub trait PostProcessingEffect {
     /// Updates the post-processing effect state.
     ///
@@ -44,5 +35,6 @@ pub trait PostProcessingEffect {
     ///
     /// # Arguments
     /// * `target` - The render target containing the rendered scene (color and depth textures)
-    fn draw(&mut self, target: &RenderTarget);
+    /// * `context` - The post-processing context with encoder and output view
+    fn draw(&mut self, target: &RenderTarget, context: &mut PostProcessingContext);
 }

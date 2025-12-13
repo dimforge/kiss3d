@@ -6,14 +6,14 @@ pub use inner::*;
 mod inner {
     /// Defaults to `u16`. If you need more than 65535 vertices, enable the `vertex_index_u32` feature.
     pub type VertexIndex = u16;
-    /// Tells the glow Context what type is used as the vertex index.
-    pub const VERTEX_INDEX_TYPE: u32 = crate::context::Context::UNSIGNED_SHORT;
+    /// The wgpu IndexFormat for the vertex index type.
+    pub const VERTEX_INDEX_FORMAT: wgpu::IndexFormat = wgpu::IndexFormat::Uint16;
 }
 
 #[cfg(feature = "vertex_index_u32")]
 mod inner {
     /// The type used for vertex indices. The feature `vertex_index_u32` enables `u32` indices.
     pub type VertexIndex = u32;
-    /// Tells the glow Context what type is used as the vertex index.
-    pub const VERTEX_INDEX_TYPE: u32 = crate::context::Context::UNSIGNED_INT;
+    /// The wgpu IndexFormat for the vertex index type.
+    pub const VERTEX_INDEX_FORMAT: wgpu::IndexFormat = wgpu::IndexFormat::Uint32;
 }

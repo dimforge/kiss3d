@@ -17,7 +17,7 @@ async fn main() {
 #[cfg(feature = "egui")]
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: egui UI");
+    let mut window = Window::new("Kiss3d: egui UI").await;
     window.set_background_color(0.9, 0.9, 0.9);
 
     let mut cube = window.add_cube(0.2, 0.2, 0.2);

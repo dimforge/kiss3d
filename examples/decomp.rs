@@ -47,7 +47,7 @@ async fn main() {
     /*
      * Create the window.
      */
-    let mut window = Window::new("Kiss3d: convex decomposition");
+    let mut window = Window::new("Kiss3d: convex decomposition").await;
 
     /*
      * Convex decomposition.

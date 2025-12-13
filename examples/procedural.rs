@@ -13,7 +13,7 @@ use std::path::Path;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: procedural");
+    let mut window = Window::new("Kiss3d: procedural").await;
 
     /*
      * A cube.
@@ -21,6 +21,7 @@ async fn main() {
     let cube = kiss3d::procedural::cuboid(&Vector3::new(0.7f32, 0.2, 0.4));
     let mut c = window.add_render_mesh(cube, Vector3::from_element(1.0));
     c.append_translation(&Translation3::new(1.0, 0.0, 0.0));
+    #[cfg(not(target_arch = "wasm32"))]
     c.set_texture_from_file(Path::new("./examples/media/kitten.png"), "kitten");
 
     /*
@@ -28,6 +29,7 @@ async fn main() {
      */
     let sphere = kiss3d::procedural::sphere(0.4f32, 20, 20, true);
     let mut s = window.add_render_mesh(sphere, Vector3::from_element(1.0));
+    #[cfg(not(target_arch = "wasm32"))]
     s.set_texture_with_name("kitten");
 
     /*
@@ -95,7 +97,7 @@ async fn main() {
     control_polyhedra_gfx.append_translation(&Translation3::new(-1.5, -1.5, 0.0));
     control_polyhedra_gfx.set_color(0.0, 0.0, 1.0);
     control_polyhedra_gfx.set_surface_rendering_activation(false);
-    control_polyhedra_gfx.set_lines_width(2.0);
+    control_polyhedra_gfx.set_lines_width(2.0, false);
 
     let mut control_points_gfx = window.add_mesh(
         control_polyhedra_gfx.data().get_object().mesh().clone(),
@@ -104,7 +106,7 @@ async fn main() {
     control_points_gfx.append_translation(&Translation3::new(-1.5, -1.5, 0.0));
     control_points_gfx.set_color(1.0, 0.0, 0.0);
     control_points_gfx.set_surface_rendering_activation(false);
-    control_points_gfx.set_points_size(10.0);
+    control_points_gfx.set_points_size(10.0, false);
 
     /*
      * Path stroke.
@@ -153,12 +155,12 @@ async fn main() {
     );
     mhull.append_translation(&Translation3::new(0.0, 2.0, -1.0));
     mhull.set_color(0.0, 1.0, 0.0);
-    mhull.set_lines_width(2.0);
+    mhull.set_lines_width(2.0, false);
     mhull.set_surface_rendering_activation(false);
-    mhull.set_points_size(10.0);
+    mhull.set_points_size(10.0, false);
     mpts.set_color(0.0, 0.0, 1.0);
     mpts.append_translation(&Translation3::new(0.0, 2.0, -1.0));
-    mpts.set_points_size(2.0);
+    mpts.set_points_size(2.0, false);
     mpts.set_surface_rendering_activation(false);
 
     /*
@@ -191,6 +193,7 @@ fn draw_polyline(window: &mut Window, polyline: &[Point2<f32>], points: &[Point2
             &Point3::new(pt[0].x, pt[0].y, 0.0),
             &Point3::new(pt[1].x, pt[1].y, 0.0),
             &Point3::new(0.0, 1.0, 0.0),
+            1.0,
         );
     }
 
@@ -199,13 +202,14 @@ fn draw_polyline(window: &mut Window, polyline: &[Point2<f32>], points: &[Point2
         &Point3::new(polyline[0].x, polyline[0].y, 0.0),
         &Point3::new(polyline[last].x, polyline[last].y, 0.0),
         &Point3::new(0.0, 1.0, 0.0),
+        1.0,
     );
 
     for pt in points.iter() {
-        window.draw_point(&Point3::new(pt.x, pt.y, 0.0), &Point3::new(0.0, 0.0, 1.0));
+        window.draw_point(&Point3::new(pt.x, pt.y, 0.0), &Point3::new(0.0, 0.0, 1.0), 4.0);
     }
 
     for pt in polyline.iter() {
-        window.draw_point(&Point3::new(pt.x, pt.y, 0.0), &Point3::new(1.0, 0.0, 0.0));
+        window.draw_point(&Point3::new(pt.x, pt.y, 0.0), &Point3::new(1.0, 0.0, 0.0), 4.0);
     }
 }

@@ -7,7 +7,7 @@ use na::UnitComplex;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: rectangle");
+    let mut window = Window::new("Kiss3d: rectangle").await;
     let mut c = window.add_rectangle(100.0, 150.0);
 
     c.set_color(1.0, 0.0, 0.0);

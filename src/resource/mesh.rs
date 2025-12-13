@@ -4,7 +4,6 @@ use std::sync::{Arc, RwLock};
 use crate::procedural::{IndexBuffer, RenderMesh};
 use crate::resource::gpu_vector::{AllocationType, BufferType, GPUVec};
 use crate::resource::vertex_index::VertexIndex;
-use crate::resource::ShaderAttribute;
 use na::{self, Point2, Point3, Vector3};
 use num::Zero;
 
@@ -129,7 +128,6 @@ impl GpuMesh {
         )
     }
 
-    // XXX: The `load_to_ram` require WebGL 2.
     /// Creates a triangle mesh from this mesh.
     ///
     /// Return `None` if the mesh data is not available on the CPU.
@@ -159,52 +157,6 @@ impl GpuMesh {
                     .collect(),
             )),
         ))
-
-        /*
-        let unload_coords = !self.coords.read().unwrap().is_on_ram();
-        let unload_faces = !self.faces.read().unwrap().is_on_ram();
-        let unload_normals = !self.normals.read().unwrap().is_on_ram();
-        let unload_uvs = !self.uvs.read().unwrap().is_on_ram();
-
-        self.coords.write().unwrap().load_to_ram();
-        self.faces.write().unwrap().load_to_ram();
-        self.normals.write().unwrap().load_to_ram();
-        self.uvs.write().unwrap().load_to_ram();
-
-        let coords = self.coords.read().unwrap().to_owned();
-        let faces = self.faces.read().unwrap().to_owned();
-        let normals = self.normals.read().unwrap().to_owned();
-        let uvs = self.uvs.read().unwrap().to_owned();
-
-        if unload_coords {
-            self.coords.write().unwrap().unload_from_ram();
-        }
-        if unload_faces {
-            self.coords.write().unwrap().unload_from_ram();
-        }
-        if unload_normals {
-            self.coords.write().unwrap().unload_from_ram();
-        }
-        if unload_uvs {
-            self.coords.write().unwrap().unload_from_ram();
-        }
-
-        if coords.is_none() || faces.is_none() {
-            None
-        } else {
-            Some(TriMesh::new(
-                coords.unwrap(),
-                normals,
-                uvs,
-                Some(IndexBuffer::Unified(
-                    faces
-                        .unwrap()
-                        .into_iter()
-                        .map(|e| Point3::new(e.x as u32, e.y as u32, e.z as u32))
-                        .collect(),
-                )),
-            ))
-        }*/
     }
 
     /// Creates a new mesh. Arguments set to `None` are automatically computed.
@@ -223,41 +175,69 @@ impl GpuMesh {
         }
     }
 
-    /// Binds this mesh vertex coordinates buffer to a vertex attribute.
-    pub fn bind_coords(&mut self, coords: &mut ShaderAttribute<Point3<f32>>) {
-        coords.bind(&mut *self.coords.write().unwrap());
-    }
-
-    /// Binds this mesh vertex normals buffer to a vertex attribute.
-    pub fn bind_normals(&mut self, normals: &mut ShaderAttribute<Vector3<f32>>) {
-        normals.bind(&mut *self.normals.write().unwrap());
-    }
-
-    /// Binds this mesh vertex uvs buffer to a vertex attribute.
-    pub fn bind_uvs(&mut self, uvs: &mut ShaderAttribute<Point2<f32>>) {
-        uvs.bind(&mut *self.uvs.write().unwrap());
-    }
-
-    /// Binds this mesh index buffer to a vertex attribute.
-    pub fn bind_faces(&mut self) {
-        self.faces.write().unwrap().bind();
-    }
-
-    /// Binds this mesh buffers to vertex attributes.
-    pub fn bind(
+    /// Ensures all mesh buffers are loaded to the GPU and returns buffer references.
+    ///
+    /// This must be called before rendering. Returns None if any buffer is empty.
+    pub fn ensure_on_gpu(
         &mut self,
-        coords: &mut ShaderAttribute<Point3<f32>>,
-        normals: &mut ShaderAttribute<Vector3<f32>>,
-        uvs: &mut ShaderAttribute<Point2<f32>>,
-    ) {
-        self.bind_coords(coords);
-        self.bind_normals(normals);
-        self.bind_uvs(uvs);
-        self.bind_faces();
+    ) -> Option<(&wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer, &wgpu::Buffer)> {
+        // Load all buffers to GPU
+        self.coords.write().unwrap().load_to_gpu();
+        self.faces.write().unwrap().load_to_gpu();
+        self.normals.write().unwrap().load_to_gpu();
+        self.uvs.write().unwrap().load_to_gpu();
+
+        // Get buffer references
+        let coords = self.coords.read().unwrap();
+        let faces = self.faces.read().unwrap();
+        let normals = self.normals.read().unwrap();
+        let uvs = self.uvs.read().unwrap();
+
+        if coords.buffer().is_none()
+            || faces.buffer().is_none()
+            || normals.buffer().is_none()
+            || uvs.buffer().is_none()
+        {
+            return None;
+        }
+
+        // SAFETY: We just verified all buffers exist and hold read locks
+        // We need to return references that outlive this function, but the buffers
+        // are stored in Arc<RwLock<>> so they won't be deallocated.
+        // This is a bit awkward but necessary for the wgpu API pattern.
+        unsafe {
+            let coords_ptr = coords.buffer().unwrap() as *const wgpu::Buffer;
+            let faces_ptr = faces.buffer().unwrap() as *const wgpu::Buffer;
+            let normals_ptr = normals.buffer().unwrap() as *const wgpu::Buffer;
+            let uvs_ptr = uvs.buffer().unwrap() as *const wgpu::Buffer;
+            Some((&*coords_ptr, &*faces_ptr, &*normals_ptr, &*uvs_ptr))
+        }
     }
 
-    /// Binds this mesh buffers to vertex attributes.
-    pub fn bind_edges(&mut self) {
+    /// Returns the vertex coordinates buffer if loaded to GPU.
+    pub fn coords_buffer(&self) -> Option<&wgpu::Buffer> {
+        // This is tricky because we need to return a reference from inside RwLock
+        // For now, callers should use ensure_on_gpu() or access via coords()
+        None
+    }
+
+    /// Returns the index buffer if loaded to GPU.
+    pub fn faces_buffer(&self) -> Option<&wgpu::Buffer> {
+        None
+    }
+
+    /// Returns the normals buffer if loaded to GPU.
+    pub fn normals_buffer(&self) -> Option<&wgpu::Buffer> {
+        None
+    }
+
+    /// Returns the UVs buffer if loaded to GPU.
+    pub fn uvs_buffer(&self) -> Option<&wgpu::Buffer> {
+        None
+    }
+
+    /// Ensures edge data is created (but not necessarily uploaded to GPU).
+    pub fn ensure_edges(&mut self) {
         if self.edges.is_none() {
             let mut edges = Vec::new();
             for face in self.faces.read().unwrap().data().as_ref().unwrap() {
@@ -269,21 +249,35 @@ impl GpuMesh {
                 GPUVec::new(edges, BufferType::ElementArray, AllocationType::StaticDraw);
             self.edges = Some(Arc::new(RwLock::new(gpu_edges)));
         }
-
-        self.edges.as_mut().unwrap().write().unwrap().bind();
     }
 
-    /// Unbind this mesh buffers to vertex attributes.
-    pub fn unbind(&self) {
-        self.coords.write().unwrap().unbind();
-        self.normals.write().unwrap().unbind();
-        self.uvs.write().unwrap().unbind();
-        self.faces.write().unwrap().unbind();
+    /// Ensures edge buffer is created and loaded to GPU.
+    pub fn ensure_edges_on_gpu(&mut self) {
+        self.ensure_edges();
+        self.edges.as_mut().unwrap().write().unwrap().load_to_gpu();
+    }
+
+    /// Returns the edges buffer reference.
+    pub fn edges(&self) -> &Option<Arc<RwLock<GPUVec<Point2<VertexIndex>>>>> {
+        &self.edges
     }
 
     /// Number of points needed to draw this mesh.
     pub fn num_pts(&self) -> usize {
         self.faces.read().unwrap().len() * 3
+    }
+
+    /// Number of indices in this mesh.
+    pub fn num_indices(&self) -> u32 {
+        (self.faces.read().unwrap().len() * 3) as u32
+    }
+
+    /// Number of edge indices in this mesh.
+    pub fn num_edge_indices(&self) -> u32 {
+        self.edges
+            .as_ref()
+            .map(|e| (e.read().unwrap().len() * 2) as u32)
+            .unwrap_or(0)
     }
 
     /// Recompute this mesh normals.

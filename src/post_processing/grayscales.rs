@@ -1,20 +1,22 @@
 //! Post-processing effect to draw everything in grey-levels.
 
-use na::Vector2;
-
 use crate::context::Context;
-use crate::post_processing::PostProcessingEffect;
-use crate::resource::{
-    AllocationType, BufferType, Effect, GPUVec, RenderTarget, ShaderAttribute, ShaderUniform,
-};
-use crate::verify;
+use crate::post_processing::post_processing_effect::{PostProcessingContext, PostProcessingEffect};
+use crate::resource::RenderTarget;
+use bytemuck::{Pod, Zeroable};
 
-/// Post processing effect which turns everything in gray scales.
+/// Vertex data for full-screen quad.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct QuadVertex {
+    position: [f32; 2],
+}
+
+/// Post processing effect which turns everything to gray scales.
 pub struct Grayscales {
-    shader: Effect,
-    fbo_texture: ShaderUniform<i32>,
-    v_coord: ShaderAttribute<Vector2<f32>>,
-    fbo_vertices: GPUVec<Vector2<f32>>,
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    vertex_buffer: wgpu::Buffer,
 }
 
 impl Default for Grayscales {
@@ -26,27 +28,118 @@ impl Default for Grayscales {
 impl Grayscales {
     /// Creates a new `Grayscales` post processing effect.
     pub fn new() -> Grayscales {
-        let fbo_vertices: Vec<Vector2<f32>> = vec![
-            Vector2::new(-1.0, -1.0),
-            Vector2::new(1.0, -1.0),
-            Vector2::new(-1.0, 1.0),
-            Vector2::new(1.0, 1.0),
+        let ctxt = Context::get();
+
+        // Create bind group layout for texture + sampler
+        let bind_group_layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("grayscales_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+
+        let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("grayscales_pipeline_layout"),
+            bind_group_layouts: &[&bind_group_layout],
+            push_constant_ranges: &[],
+        });
+
+        // Load shader
+        let shader = ctxt.create_shader_module(
+            Some("grayscales_shader"),
+            include_str!("../builtin/grayscales.wgsl"),
+        );
+
+        // Vertex buffer layout
+        let vertex_buffer_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            }],
+        };
+
+        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("grayscales_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &[vertex_buffer_layout],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: ctxt.surface_format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview: None,
+            cache: None,
+        });
+
+        // Create full-screen quad vertices
+        let vertices = [
+            QuadVertex {
+                position: [-1.0, -1.0],
+            },
+            QuadVertex {
+                position: [1.0, -1.0],
+            },
+            QuadVertex {
+                position: [-1.0, 1.0],
+            },
+            QuadVertex {
+                position: [1.0, 1.0],
+            },
         ];
 
-        let mut fbo_vertices =
-            GPUVec::new(fbo_vertices, BufferType::Array, AllocationType::StaticDraw);
-        fbo_vertices.load_to_gpu();
-        fbo_vertices.unload_from_ram();
-
-        let mut shader = Effect::new_from_str(VERTEX_SHADER, FRAGMENT_SHADER);
-
-        shader.use_program();
+        let vertex_buffer = ctxt.create_buffer_init(
+            Some("grayscales_vertex_buffer"),
+            bytemuck::cast_slice(&vertices),
+            wgpu::BufferUsages::VERTEX,
+        );
 
         Grayscales {
-            fbo_texture: shader.get_uniform("fbo_texture").unwrap(),
-            v_coord: shader.get_attrib("v_coord").unwrap(),
-            fbo_vertices,
-            shader,
+            pipeline,
+            bind_group_layout,
+            vertex_buffer,
         }
     }
 }
@@ -54,50 +147,54 @@ impl Grayscales {
 impl PostProcessingEffect for Grayscales {
     fn update(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32) {}
 
-    fn draw(&mut self, target: &RenderTarget) {
+    fn draw(&mut self, target: &RenderTarget, context: &mut PostProcessingContext) {
         let ctxt = Context::get();
-        self.v_coord.enable();
 
-        /*
-         * Finalize draw
-         */
-        self.shader.use_program();
-        verify!(ctxt.clear_color(0.0, 0.0, 0.0, 1.0));
-        verify!(ctxt.clear(Context::COLOR_BUFFER_BIT | Context::DEPTH_BUFFER_BIT));
-        verify!(ctxt.bind_texture(Context::TEXTURE_2D, target.texture_id()));
+        // Get the source texture and sampler from the render target
+        let (color_view, sampler) = match target {
+            RenderTarget::Offscreen(o) => (&o.color_view, &o.sampler),
+            RenderTarget::Screen => return, // Can't post-process the screen directly
+        };
 
-        self.fbo_texture.upload(&0);
-        self.v_coord.bind(&mut self.fbo_vertices);
+        // Create bind group for this frame
+        let bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("grayscales_bind_group"),
+            layout: &self.bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(color_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        });
 
-        verify!(ctxt.draw_arrays(Context::TRIANGLE_STRIP, 0, 4));
+        // Create render pass to the output view
+        {
+            let mut render_pass = context
+                .encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("grayscales_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: context.output_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
 
-        self.v_coord.disable();
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.draw(0..4, 0..1);
+        }
     }
 }
-
-static VERTEX_SHADER: &str = "#version 100
-    attribute vec2    v_coord;
-    uniform sampler2D fbo_texture;
-    varying vec2      f_texcoord;
-
-    void main(void) {
-      gl_Position = vec4(v_coord, 0.0, 1.0);
-      f_texcoord  = (v_coord + 1.0) / 2.0;
-    }";
-
-static FRAGMENT_SHADER: &str = "#version 100
-#ifdef GL_FRAGMENT_PRECISION_HIGH
-   precision highp float;
-#else
-   precision mediump float;
-#endif
-
-    uniform sampler2D fbo_texture;
-    varying vec2      f_texcoord;
-
-    void main(void) {
-      vec2 texcoord = f_texcoord;
-      vec4 color    = texture2D(fbo_texture, texcoord);
-      float gray    =  0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b;
-      gl_FragColor  = vec4(gray, gray, gray, color.a);
-    }";

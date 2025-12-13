@@ -3,7 +3,9 @@ use crate::light::Light;
 use crate::procedural;
 use crate::procedural::RenderMesh;
 use crate::resource::vertex_index::VertexIndex;
-use crate::resource::{GpuMesh, Material, MaterialManager, MeshManager, Texture, TextureManager};
+use crate::resource::{
+    GpuMesh, Material, MaterialManager, MeshManager, RenderContext, Texture, TextureManager,
+};
 use crate::scene::{InstanceData, Object};
 use na;
 use na::{Isometry3, Point2, Point3, Translation3, UnitQuaternion, Vector3};
@@ -13,6 +15,7 @@ use std::mem;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::rc::Weak;
+use std::sync::Arc;
 
 // XXX: once something like `fn foo(self: Rc<RefCell<SceneNode>>)` is allowed, this extra struct
 // will not be needed any more.
@@ -83,9 +86,22 @@ impl SceneNodeData {
     }
 
     /// Render the scene graph rooted by this node.
-    pub fn render(&mut self, pass: usize, camera: &mut dyn Camera, light: &Light) {
+    pub fn render(
+        &mut self,
+        pass: usize,
+        camera: &mut dyn Camera,
+        light: &Light,
+        context: &mut RenderContext,
+    ) {
         if self.visible {
-            self.do_render(&na::one(), &Vector3::from_element(1.0), pass, camera, light)
+            self.do_render(
+                &na::one(),
+                &Vector3::from_element(1.0),
+                pass,
+                camera,
+                light,
+                context,
+            )
         }
     }
 
@@ -96,6 +112,7 @@ impl SceneNodeData {
         pass: usize,
         camera: &mut dyn Camera,
         light: &Light,
+        context: &mut RenderContext,
     ) {
         if !self.up_to_date {
             self.up_to_date = true;
@@ -103,13 +120,14 @@ impl SceneNodeData {
             self.world_scale = scale.component_mul(&self.local_scale);
         }
 
-        if let Some(ref o) = self.object {
+        if let Some(ref mut o) = self.object {
             o.render(
                 &self.world_transform,
                 &self.world_scale,
                 pass,
                 camera,
                 light,
+                context,
             )
         }
 
@@ -122,6 +140,7 @@ impl SceneNodeData {
                     pass,
                     camera,
                     light,
+                    context,
                 )
             }
         }
@@ -206,10 +225,12 @@ impl SceneNodeData {
     /// Sets the line width for wireframe rendering of objects in this node and its children.
     ///
     /// # Arguments
-    /// * `width` - The line width in pixels
+    /// * `width` - The line width
+    /// * `use_perspective` - If true, width is in world units and scales with distance.
+    ///                       If false, width is in screen pixels and stays constant.
     #[inline]
-    pub fn set_lines_width(&mut self, width: f32) {
-        self.apply_to_objects_mut(&mut |o| o.set_lines_width(width))
+    pub fn set_lines_width(&mut self, width: f32, use_perspective: bool) {
+        self.apply_to_objects_mut(&mut |o| o.set_lines_width(width, use_perspective))
     }
 
     /// Sets the line color for wireframe rendering of objects in this node and its children.
@@ -224,10 +245,21 @@ impl SceneNodeData {
     /// Sets the point size for point cloud rendering of objects in this node and its children.
     ///
     /// # Arguments
-    /// * `size` - The point size in pixels
+    /// * `size` - The point size
+    /// * `use_perspective` - If true, size is in world units and scales with distance.
+    ///                       If false, size is in screen pixels and stays constant.
     #[inline]
-    pub fn set_points_size(&mut self, size: f32) {
-        self.apply_to_objects_mut(&mut |o| o.set_points_size(size))
+    pub fn set_points_size(&mut self, size: f32, use_perspective: bool) {
+        self.apply_to_objects_mut(&mut |o| o.set_points_size(size, use_perspective))
+    }
+
+    /// Sets the point color for point cloud rendering of objects in this node and its children.
+    ///
+    /// # Arguments
+    /// * `color` - The RGB color for points, or `None` to use the object's default color
+    #[inline]
+    pub fn set_points_color(&mut self, color: Option<Point3<f32>>) {
+        self.apply_to_objects_mut(&mut |o| o.set_points_color(color))
     }
 
     /// Enables or disables surface rendering for objects in this node and its children.
@@ -390,7 +422,7 @@ impl SceneNodeData {
     }
 
     /// Sets the texture of the objects contained by this node and its children.
-    pub fn set_texture(&mut self, texture: Rc<Texture>) {
+    pub fn set_texture(&mut self, texture: Arc<Texture>) {
         self.apply_to_objects_mut(&mut |o| o.set_texture(texture.clone()))
     }
 
@@ -561,7 +593,7 @@ impl SceneNodeData {
     /// # use nalgebra::Translation3;
     /// # #[kiss3d::main]
     /// # async fn main() {
-    /// # let mut window = Window::new("Example");
+    /// # let mut window = Window::new("Example").await;
     /// # let mut cube = window.add_cube(1.0, 1.0, 1.0);
     /// // Move the cube 0.1 units along the x-axis each frame
     /// cube.prepend_to_local_translation(&Translation3::new(0.1, 0.0, 0.0));
@@ -584,7 +616,7 @@ impl SceneNodeData {
     /// # use nalgebra::Translation3;
     /// # #[kiss3d::main]
     /// # async fn main() {
-    /// # let mut window = Window::new("Example");
+    /// # let mut window = Window::new("Example").await;
     /// # let mut cube = window.add_cube(1.0, 1.0, 1.0);
     /// // Position the cube at (5, 0, -10)
     /// cube.set_local_translation(Translation3::new(5.0, 0.0, -10.0));
@@ -652,7 +684,7 @@ impl SceneNodeData {
     /// # use nalgebra::{UnitQuaternion, Vector3};
     /// # #[kiss3d::main]
     /// # async fn main() {
-    /// # let mut window = Window::new("Example");
+    /// # let mut window = Window::new("Example").await;
     /// # let mut cube = window.add_cube(1.0, 1.0, 1.0);
     /// // Rotate the cube around the Y axis by 0.014 radians each frame
     /// let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
@@ -1067,8 +1099,14 @@ impl SceneNode {
     //
 
     /// Render the scene graph rooted by this node.
-    pub fn render(&mut self, pass: usize, camera: &mut dyn Camera, light: &Light) {
-        self.data_mut().render(pass, camera, light)
+    pub fn render(
+        &mut self,
+        pass: usize,
+        camera: &mut dyn Camera,
+        light: &Light,
+        context: &mut RenderContext,
+    ) {
+        self.data_mut().render(pass, camera, light, context)
     }
 
     /// Sets the material of the objects contained by this node and its children.
@@ -1084,9 +1122,12 @@ impl SceneNode {
     }
 
     /// Sets the width of the lines drawn for the objects contained by this node and its children.
+    ///
+    /// If `use_perspective` is true, width is in world units and scales with distance.
+    /// If `use_perspective` is false, width is in screen pixels and stays constant.
     #[inline]
-    pub fn set_lines_width(&mut self, width: f32) {
-        self.data_mut().set_lines_width(width)
+    pub fn set_lines_width(&mut self, width: f32, use_perspective: bool) {
+        self.data_mut().set_lines_width(width, use_perspective)
     }
 
     /// Sets the color of the lines drawn for the objects contained by this node and its children.
@@ -1096,9 +1137,18 @@ impl SceneNode {
     }
 
     /// Sets the size of the points drawn for the objects contained by this node and its children.
+    ///
+    /// If `use_perspective` is true, size is in world units and scales with distance.
+    /// If `use_perspective` is false, size is in screen pixels and stays constant.
     #[inline]
-    pub fn set_points_size(&mut self, size: f32) {
-        self.data_mut().set_points_size(size)
+    pub fn set_points_size(&mut self, size: f32, use_perspective: bool) {
+        self.data_mut().set_points_size(size, use_perspective)
+    }
+
+    /// Sets the color of the points drawn for the objects contained by this node and its children.
+    #[inline]
+    pub fn set_points_color(&mut self, color: Option<Point3<f32>>) {
+        self.data_mut().set_points_color(color)
     }
 
     /// Activates or deactivates the rendering of the surfaces of the objects contained by this node and its
@@ -1247,7 +1297,7 @@ impl SceneNode {
     }
 
     /// Sets the texture of the objects contained by this node and its children.
-    pub fn set_texture(&mut self, texture: Rc<Texture>) {
+    pub fn set_texture(&mut self, texture: Arc<Texture>) {
         self.data_mut().set_texture(texture)
     }
 

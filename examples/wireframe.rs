@@ -7,12 +7,13 @@ use na::{UnitQuaternion, Vector3};
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: wireframe");
+    let mut window = Window::new("Kiss3d: wireframe").await;
     let mut c = window.add_cube(1.0, 1.0, 1.0);
 
     c.set_color(1.0, 0.0, 0.0);
-    c.set_points_size(10.0);
-    c.set_lines_width(1.0);
+    c.set_points_color(Some([0.0, 1.0, 1.0].into()));
+    c.set_points_size(30.0, false); // false = screen pixels
+    c.set_lines_width(10.0, false); // false = screen pixels
     c.set_surface_rendering_activation(false);
 
     window.set_light(Light::StickToCamera);

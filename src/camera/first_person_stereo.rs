@@ -3,10 +3,7 @@ use std::f32;
 use na::{self, Isometry3, Matrix4, Perspective3, Point2, Point3, Vector2, Vector3};
 
 use crate::camera::Camera;
-use crate::context::Context;
 use crate::event::{Action, Key, MouseButton, WindowEvent};
-use crate::resource::ShaderUniform;
-use crate::verify;
 use crate::window::Canvas;
 
 /// First-person camera mode.
@@ -174,6 +171,7 @@ impl FirstPersonStereo {
         self.view_right = self.view_transform_right().to_homogeneous();
     }
 
+    #[allow(dead_code)]
     fn view_eye(&self, eye: usize) -> Matrix4<f32> {
         match eye {
             0usize => self.view_left,
@@ -281,36 +279,28 @@ impl Camera for FirstPersonStereo {
         self.update_projviews();
     }
 
-    fn upload(
-        &self,
-        pass: usize,
-        proj: &mut ShaderUniform<Matrix4<f32>>,
-        view: &mut ShaderUniform<Matrix4<f32>>,
-    ) {
-        view.upload(&self.view_eye(pass));
-        proj.upload(&self.proj);
+    fn view_transform_pair(&self, pass: usize) -> (Isometry3<f32>, Matrix4<f32>) {
+        let view = match pass {
+            0 => self.view_transform_left(),
+            1 => self.view_transform_right(),
+            _ => self.view_transform(),
+        };
+        (view, self.proj)
     }
 
     fn num_passes(&self) -> usize {
         2usize
     }
 
-    fn start_pass(&self, pass: usize, canvas: &Canvas) {
-        let ctxt = Context::get();
-        let (win_w, win_h) = canvas.size();
-        let (x, y, w, h) = match pass {
-            0usize => (0, 0, win_w / 2, win_h),
-            1usize => (win_w / 2, 0, win_w / 2, win_h),
-            _ => panic!("stereo first person takes only two passes"),
-        };
-        verify!(ctxt.viewport(x as i32, y, w as i32, h as i32));
-        verify!(ctxt.scissor(x as i32, y, w as i32, h as i32));
+    // Note: In wgpu, viewport/scissor are set per render pass, not globally.
+    // The stereo camera's start_pass and render_complete functionality would need
+    // to be handled differently in wgpu (e.g., through separate render passes
+    // or by storing viewport info for materials to use).
+    fn start_pass(&self, _pass: usize, _canvas: &Canvas) {
+        // TODO: Viewport handling needs to be done at render pass creation in wgpu
     }
 
-    fn render_complete(&self, canvas: &Canvas) {
-        let ctxt = Context::get();
-        let (w, h) = canvas.size();
-        verify!(ctxt.viewport(0, 0, w as i32, h as i32));
-        verify!(ctxt.scissor(0, 0, w as i32, h as i32));
+    fn render_complete(&self, _canvas: &Canvas) {
+        // TODO: Viewport reset handled differently in wgpu
     }
 }

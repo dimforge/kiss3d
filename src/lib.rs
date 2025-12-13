@@ -3,7 +3,7 @@
 
 Keep It Simple, Stupid 3d graphics engine.
 
-This library is born from the frustration in front of the fact that today’s 3D
+This library is born from the frustration in front of the fact that today's 3D
 graphics library are:
 
 * either too low level: you have to write your own shaders and opening a
@@ -42,7 +42,7 @@ use na::{UnitQuaternion, Vector3};
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: cube");
+    let mut window = Window::new("Kiss3d: cube").await;
     let mut c = window.add_cube(1.0, 1.0, 1.0);
 
     c.set_color(1.0, 0.0, 0.0);
@@ -85,7 +85,7 @@ kiss3d = "0.36"
 ```
 
 ## Contributions
-I’d love to see people improving this library for their own needs. However, keep in mind that
+I'd love to see people improving this library for their own needs. However, keep in mind that
 **kiss3d** is KISS. One-liner features (from the user point of view) are preferred.
 
 ## Acknowledgements
@@ -109,12 +109,10 @@ extern crate rusttype;
 extern crate serde_derive;
 extern crate serde;
 
+// NOTE: egui feature is currently broken during wgpu migration
 #[cfg(feature = "egui")]
 pub extern crate egui;
-#[cfg(feature = "egui")]
-pub extern crate egui_glow;
-#[cfg(not(target_arch = "wasm32"))]
-extern crate glutin;
+
 extern crate instant;
 
 pub use nalgebra;
@@ -132,19 +130,17 @@ pub use pollster;
 pub use wasm_bindgen_futures;
 
 #[deprecated(note = "Use the `renderer` module instead.")]
-pub use crate::renderer::line_renderer;
-#[deprecated(note = "Use the `renderer` module instead.")]
 pub use crate::renderer::point_renderer;
 
 pub mod builtin;
 pub mod camera;
 pub mod context;
-mod error;
 pub mod event;
 pub mod light;
 pub mod loader;
 pub mod planar_camera;
-pub mod planar_line_renderer;
+pub mod planar_point_renderer;
+pub mod planar_polyline_renderer;
 pub mod post_processing;
 pub mod procedural;
 pub mod renderer;
@@ -161,7 +157,8 @@ pub mod prelude {
     pub use crate::light::*;
     pub use crate::loader::*;
     pub use crate::planar_camera::*;
-    pub use crate::planar_line_renderer::*;
+    pub use crate::planar_point_renderer::*;
+    pub use crate::planar_polyline_renderer::*;
     pub use crate::renderer::*;
     pub use crate::resource::*;
     pub use crate::scene::*;

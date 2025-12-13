@@ -6,15 +6,14 @@ version = "0.37.2"
 autoexamples = true
 description  = "Keep it simple, stupid, 2D and 3D graphics engine for Rust."
 edition      = "2018"
-keywords     = ["graphics", "OpenGL", "KISS"]
+keywords     = ["graphics", "wgpu", "KISS"]
 license      = "BSD-3-Clause"
 readme       = "README.md"
 repository   = "https://github.com/sebcrozet/kiss3d"
 
 include = [
     "src/**/*.rs",
-    "src/**/*.frag",
-    "src/**/*.vert",
+    "src/**/*.wgsl",
     "src/text/*.ttf",
     "examples/**/*.rs",
     "examples/media",
@@ -30,34 +29,33 @@ name = "kiss3d"
 path = "src/lib.rs"
 
 [features]
-egui = ["dep:egui", "dep:egui_glow"]
+egui = ["dep:egui", "dep:egui-wgpu"]
 vertex_index_u32 = []
+recording = ["dep:ffmpeg-the-third"]
 
 [dependencies]
 bitflags     = { version = "2", features = ["serde"] }
-# TODO: widgets are no longer visible if we bump to 0.33. Needs to be investigated.
+bytemuck     = { version = "1", features = ["derive"] }
 egui         = { version = "0.32", optional = true, default-features = true }
-egui_glow    = { version = "0.32", optional = true }
-glow         = "0.16"
+egui-wgpu    = { version = "0.32", optional = true }
 either       = "1"
 image        = "0.25"
 instant      = { version = "0.1", features = ["wasm-bindgen"] }
 kiss3d-macro = { version = "0.36.0", path = "kiss3d-macro" }
-nalgebra     = "0.34"
-parry3d      = "0.25"
+log          = "0.4"
+nalgebra     = { version = "0.34", features = ["bytemuck"] }
+ffmpeg-the-third = { version = "4", optional = true }
 num-traits   = "0.2"
+parry3d      = "0.25"
 rusttype     = { version = "0.9", features = ["gpu_cache"] }
 serde        = "1"
 serde_derive = "1"
+wgpu         = "25"
+winit        = "0.30"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-glutin = "0.32"
-glutin-winit = "0.5"
-winit = "0.30"
-pollster = "0.4.0"
+pollster = "0.4"
 
-# We repeat all three targets instead of any(target_arch = "wasm32", target_arch = "asmjs")
-# to avoid https://github.com/koute/stdweb/issues/135
 [target.wasm32-unknown-unknown.dependencies]
 oneshot = "0.1"
 getrandom = { version = "0.3", features = ["wasm_js"] }
@@ -84,6 +82,6 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 env_logger = "0.11"
-nalgebra   = { version = "0.34", features = ["rand"] }
+nalgebra   = { version = "0.34", features = ["rand", "bytemuck"] }
 parry2d    = "0.25"
 rand       = "0.9"

@@ -1,5 +1,4 @@
 use crate::event::WindowEvent;
-use crate::resource::ShaderUniform;
 use crate::window::Canvas;
 use na::{Matrix3, Point2, Vector2};
 
@@ -30,18 +29,15 @@ pub trait PlanarCamera {
     /// * `canvas` - Reference to the rendering canvas
     fn update(&mut self, canvas: &Canvas);
 
-    /// Uploads the camera's view and projection matrices to the GPU.
+    /// Returns the view and projection matrices for 2D rendering.
     ///
-    /// This can be called multiple times during the render loop.
+    /// This method provides the matrices that materials use to transform 2D objects.
     ///
-    /// # Arguments
-    /// * `proj` - Shader uniform for the 2D projection matrix
-    /// * `view` - Shader uniform for the 2D view matrix
-    fn upload(
-        &self,
-        proj: &mut ShaderUniform<Matrix3<f32>>,
-        view: &mut ShaderUniform<Matrix3<f32>>,
-    );
+    /// # Returns
+    /// A tuple `(view_matrix, projection_matrix)` where:
+    /// - `view_matrix` is the camera's view transformation
+    /// - `projection_matrix` is the projection matrix
+    fn view_transform_pair(&self) -> (Matrix3<f32>, Matrix3<f32>);
 
     /// Converts screen coordinates to 2D world coordinates.
     ///

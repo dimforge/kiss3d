@@ -71,7 +71,7 @@ impl Font {
     /// # use nalgebra::{Point2, Point3};
     /// # #[kiss3d::main]
     /// # async fn main() {
-    /// # let mut window = Window::new("Example");
+    /// # let mut window = Window::new("Example").await;
     /// let font = Font::default();
     /// window.draw_text("Hello", &Point2::new(10.0, 10.0), 60.0, &font, &Point3::new(1.0, 1.0, 1.0));
     /// # }

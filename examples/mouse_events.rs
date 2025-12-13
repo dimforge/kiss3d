@@ -10,7 +10,7 @@ use kiss3d::window::Window;
 /// main program
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Generation tile test");
+    let mut window = Window::new("Mouse events").await;
     let mut camera = kiss3d::planar_camera::PlanarFixedView::new();
     window.set_light(Light::StickToCamera);
     let draw_colour = na::Point3::new(0.5, 1.0, 0.5);
@@ -49,9 +49,9 @@ async fn main() {
         }
         const CROSS_SIZE: f32 = 10.0;
         let up = na::Vector2::new(CROSS_SIZE, 0.0);
-        window.draw_planar_line(&(sel_pos - up), &(sel_pos + up), &draw_colour);
+        window.draw_planar_line(&(sel_pos - up), &(sel_pos + up), &draw_colour, 2.0);
 
         let right = na::Vector2::new(0.0, CROSS_SIZE);
-        window.draw_planar_line(&(sel_pos - right), &(sel_pos + right), &draw_colour);
+        window.draw_planar_line(&(sel_pos - right), &(sel_pos + right), &draw_colour, 2.0);
     }
 }

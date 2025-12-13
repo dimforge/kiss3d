@@ -17,7 +17,7 @@ use na::Point3;
 /// # use nalgebra::Point3;
 /// # #[kiss3d::main]
 /// # async fn main() {
-/// # let mut window = Window::new("Example");
+/// # let mut window = Window::new("Example").await;
 /// // Light that follows the camera
 /// window.set_light(Light::StickToCamera);
 ///
@@ -51,7 +51,7 @@ pub enum Light {
     /// # use kiss3d::light::Light;
     /// # #[kiss3d::main]
     /// # async fn main() {
-    /// # let mut window = Window::new("Example");
+    /// # let mut window = Window::new("Example").await;
     /// window.set_light(Light::StickToCamera);
     /// # }
     /// ```

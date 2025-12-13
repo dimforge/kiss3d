@@ -4,13 +4,15 @@ use crate::camera::Camera;
 use crate::light::Light;
 use crate::resource::vertex_index::VertexIndex;
 use crate::resource::{
-    AllocationType, BufferType, GPUVec, GpuMesh, Material, Texture, TextureManager,
+    AllocationType, BufferType, GPUVec, GpuData, GpuMesh, Material, RenderContext, Texture,
+    TextureManager,
 };
 use na::{Isometry3, Matrix3, Point2, Point3, Vector3};
 use std::any::Any;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// Rendering properties and state for a scene object.
 ///
@@ -18,11 +20,14 @@ use std::rc::Rc;
 /// This data is used by the rendering pipeline to determine how the object should be drawn.
 pub struct ObjectData {
     material: Rc<RefCell<Box<dyn Material + 'static>>>,
-    texture: Rc<Texture>,
+    texture: Arc<Texture>,
     color: Point3<f32>,
     lines_color: Option<Point3<f32>>,
+    points_color: Option<Point3<f32>>,
     wlines: f32,
     wpoints: f32,
+    lines_use_perspective: bool,
+    points_use_perspective: bool,
     draw_surface: bool,
     cull: bool,
     user_data: Box<dyn Any + 'static>,
@@ -34,7 +39,7 @@ impl ObjectData {
     /// # Returns
     /// A reference-counted texture
     #[inline]
-    pub fn texture(&self) -> &Rc<Texture> {
+    pub fn texture(&self) -> &Arc<Texture> {
         &self.texture
     }
 
@@ -72,6 +77,33 @@ impl ObjectData {
     #[inline]
     pub fn points_size(&self) -> f32 {
         self.wpoints
+    }
+
+    /// Returns the color used for point rendering.
+    ///
+    /// # Returns
+    /// `Some(color)` if a custom point color is set, `None` to use the object's base color
+    #[inline]
+    pub fn points_color(&self) -> Option<&Point3<f32>> {
+        self.points_color.as_ref()
+    }
+
+    /// Checks if wireframe lines use perspective projection.
+    ///
+    /// # Returns
+    /// `true` if wireframe lines scale with distance (perspective), `false` for constant screen-space width
+    #[inline]
+    pub fn lines_use_perspective(&self) -> bool {
+        self.lines_use_perspective
+    }
+
+    /// Checks if points use perspective projection.
+    ///
+    /// # Returns
+    /// `true` if points scale with distance (perspective), `false` for constant screen-space size
+    #[inline]
+    pub fn points_use_perspective(&self) -> bool {
+        self.points_use_perspective
     }
 
     /// Checks if surface rendering is enabled for this object.
@@ -117,6 +149,10 @@ impl ObjectData {
 ///     position: Point3::new(1.0, 0.0, 0.0),
 ///     deformation: Matrix3::identity(),
 ///     color: [1.0, 0.0, 0.0, 1.0],  // Red
+///     lines_color: Some([0.0, 1.0, 0.0, 1.0]),  // Green wireframe
+///     lines_width: Some(2.0),  // 2px wireframe
+///     points_color: Some([1.0, 1.0, 0.0, 1.0]),  // Yellow points
+///     points_size: Some(5.0),  // 5px points
 /// };
 /// ```
 pub struct InstanceData {
@@ -126,6 +162,14 @@ pub struct InstanceData {
     pub deformation: Matrix3<f32>,
     /// The RGBA color for this instance [r, g, b, a] in range [0.0, 1.0].
     pub color: [f32; 4],
+    /// The RGBA wireframe color for this instance. None = use object's wireframe color.
+    pub lines_color: Option<[f32; 4]>,
+    /// The wireframe line width in pixels for this instance. None = use object's wireframe width.
+    pub lines_width: Option<f32>,
+    /// The RGBA point color for this instance. None = use object's point color.
+    pub points_color: Option<[f32; 4]>,
+    /// The point size in pixels for this instance. None = use object's point size.
+    pub points_size: Option<f32>,
 }
 
 impl Default for InstanceData {
@@ -134,14 +178,27 @@ impl Default for InstanceData {
             position: Point3::origin(),
             deformation: Matrix3::identity(),
             color: [1.0; 4],
+            lines_color: None, // Use object's wireframe color
+            lines_width: None, // Use object's wireframe width
+            points_color: None, // Use object's point color
+            points_size: None, // Use object's point size
         }
     }
 }
 
+/// Sentinel value for lines_width indicating "use object's value".
+pub const LINES_WIDTH_USE_OBJECT: f32 = -1.0;
+/// Sentinel value for lines_color indicating "use object's value" (alpha = 0).
+pub const LINES_COLOR_USE_OBJECT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+/// Sentinel value for points_size indicating "use object's value".
+pub const POINTS_SIZE_USE_OBJECT: f32 = -1.0;
+/// Sentinel value for points_color indicating "use object's value" (alpha = 0).
+pub const POINTS_COLOR_USE_OBJECT: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
+
 /// GPU buffer for instanced rendering data.
 ///
-/// Contains GPU-allocated buffers for positions, deformations, and colors
-/// of all instances to be rendered.
+/// Contains GPU-allocated buffers for positions, deformations, colors,
+/// wireframe settings, and point settings of all instances to be rendered.
 pub struct InstancesBuffer {
     /// GPU buffer of instance positions.
     pub positions: GPUVec<Point3<f32>>,
@@ -149,6 +206,14 @@ pub struct InstancesBuffer {
     pub deformations: GPUVec<Vector3<f32>>,
     /// GPU buffer of instance colors.
     pub colors: GPUVec<[f32; 4]>,
+    /// GPU buffer of instance wireframe colors. Alpha = 0 means use object's color.
+    pub lines_colors: GPUVec<[f32; 4]>,
+    /// GPU buffer of instance wireframe line widths. Negative means use object's width.
+    pub lines_widths: GPUVec<f32>,
+    /// GPU buffer of instance point colors. Alpha = 0 means use object's color.
+    pub points_colors: GPUVec<[f32; 4]>,
+    /// GPU buffer of instance point sizes. Negative means use object's size.
+    pub points_sizes: GPUVec<f32>,
 }
 
 impl Default for InstancesBuffer {
@@ -166,6 +231,26 @@ impl Default for InstancesBuffer {
             ),
             colors: GPUVec::new(
                 vec![[1.0; 4]],
+                BufferType::Array,
+                AllocationType::StreamDraw,
+            ),
+            lines_colors: GPUVec::new(
+                vec![LINES_COLOR_USE_OBJECT], // Use object's wireframe color by default
+                BufferType::Array,
+                AllocationType::StreamDraw,
+            ),
+            lines_widths: GPUVec::new(
+                vec![LINES_WIDTH_USE_OBJECT], // Use object's wireframe width by default
+                BufferType::Array,
+                AllocationType::StreamDraw,
+            ),
+            points_colors: GPUVec::new(
+                vec![POINTS_COLOR_USE_OBJECT], // Use object's point color by default
+                BufferType::Array,
+                AllocationType::StreamDraw,
+            ),
+            points_sizes: GPUVec::new(
+                vec![POINTS_SIZE_USE_OBJECT], // Use object's point size by default
                 BufferType::Array,
                 AllocationType::StreamDraw,
             ),
@@ -189,6 +274,30 @@ impl InstancesBuffer {
     pub fn len(&self) -> usize {
         self.positions.len()
     }
+
+    /// Checks if any instance has a specific wireframe width set (not using object's default).
+    ///
+    /// # Returns
+    /// `true` if at least one instance has a specific wireframe width (>= 0)
+    pub fn any_instance_has_wireframe(&self) -> bool {
+        if let Some(widths) = self.lines_widths.data() {
+            widths.iter().any(|&w| w >= 0.0)
+        } else {
+            false
+        }
+    }
+
+    /// Checks if all instances use the object's wireframe width (all have sentinel value).
+    ///
+    /// # Returns
+    /// `true` if all instances use object's wireframe width
+    pub fn all_use_object_wireframe(&self) -> bool {
+        if let Some(widths) = self.lines_widths.data() {
+            widths.iter().all(|&w| w < 0.0)
+        } else {
+            true
+        }
+    }
 }
 
 /// A renderable 3D object in the scene.
@@ -201,6 +310,8 @@ pub struct Object {
     data: ObjectData,
     instances: Rc<RefCell<InstancesBuffer>>,
     mesh: Rc<RefCell<GpuMesh>>,
+    /// Per-object GPU data for the material (uniform buffers, etc.)
+    gpu_data: Box<dyn GpuData>,
 }
 
 impl Object {
@@ -210,16 +321,22 @@ impl Object {
         r: f32,
         g: f32,
         b: f32,
-        texture: Rc<Texture>,
+        texture: Arc<Texture>,
         material: Rc<RefCell<Box<dyn Material + 'static>>>,
     ) -> Object {
+        // Create per-object GPU data from the material
+        let gpu_data = material.borrow().create_gpu_data();
+
         let user_data = ();
         let data = ObjectData {
             color: Point3::new(r, g, b),
             lines_color: None,
+            points_color: None,
             texture,
             wlines: 0.0,
             wpoints: 0.0,
+            lines_use_perspective: true,
+            points_use_perspective: true,
             draw_surface: true,
             cull: true,
             material,
@@ -231,17 +348,19 @@ impl Object {
             data,
             instances,
             mesh,
+            gpu_data,
         }
     }
 
     #[doc(hidden)]
     pub fn render(
-        &self,
+        &mut self,
         transform: &Isometry3<f32>,
         scale: &Vector3<f32>,
         pass: usize,
         camera: &mut dyn Camera,
         light: &Light,
+        context: &mut RenderContext,
     ) {
         self.data.material.borrow_mut().render(
             pass,
@@ -250,8 +369,10 @@ impl Object {
             camera,
             light,
             &self.data,
-            &mut self.instances.borrow_mut(),
             &mut self.mesh.borrow_mut(),
+            &mut self.instances.borrow_mut(),
+            &mut *self.gpu_data,
+            context,
         );
     }
 
@@ -295,10 +416,42 @@ impl Object {
             .data_mut()
             .take()
             .unwrap_or_default();
+        let mut lines_col_data: Vec<_> = self
+            .instances
+            .borrow_mut()
+            .lines_colors
+            .data_mut()
+            .take()
+            .unwrap_or_default();
+        let mut lines_width_data: Vec<_> = self
+            .instances
+            .borrow_mut()
+            .lines_widths
+            .data_mut()
+            .take()
+            .unwrap_or_default();
+        let mut points_col_data: Vec<_> = self
+            .instances
+            .borrow_mut()
+            .points_colors
+            .data_mut()
+            .take()
+            .unwrap_or_default();
+        let mut points_size_data: Vec<_> = self
+            .instances
+            .borrow_mut()
+            .points_sizes
+            .data_mut()
+            .take()
+            .unwrap_or_default();
 
         pos_data.clear();
         col_data.clear();
         def_data.clear();
+        lines_col_data.clear();
+        lines_width_data.clear();
+        points_col_data.clear();
+        points_size_data.clear();
 
         pos_data.extend(instances.iter().map(|i| i.position));
         col_data.extend(instances.iter().map(|i| i.color));
@@ -307,10 +460,34 @@ impl Object {
                 .iter()
                 .flat_map(|i| i.deformation.column_iter().map(|c| c.into_owned())),
         );
+        lines_col_data.extend(
+            instances
+                .iter()
+                .map(|i| i.lines_color.unwrap_or(LINES_COLOR_USE_OBJECT)),
+        );
+        lines_width_data.extend(
+            instances
+                .iter()
+                .map(|i| i.lines_width.unwrap_or(LINES_WIDTH_USE_OBJECT)),
+        );
+        points_col_data.extend(
+            instances
+                .iter()
+                .map(|i| i.points_color.unwrap_or(POINTS_COLOR_USE_OBJECT)),
+        );
+        points_size_data.extend(
+            instances
+                .iter()
+                .map(|i| i.points_size.unwrap_or(POINTS_SIZE_USE_OBJECT)),
+        );
 
         *self.instances.borrow_mut().positions.data_mut() = Some(pos_data);
         *self.instances.borrow_mut().colors.data_mut() = Some(col_data);
         *self.instances.borrow_mut().deformations.data_mut() = Some(def_data);
+        *self.instances.borrow_mut().lines_colors.data_mut() = Some(lines_col_data);
+        *self.instances.borrow_mut().lines_widths.data_mut() = Some(lines_width_data);
+        *self.instances.borrow_mut().points_colors.data_mut() = Some(points_col_data);
+        *self.instances.borrow_mut().points_sizes.data_mut() = Some(points_size_data);
     }
 
     /// Enables or disables backface culling for this object.
@@ -334,13 +511,19 @@ impl Object {
     /// Sets the material of this object.
     #[inline]
     pub fn set_material(&mut self, material: Rc<RefCell<Box<dyn Material + 'static>>>) {
+        // Create new GPU data for the new material
+        self.gpu_data = material.borrow().create_gpu_data();
         self.data.material = material;
     }
 
     /// Sets the width of the lines drawn for this object.
+    ///
+    /// If `use_perspective` is true, the width is in world units and scales with distance.
+    /// If `use_perspective` is false, the width is in screen pixels and stays constant.
     #[inline]
-    pub fn set_lines_width(&mut self, width: f32) {
-        self.data.wlines = width
+    pub fn set_lines_width(&mut self, width: f32, use_perspective: bool) {
+        self.data.wlines = width;
+        self.data.lines_use_perspective = use_perspective;
     }
 
     /// Returns the width of the lines drawn for this object.
@@ -349,28 +532,44 @@ impl Object {
         self.data.wlines
     }
 
-    /// Sets the width of the lines drawn for this object.
+    /// Sets the color of the lines drawn for this object.
     #[inline]
     pub fn set_lines_color(&mut self, color: Option<Point3<f32>>) {
         self.data.lines_color = color
     }
 
-    /// Returns the width of the lines drawn for this object.
+    /// Returns the color of the lines drawn for this object.
     #[inline]
     pub fn lines_color(&self) -> Option<Point3<f32>> {
         self.data.lines_color
     }
 
     /// Sets the size of the points drawn for this object.
+    ///
+    /// If `use_perspective` is true, the size is in world units and scales with distance.
+    /// If `use_perspective` is false, the size is in screen pixels and stays constant.
     #[inline]
-    pub fn set_points_size(&mut self, size: f32) {
-        self.data.wpoints = size
+    pub fn set_points_size(&mut self, size: f32, use_perspective: bool) {
+        self.data.wpoints = size;
+        self.data.points_use_perspective = use_perspective;
     }
 
     /// Returns the size of the points drawn for this object.
     #[inline]
     pub fn points_size(&self) -> f32 {
         self.data.wpoints
+    }
+
+    /// Sets the color of the points drawn for this object.
+    #[inline]
+    pub fn set_points_color(&mut self, color: Option<Point3<f32>>) {
+        self.data.points_color = color
+    }
+
+    /// Returns the color of the points drawn for this object.
+    #[inline]
+    pub fn points_color(&self) -> Option<Point3<f32>> {
+        self.data.points_color
     }
 
     /// Activate or deactivate the rendering of this object surface.
@@ -516,7 +715,7 @@ impl Object {
 
     /// Sets the texture of the object.
     #[inline]
-    pub fn set_texture(&mut self, texture: Rc<Texture>) {
+    pub fn set_texture(&mut self, texture: Arc<Texture>) {
         self.data.texture = texture
     }
 }

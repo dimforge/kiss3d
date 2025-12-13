@@ -4,10 +4,9 @@ use std::sync::{Arc, RwLock};
 
 use crate::resource::gpu_vector::{AllocationType, BufferType, GPUVec};
 use crate::resource::vertex_index::VertexIndex;
-use crate::resource::ShaderAttribute;
 use na::{Point2, Point3};
 
-/// Aggregation of vertices, indices, normals and texture coordinates.
+/// Aggregation of vertices, indices, and texture coordinates for 2D meshes.
 ///
 /// It also contains the GPU location of those buffers.
 pub struct PlanarMesh {
@@ -20,7 +19,7 @@ pub struct PlanarMesh {
 impl PlanarMesh {
     /// Creates a new mesh.
     ///
-    /// If the normals and uvs are not given, they are automatically computed.
+    /// If the uvs are not given, they are automatically computed as origin.
     pub fn new(
         coords: Vec<Point2<f32>>,
         faces: Vec<Point3<VertexIndex>>,
@@ -66,36 +65,16 @@ impl PlanarMesh {
         }
     }
 
-    /// Binds this mesh vertex coordinates buffer to a vertex attribute.
-    pub fn bind_coords(&mut self, coords: &mut ShaderAttribute<Point2<f32>>) {
-        coords.bind(&mut *self.coords.write().unwrap());
+    /// Ensures all mesh buffers are loaded to the GPU.
+    pub fn load_to_gpu(&mut self) {
+        self.coords.write().unwrap().load_to_gpu();
+        self.uvs.write().unwrap().load_to_gpu();
+        self.faces.write().unwrap().load_to_gpu();
     }
 
-    /// Binds this mesh vertex uvs buffer to a vertex attribute.
-    pub fn bind_uvs(&mut self, uvs: &mut ShaderAttribute<Point2<f32>>) {
-        uvs.bind(&mut *self.uvs.write().unwrap());
-    }
-
-    /// Binds this mesh vertex uvs buffer to a vertex attribute.
-    pub fn bind_faces(&mut self) {
-        self.faces.write().unwrap().bind();
-    }
-
-    /// Binds this mesh buffers to vertex attributes.
-    pub fn bind(
-        &mut self,
-        coords: &mut ShaderAttribute<Point2<f32>>,
-        uvs: &mut ShaderAttribute<Point2<f32>>,
-    ) {
-        self.bind_coords(coords);
-        self.bind_uvs(uvs);
-        self.bind_faces();
-    }
-
-    /// Binds this mesh buffers to vertex attributes.
-    pub fn bind_edges(&mut self) {
+    /// Creates and loads edge buffer to GPU.
+    pub fn ensure_edges_on_gpu(&mut self) {
         if self.edges.is_none() {
-            // FIXME: remove internal edges.
             let mut edges = Vec::new();
             for face in self.faces.read().unwrap().data().as_ref().unwrap() {
                 edges.push(Point2::new(face.x, face.y));
@@ -107,19 +86,25 @@ impl PlanarMesh {
             self.edges = Some(Arc::new(RwLock::new(gpu_edges)));
         }
 
-        self.edges.as_mut().unwrap().write().unwrap().bind();
-    }
-
-    /// Unbind this mesh buffers to vertex attributes.
-    pub fn unbind(&self) {
-        self.coords.write().unwrap().unbind();
-        self.uvs.write().unwrap().unbind();
-        self.faces.write().unwrap().unbind();
+        self.edges.as_mut().unwrap().write().unwrap().load_to_gpu();
     }
 
     /// Number of points needed to draw this mesh.
     pub fn num_pts(&self) -> usize {
         self.faces.read().unwrap().len() * 3
+    }
+
+    /// Number of indices in this mesh.
+    pub fn num_indices(&self) -> u32 {
+        (self.faces.read().unwrap().len() * 3) as u32
+    }
+
+    /// Number of edge indices in this mesh.
+    pub fn num_edge_indices(&self) -> u32 {
+        self.edges
+            .as_ref()
+            .map(|e| (e.read().unwrap().len() * 2) as u32)
+            .unwrap_or(0)
     }
 
     /// This mesh faces.
@@ -135,5 +120,10 @@ impl PlanarMesh {
     /// This mesh texture coordinates.
     pub fn uvs(&self) -> &Arc<RwLock<GPUVec<Point2<f32>>>> {
         &self.uvs
+    }
+
+    /// This mesh edges.
+    pub fn edges(&self) -> &Option<Arc<RwLock<GPUVec<Point2<VertexIndex>>>>> {
+        &self.edges
     }
 }

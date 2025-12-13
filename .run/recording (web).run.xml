@@ -1,6 +1,6 @@
 <component name="ProjectRunConfigurationManager">
-  <configuration default="false" name="persistent_point_cloud" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
-    <option name="command" value="run --package kiss3d --example persistent_point_cloud" />
+  <configuration default="false" name="recording (web)" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+    <option name="command" value="run --package kiss3d --example recording --target wasm32-unknown-unknown" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <option name="emulateTerminal" value="true" />
     <option name="channel" value="DEFAULT" />

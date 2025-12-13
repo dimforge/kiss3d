@@ -8,7 +8,7 @@ use std::path::Path;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: texturing");
+    let mut window = Window::new("Kiss3d: texturing").await;
 
     let mut c = window.add_cube(1.0, 1.0, 1.0);
     c.set_color(1.0, 0.0, 0.0);

@@ -9,7 +9,7 @@ use rand::random;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: primitives_scale");
+    let mut window = Window::new("Kiss3d: primitives_scale").await;
 
     // NOTE: scaling is not possible.
     for i in 0usize..11 {

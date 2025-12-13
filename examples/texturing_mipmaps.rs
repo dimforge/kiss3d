@@ -9,7 +9,7 @@ use std::time::Instant;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: texturing-mipmaps");
+    let mut window = Window::new("Kiss3d: texturing-mipmaps").await;
     let tex_path = Path::new("./examples/media/checkerboard.png");
 
     // Show two spheres that are scaled up and down, one without mipmaps and one

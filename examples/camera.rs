@@ -15,7 +15,7 @@ async fn main() {
     let mut arc_ball = ArcBall::new(eye, at);
     let mut use_arc_ball = true;
 
-    let mut window = Window::new("Kiss3d: camera");
+    let mut window = Window::new("Kiss3d: camera").await;
     window.set_light(Light::StickToCamera);
 
     while !window.should_close() {
@@ -41,16 +41,19 @@ async fn main() {
             &Point3::origin(),
             &Point3::new(1.0, 0.0, 0.0),
             &Point3::new(1.0, 0.0, 0.0),
+            2.0,
         );
         window.draw_line(
             &Point3::origin(),
             &Point3::new(0.0, 1.0, 0.0),
             &Point3::new(0.0, 1.0, 0.0),
+            2.0,
         );
         window.draw_line(
             &Point3::origin(),
             &Point3::new(0.0, 0.0, 1.0),
             &Point3::new(0.0, 0.0, 1.0),
+            2.0,
         );
 
         if use_arc_ball {

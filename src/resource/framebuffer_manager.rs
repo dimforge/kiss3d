@@ -1,105 +1,173 @@
-//! Resource manager to allocate and switch between framebuffers.
+//! Resource manager to allocate and switch between render targets.
 
-use crate::{
-    context::{Context, Framebuffer, Renderbuffer, Texture},
-    verify,
-};
-use either::Either;
+use crate::context::Context;
 
 /// The target to every rendering call.
 pub enum RenderTarget {
-    /// The screen (main framebuffer).
+    /// The screen (main surface).
     Screen,
     /// An off-screen buffer.
     Offscreen(OffscreenBuffers),
 }
 
-/// OpenGL identifiers to an off-screen buffer.
+/// wgpu resources for an off-screen render target.
 pub struct OffscreenBuffers {
-    texture: Texture,
-    depth: Either<Texture, Renderbuffer>,
+    /// The color texture to render to.
+    pub color_texture: wgpu::Texture,
+    /// The color texture view.
+    pub color_view: wgpu::TextureView,
+    /// The depth texture.
+    pub depth_texture: wgpu::Texture,
+    /// The depth texture view.
+    pub depth_view: wgpu::TextureView,
+    /// The sampler for the color texture (for post-processing).
+    pub sampler: wgpu::Sampler,
+    /// Width of the render target.
+    pub width: u32,
+    /// Height of the render target.
+    pub height: u32,
 }
 
 impl RenderTarget {
-    /// Returns an opengl handle to the off-screen texture buffer.
+    /// Returns the color texture view for off-screen rendering.
     ///
-    /// Returns `None` if the texture is off-screen.
-    pub fn texture_id(&self) -> Option<&Texture> {
-        match *self {
+    /// Returns `None` if this is the screen target.
+    pub fn color_view(&self) -> Option<&wgpu::TextureView> {
+        match self {
             RenderTarget::Screen => None,
-            RenderTarget::Offscreen(ref o) => Some(&o.texture),
+            RenderTarget::Offscreen(o) => Some(&o.color_view),
         }
     }
 
-    /// Returns an opengl handle to the off-screen depth buffer.
+    /// Returns the depth texture view for off-screen rendering.
     ///
-    /// Returns `None` if the texture is off-screen.
-    #[cfg(not(target_arch = "wasm32"))]
-    pub fn depth_id(&self) -> Option<&Either<Texture, Renderbuffer>> {
-        match *self {
+    /// Returns `None` if this is the screen target.
+    pub fn depth_view(&self) -> Option<&wgpu::TextureView> {
+        match self {
             RenderTarget::Screen => None,
-            RenderTarget::Offscreen(ref o) => Some(&o.depth),
+            RenderTarget::Offscreen(o) => Some(&o.depth_view),
+        }
+    }
+
+    /// Returns the color texture for off-screen rendering.
+    ///
+    /// Returns `None` if this is the screen target.
+    pub fn color_texture(&self) -> Option<&wgpu::Texture> {
+        match self {
+            RenderTarget::Screen => None,
+            RenderTarget::Offscreen(o) => Some(&o.color_texture),
+        }
+    }
+
+    /// Returns the sampler for the color texture.
+    ///
+    /// Returns `None` if this is the screen target.
+    pub fn sampler(&self) -> Option<&wgpu::Sampler> {
+        match self {
+            RenderTarget::Screen => None,
+            RenderTarget::Offscreen(o) => Some(&o.sampler),
         }
     }
 
     /// Resizes this render target.
-    pub fn resize(&mut self, w: f32, h: f32) {
-        let ctxt = Context::get();
-
-        match *self {
+    pub fn resize(&mut self, width: u32, height: u32, surface_format: wgpu::TextureFormat) {
+        match self {
             RenderTarget::Screen => {
-                verify!(ctxt.viewport(0, 0, w as i32, h as i32));
+                // Screen resizing is handled by the canvas/surface
             }
-            RenderTarget::Offscreen(ref o) => {
-                // Update the fbo
-                verify!(ctxt.bind_texture(Context::TEXTURE_2D, Some(&o.texture)));
-                verify!(ctxt.tex_image2d(
-                    Context::TEXTURE_2D,
-                    0,
-                    Context::RGBA as i32,
-                    w as i32,
-                    h as i32,
-                    0,
-                    Context::RGBA,
-                    None
-                ));
-                verify!(ctxt.bind_texture(Context::TEXTURE_2D, None));
-
-                match &o.depth {
-                    Either::Left(texture) => {
-                        verify!(ctxt.bind_texture(Context::TEXTURE_2D, Some(texture)));
-                        verify!(ctxt.tex_image2d(
-                            Context::TEXTURE_2D,
-                            0,
-                            Context::DEPTH_COMPONENT as i32,
-                            w as i32,
-                            h as i32,
-                            0,
-                            Context::DEPTH_COMPONENT,
-                            None
-                        ));
-                        verify!(ctxt.bind_texture(Context::TEXTURE_2D, None));
-                    }
-                    Either::Right(renderbuffer) => {
-                        verify!(ctxt.bind_renderbuffer(Some(renderbuffer)));
-                        verify!(ctxt.renderbuffer_storage(
-                            Context::DEPTH_COMPONENT16,
-                            w as i32,
-                            h as i32
-                        ));
-                        verify!(ctxt.bind_renderbuffer(None));
-                    }
+            RenderTarget::Offscreen(o) => {
+                if o.width != width || o.height != height {
+                    // Recreate textures with new size
+                    *o = OffscreenBuffers::new(width, height, surface_format, true);
                 }
             }
         }
     }
 }
 
-/// A framebuffer manager. It is a simple to to switch between an off-screen framebuffer and the
-/// default (window) framebuffer.
+impl OffscreenBuffers {
+    /// Creates new off-screen buffers with the specified dimensions.
+    pub fn new(
+        width: u32,
+        height: u32,
+        format: wgpu::TextureFormat,
+        create_depth_texture: bool,
+    ) -> Self {
+        let ctxt = Context::get();
+
+        // Ensure minimum dimensions of 1x1 to avoid wgpu validation errors
+        let width = width.max(1);
+        let height = height.max(1);
+
+        // Create color texture
+        let color_texture = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen_color_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let color_view = color_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create depth texture
+        let depth_format = Context::depth_format();
+        let depth_texture = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("offscreen_depth_texture"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: depth_format,
+            usage: if create_depth_texture {
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+            } else {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+            },
+            view_formats: &[],
+        });
+
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Create sampler for the color texture
+        let sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("offscreen_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+
+        OffscreenBuffers {
+            color_texture,
+            color_view,
+            depth_texture,
+            depth_view,
+            sampler,
+            width,
+            height,
+        }
+    }
+}
+
+/// A framebuffer manager. It manages off-screen render targets for post-processing effects.
 pub struct FramebufferManager {
-    fbo_onscreen: bool,
-    fbo: Framebuffer,
+    /// The surface format for creating compatible textures.
+    surface_format: wgpu::TextureFormat,
 }
 
 impl Default for FramebufferManager {
@@ -112,126 +180,25 @@ impl FramebufferManager {
     /// Creates a new framebuffer manager.
     pub fn new() -> FramebufferManager {
         let ctxt = Context::get();
-
-        // create an off-screen framebuffer
-        let fbo = ctxt
-            .create_framebuffer()
-            .expect("Framebuffer creation failed.");
-
-        // ensure that the current framebuffer is the screen
-        verify!(ctxt.bind_framebuffer(Context::FRAMEBUFFER, None));
-
         FramebufferManager {
-            fbo_onscreen: true,
-            fbo,
+            surface_format: ctxt.surface_format,
         }
     }
 
     /// Creates a new render target. A render target is the combination of a color buffer and a
     /// depth buffer.
     pub fn new_render_target(
-        width: usize,
-        height: usize,
+        &self,
+        width: u32,
+        height: u32,
         create_depth_texture: bool,
     ) -> RenderTarget {
-        let ctxt = Context::get();
-
-        /* Texture */
-        verify!(ctxt.active_texture(Context::TEXTURE0));
-        let fbo_texture = verify!(ctxt
-            .create_texture()
-            .expect("Failde to create framebuffer object texture."));
-        verify!(ctxt.bind_texture(Context::TEXTURE_2D, Some(&fbo_texture)));
-        verify!(ctxt.tex_parameteri(
-            Context::TEXTURE_2D,
-            Context::TEXTURE_MAG_FILTER,
-            Context::LINEAR as i32
-        ));
-        verify!(ctxt.tex_parameteri(
-            Context::TEXTURE_2D,
-            Context::TEXTURE_MIN_FILTER,
-            Context::LINEAR as i32
-        ));
-        verify!(ctxt.tex_parameteri(
-            Context::TEXTURE_2D,
-            Context::TEXTURE_WRAP_S,
-            Context::CLAMP_TO_EDGE as i32
-        ));
-        verify!(ctxt.tex_parameteri(
-            Context::TEXTURE_2D,
-            Context::TEXTURE_WRAP_T,
-            Context::CLAMP_TO_EDGE as i32
-        ));
-        verify!(ctxt.tex_image2d(
-            Context::TEXTURE_2D,
-            0,
-            Context::RGBA as i32,
-            width as i32,
-            height as i32,
-            0,
-            Context::RGBA,
-            None
-        ));
-        verify!(ctxt.bind_texture(Context::TEXTURE_2D, None));
-
-        /* Depth buffer */
-        if create_depth_texture && cfg!(not(target_arch = "wasm32")) {
-            verify!(ctxt.active_texture(Context::TEXTURE1));
-            let fbo_depth = verify!(ctxt.create_texture().expect("Failed to create a texture."));
-            verify!(ctxt.bind_texture(Context::TEXTURE_2D, Some(&fbo_depth)));
-            verify!(ctxt.tex_parameteri(
-                Context::TEXTURE_2D,
-                Context::TEXTURE_MAG_FILTER,
-                Context::LINEAR as i32
-            ));
-            verify!(ctxt.tex_parameteri(
-                Context::TEXTURE_2D,
-                Context::TEXTURE_MIN_FILTER,
-                Context::LINEAR as i32
-            ));
-            verify!(ctxt.tex_parameteri(
-                Context::TEXTURE_2D,
-                Context::TEXTURE_WRAP_S,
-                Context::CLAMP_TO_EDGE as i32
-            ));
-            verify!(ctxt.tex_parameteri(
-                Context::TEXTURE_2D,
-                Context::TEXTURE_WRAP_T,
-                Context::CLAMP_TO_EDGE as i32
-            ));
-            verify!(ctxt.tex_image2di(
-                Context::TEXTURE_2D,
-                0,
-                Context::DEPTH_COMPONENT as i32,
-                width as i32,
-                height as i32,
-                0,
-                Context::DEPTH_COMPONENT,
-                None
-            ));
-            verify!(ctxt.bind_texture(Context::TEXTURE_2D, None));
-
-            RenderTarget::Offscreen(OffscreenBuffers {
-                texture: fbo_texture,
-                depth: Either::Left(fbo_depth),
-            })
-        } else {
-            // Create a renderbuffer instead of the texture for the depth.
-            let renderbuffer =
-                verify!(ctxt.create_renderbuffer()).expect("Failed to create a renderbuffer.");
-            verify!(ctxt.bind_renderbuffer(Some(&renderbuffer)));
-            verify!(ctxt.renderbuffer_storage(
-                Context::DEPTH_COMPONENT16,
-                width as i32,
-                height as i32
-            ));
-            verify!(ctxt.bind_renderbuffer(None));
-
-            RenderTarget::Offscreen(OffscreenBuffers {
-                texture: fbo_texture,
-                depth: Either::Right(renderbuffer),
-            })
-        }
+        RenderTarget::Offscreen(OffscreenBuffers::new(
+            width,
+            height,
+            self.surface_format,
+            create_depth_texture,
+        ))
     }
 
     /// Returns the render target associated with the screen.
@@ -239,86 +206,8 @@ impl FramebufferManager {
         RenderTarget::Screen
     }
 
-    /// Selects a specific render target
-    pub fn select(&mut self, target: &RenderTarget) {
-        match *target {
-            RenderTarget::Screen => {
-                self.select_onscreen();
-            }
-            RenderTarget::Offscreen(ref o) => {
-                let ctxt = Context::get();
-                self.select_fbo();
-
-                // FIXME: don't switch if the current texture is
-                // already o.texture ?
-                verify!(ctxt.framebuffer_texture2d(
-                    Context::FRAMEBUFFER,
-                    Context::COLOR_ATTACHMENT0,
-                    Context::TEXTURE_2D,
-                    Some(&o.texture),
-                    0
-                ));
-
-                match &o.depth {
-                    Either::Left(texture) => {
-                        verify!(ctxt.framebuffer_texture2d(
-                            Context::FRAMEBUFFER,
-                            Context::DEPTH_ATTACHMENT,
-                            Context::TEXTURE_2D,
-                            Some(texture),
-                            0
-                        ));
-                    }
-                    Either::Right(renderbuffer) => verify!(ctxt
-                        .framebuffer_renderbuffer(Context::DEPTH_ATTACHMENT, Some(renderbuffer))),
-                }
-            }
-        }
-    }
-
-    fn select_onscreen(&mut self) {
-        if !self.fbo_onscreen {
-            verify!(Context::get().bind_framebuffer(Context::FRAMEBUFFER, None));
-            self.fbo_onscreen = true;
-        }
-    }
-
-    fn select_fbo(&mut self) {
-        if self.fbo_onscreen {
-            verify!(Context::get().bind_framebuffer(Context::FRAMEBUFFER, Some(&self.fbo)));
-            self.fbo_onscreen = false;
-        }
-    }
-}
-
-impl Drop for FramebufferManager {
-    fn drop(&mut self) {
-        let ctxt = Context::get();
-        if verify!(ctxt.is_framebuffer(Some(&self.fbo))) {
-            verify!(ctxt.bind_framebuffer(Context::FRAMEBUFFER, None));
-            verify!(ctxt.delete_framebuffer(Some(&self.fbo)));
-        }
-    }
-}
-
-impl Drop for OffscreenBuffers {
-    fn drop(&mut self) {
-        let ctxt = Context::get();
-        if verify!(ctxt.is_texture(Some(&self.texture))) {
-            verify!(ctxt.delete_texture(Some(&self.texture)));
-        }
-
-        match &self.depth {
-            Either::Left(texture) => {
-                if verify!(ctxt.is_texture(Some(texture))) {
-                    verify!(ctxt.delete_texture(Some(texture)));
-                }
-            }
-            Either::Right(renderbuffer) => {
-                if verify!(ctxt.is_renderbuffer(Some(renderbuffer))) {
-                    verify!(ctxt.delete_renderbuffer(Some(renderbuffer)));
-                }
-            }
-        }
+    /// Gets the surface format used by this manager.
+    pub fn surface_format(&self) -> wgpu::TextureFormat {
+        self.surface_format
     }
 }

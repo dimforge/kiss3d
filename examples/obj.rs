@@ -9,7 +9,7 @@ use std::path::Path;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: obj");
+    let mut window = Window::new("Kiss3d: obj").await;
 
     // Teapot
     let obj_path = Path::new("examples/media/teapot/teapot.obj");

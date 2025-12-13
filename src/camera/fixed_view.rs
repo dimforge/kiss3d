@@ -1,6 +1,5 @@
 use crate::camera::Camera;
 use crate::event::WindowEvent;
-use crate::resource::ShaderUniform;
 use crate::window::Canvas;
 use na::{self, Isometry3, Matrix4, Perspective3, Point3};
 use std::f32;
@@ -64,15 +63,8 @@ impl Camera for FixedView {
     }
 
     #[inline]
-    fn upload(
-        &self,
-        _: usize,
-        proj: &mut ShaderUniform<Matrix4<f32>>,
-        view: &mut ShaderUniform<Matrix4<f32>>,
-    ) {
-        let view_mat = Matrix4::identity();
-        proj.upload(&self.proj);
-        view.upload(&view_mat);
+    fn view_transform_pair(&self, _pass: usize) -> (Isometry3<f32>, Matrix4<f32>) {
+        (Isometry3::identity(), self.proj)
     }
 
     fn transformation(&self) -> Matrix4<f32> {

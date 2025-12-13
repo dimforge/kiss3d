@@ -1,5 +1,9 @@
 # Kiss3d
 
+<p align="center">
+  <img src="assets/kiss3d-logo.png" alt="crates.io" width="300px">
+</p>
+
 [![Crates.io](https://img.shields.io/crates/v/kiss3d.svg)](https://crates.io/crates/kiss3d)
 [![Docs](https://docs.rs/kiss3d/badge.svg)](https://docs.rs/kiss3d)
 [![License](https://img.shields.io/crates/l/kiss3d)](https://github.com/sebcrozet/kiss3d)
@@ -80,11 +84,58 @@ and the official package manager: [cargo](https://github.com/rust-lang/cargo).
 
 Simply add the following to your `Cargo.toml` file:
 
-```
+```toml
 [dependencies]
-kiss3d = "0.36"
+kiss3d = "0.37"
 ```
 Note: If your project already uses nalgebra, you'll need the same version used by `kiss3d`, or you may run into compatibility issues.
+
+### Optional Features
+
+#### Recording
+
+Kiss3d supports recording your 3D scene to MP4 video files. This feature requires FFmpeg to be installed on your system.
+
+**Install FFmpeg:**
+- macOS: `brew install ffmpeg`
+- Ubuntu/Debian: `sudo apt install ffmpeg libavcodec-dev libavformat-dev libavutil-dev libswscale-dev`
+- Windows: Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to PATH
+
+**Enable the feature in your Cargo.toml:**
+```toml
+[dependencies]
+kiss3d = { version = "0.37", features = ["recording"] }
+```
+
+**Example usage:**
+```rust
+use kiss3d::window::{Window, RecordingConfig};
+
+#[kiss3d::main]
+async fn main() {
+    let mut window = Window::new("Recording Example").await;
+
+    // Start recording (optionally skip frames to reduce file size)
+    let config = RecordingConfig::new().with_frame_skip(2);
+    window.begin_recording_with_config(config);
+
+    // Render your scene
+    for _ in 0..120 {
+        window.render().await;
+    }
+
+    // Save to MP4 (30 fps)
+    window.end_recording("output.mp4", 30).unwrap();
+}
+```
+
+#### Egui Integration
+
+For immediate mode GUI support, enable the `egui` feature:
+```toml
+[dependencies]
+kiss3d = { version = "0.37", features = ["egui"] }
+```
 
 
 ## Contributions

@@ -4,6 +4,7 @@
 *.rlib
 *.dSYM
 *.dylib
+.DS_store
 cargo.lock
 Cargo.lock
 target
@@ -31,3 +32,5 @@ bin/procedural
 examples/wasm/
 
 .idea/
+recording.mp4
+screenshot.png

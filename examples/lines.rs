@@ -7,7 +7,7 @@ use na::{Point2, Point3};
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: lines");
+    let mut window = Window::new("Kiss3d: lines").await;
 
     window.set_light(Light::StickToCamera);
 
@@ -16,15 +16,15 @@ async fn main() {
         let b = Point3::new(0.0, 0.1, 0.0);
         let c = Point3::new(0.1, -0.1, 0.0);
 
-        window.set_line_width(2.0);
-        window.draw_line(&a, &b, &Point3::new(1.0, 0.0, 0.0));
-        window.draw_line(&b, &c, &Point3::new(0.0, 1.0, 0.0));
-        window.draw_line(&c, &a, &Point3::new(0.0, 0.0, 1.0));
+        window.draw_line(&a, &b, &Point3::new(1.0, 0.0, 0.0), 2.0);
+        window.draw_line(&b, &c, &Point3::new(0.0, 1.0, 0.0), 2.0);
+        window.draw_line(&c, &a, &Point3::new(0.0, 0.0, 1.0), 2.0);
 
         window.draw_planar_line(
             &Point2::new(-100.0, -200.0),
             &Point2::new(100.0, -200.0),
             &Point3::new(1.0, 1.0, 1.0),
+            2.0,
         );
     }
 }
