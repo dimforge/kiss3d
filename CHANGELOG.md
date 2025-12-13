@@ -1,6 +1,65 @@
+# v0.38.0
+
+Switch from OpenGL (glow/glutin) to wgpu for cross-platform GPU support.
+
+## Breaking Changes
+
+### Graphics Backend
+- **Replaced** OpenGL backend (glow/glutin) with wgpu
+- `Window::new()` is now async: `Window::new("Title").await`
+- Shaders switched from GLSL to WGSL (`.vert`/`.frag` → `.wgsl`)
+
+### Line Rendering API
+- **Replaced** `LineRenderer` with `PolylineRenderer`
+- **Replaced** `PlanarLineRenderer` with `PlanarPolylineRenderer`
+- **Removed** `set_line_width()` - width is now per-line
+- **Changed** `draw_line(a, b, color)` → `draw_line(a, b, color, width)`
+- **Changed** `draw_planar_line(a, b, color)` → `draw_planar_line(a, b, color, width)`
+- **Added** `Polyline` struct with builder pattern for multi-segment lines
+- **Added** `PlanarPolyline` struct for 2D multi-segment lines
+- **Added** `draw_polyline(&Polyline)` and `draw_planar_polyline(&PlanarPolyline)`
+
+### Point Rendering API
+- **Removed** `set_point_size()` - size is now per-point via `draw_point(pt, color, size)`
+
+### Removed Types
+- `Effect` (shader programs now use wgpu pipelines)
+- `GLPrimitive`, `gl_context` module
+- `line_renderer` module (use `polyline_renderer`)
+- `planar_line_renderer` module (use `planar_polyline_renderer`)
+
+### Dependencies
+- **Removed**: `glow`, `glutin`, `glutin-winit`, `egui_glow`
+- **Added**: `wgpu`, `bytemuck`, `log`
+- **Changed**: `egui_glow` → `egui-wgpu`
+
+## New Features
+
+### Video Recording (`recording` feature)
+- `begin_recording()` / `begin_recording_with_config(RecordingConfig)`
+- `end_recording(path, fps)` - encodes to MP4
+- `pause_recording()` / `resume_recording()`
+- `is_recording()` / `is_recording_paused()`
+- `RecordingConfig` with `frame_skip` option
+- Requires ffmpeg libraries at runtime
+
+### Polyline Rendering
+- `Polyline::new(vertices)` with builder methods:
+  - `.with_color(r, g, b)`
+  - `.with_width(width)`
+  - `.with_perspective(bool)`
+  - `.with_depth_bias(bias)`
+  - `.with_transform(Isometry3)`
+- `PlanarPolyline::new(vertices)` with similar builder API
+
+### Other
+- `snap_image()` returns `ImageBuffer<Rgb<u8>, Vec<u8>>` directly
+
+---
+
 # v0.37.2
 
-- Fix the egui UI not rendering if the display’s hidpi factor is exactly 1.0.
+- Fix the egui UI not rendering if the display's hidpi factor is exactly 1.0.
 
 # v0.37.1
 

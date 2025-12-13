@@ -109,7 +109,6 @@ extern crate rusttype;
 extern crate serde_derive;
 extern crate serde;
 
-// NOTE: egui feature is currently broken during wgpu migration
 #[cfg(feature = "egui")]
 pub extern crate egui;
 
