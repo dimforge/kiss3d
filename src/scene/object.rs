@@ -178,10 +178,10 @@ impl Default for InstanceData {
             position: Point3::origin(),
             deformation: Matrix3::identity(),
             color: [1.0; 4],
-            lines_color: None, // Use object's wireframe color
-            lines_width: None, // Use object's wireframe width
+            lines_color: None,  // Use object's wireframe color
+            lines_width: None,  // Use object's wireframe width
             points_color: None, // Use object's point color
-            points_size: None, // Use object's point size
+            points_size: None,  // Use object's point size
         }
     }
 }

@@ -151,7 +151,7 @@ impl PolylineRenderer {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("polyline_shader"),
-            include_str!("../builtin/polyline.wgsl").into(),
+            include_str!("../builtin/polyline.wgsl"),
         );
 
         // Vertex buffer layout - each instance is a line segment with material data
@@ -304,13 +304,7 @@ impl PolylineRenderer {
     }
 
     /// Draws a simple line segment with the given width.
-    pub fn draw_line(
-        &mut self,
-        a: Point3<f32>,
-        b: Point3<f32>,
-        color: Point3<f32>,
-        width: f32,
-    ) {
+    pub fn draw_line(&mut self, a: Point3<f32>, b: Point3<f32>, color: Point3<f32>, width: f32) {
         self.segments.push(LineSegment {
             point_a: a.coords.into(),
             width,
@@ -382,7 +376,11 @@ impl Renderer for PolylineRenderer {
         self.ensure_segment_buffer_capacity(self.segments.len());
 
         // Upload all segment data at once
-        ctxt.write_buffer(&self.segment_buffer, 0, bytemuck::cast_slice(&self.segments));
+        ctxt.write_buffer(
+            &self.segment_buffer,
+            0,
+            bytemuck::cast_slice(&self.segments),
+        );
 
         // Create view bind group
         let view_bind_group = self.create_view_bind_group();

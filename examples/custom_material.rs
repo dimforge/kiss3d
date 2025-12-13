@@ -18,7 +18,7 @@ async fn main() {
     let mut window = Window::new("Kiss3d: custom_material").await;
     let mut c = window.add_sphere(1.0);
     let material = Rc::new(RefCell::new(
-        Box::new(NormalMaterial::new()) as Box<dyn Material + 'static>,
+        Box::new(NormalMaterial::new()) as Box<dyn Material + 'static>
     ));
 
     c.set_material(material);

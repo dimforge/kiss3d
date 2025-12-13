@@ -47,17 +47,18 @@ struct WireframeViewUniforms {
 /// - default_width: f32 at offset 96 (4 bytes)
 /// - use_perspective: u32 at offset 100 (4 bytes)
 /// - _padding: vec2<f32> at offset 104 (8 bytes)
+///
 /// Total: 112 bytes
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct WireframeModelUniforms {
-    transform: [[f32; 4]; 4],  // 64 bytes at offset 0
-    scale: [f32; 3],           // 12 bytes at offset 64
-    num_edges: u32,            // 4 bytes at offset 76
-    default_color: [f32; 4],   // 16 bytes at offset 80
-    default_width: f32,        // 4 bytes at offset 96
-    use_perspective: u32,      // 4 bytes at offset 100
-    _padding: [f32; 2],        // 8 bytes at offset 104 to align to 16-byte boundary
+    transform: [[f32; 4]; 4], // 64 bytes at offset 0
+    scale: [f32; 3],          // 12 bytes at offset 64
+    num_edges: u32,           // 4 bytes at offset 76
+    default_color: [f32; 4],  // 16 bytes at offset 80
+    default_width: f32,       // 4 bytes at offset 96
+    use_perspective: u32,     // 4 bytes at offset 100
+    _padding: [f32; 2],       // 8 bytes at offset 104 to align to 16-byte boundary
 }
 
 /// Edge data in GPU format (matches shader struct).
@@ -75,13 +76,13 @@ struct GpuEdge {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct PointsModelUniforms {
-    transform: [[f32; 4]; 4],  // 64 bytes at offset 0
-    scale: [f32; 3],           // 12 bytes at offset 64
-    num_vertices: u32,         // 4 bytes at offset 76
-    default_color: [f32; 4],   // 16 bytes at offset 80
-    default_size: f32,         // 4 bytes at offset 96
-    use_perspective: u32,      // 4 bytes at offset 100
-    _padding: [f32; 2],        // 8 bytes at offset 104 to align to 16-byte boundary
+    transform: [[f32; 4]; 4], // 64 bytes at offset 0
+    scale: [f32; 3],          // 12 bytes at offset 64
+    num_vertices: u32,        // 4 bytes at offset 76
+    default_color: [f32; 4],  // 16 bytes at offset 80
+    default_size: f32,        // 4 bytes at offset 96
+    use_perspective: u32,     // 4 bytes at offset 100
+    _padding: [f32; 2],       // 8 bytes at offset 104 to align to 16-byte boundary
 }
 
 /// Vertex data in GPU format for points (matches shader struct).
@@ -372,10 +373,8 @@ impl ObjectMaterial {
         });
 
         // Load shader
-        let shader = ctxt.create_shader_module(
-            Some("object_material_shader"),
-            include_str!("default.wgsl").into(),
-        );
+        let shader =
+            ctxt.create_shader_module(Some("object_material_shader"), include_str!("default.wgsl"));
 
         // Vertex buffer layouts
         // Note: We use separate buffers for instance data (positions, colors, deformations)
@@ -506,17 +505,16 @@ impl ObjectMaterial {
             })
         };
 
-        let pipeline_cull = create_pipeline(Some(wgpu::Face::Back), "object_material_pipeline_cull");
+        let pipeline_cull =
+            create_pipeline(Some(wgpu::Face::Back), "object_material_pipeline_cull");
         let pipeline_no_cull = create_pipeline(None, "object_material_pipeline_no_cull");
 
         // Create wireframe shader and pipelines for lines/points
         // Note: _wireframe_shader, _wireframe_pipeline_layout, and _wireframe_vertex_buffer_layouts
         // were previously used for the old PointList pipeline but are now replaced by the new
         // wireframe_points.wgsl shader. Keeping them here in case they're needed for 1px fallback.
-        let _wireframe_shader = ctxt.create_shader_module(
-            Some("wireframe_shader"),
-            include_str!("wireframe.wgsl").into(),
-        );
+        let _wireframe_shader =
+            ctxt.create_shader_module(Some("wireframe_shader"), include_str!("wireframe.wgsl"));
 
         // Pipeline layout for wireframe (only needs frame and object uniforms, no texture)
         let _wireframe_pipeline_layout =
@@ -643,7 +641,7 @@ impl ObjectMaterial {
         // Load wireframe polyline shader
         let wireframe_polyline_shader = ctxt.create_shader_module(
             Some("wireframe_polyline_shader"),
-            include_str!("wireframe_polyline.wgsl").into(),
+            include_str!("wireframe_polyline.wgsl"),
         );
 
         // Instance vertex buffer layouts for wireframe (matching InstancesBuffer)
@@ -807,14 +805,17 @@ impl ObjectMaterial {
 
         let points_pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("points_pipeline_layout"),
-            bind_group_layouts: &[&points_view_bind_group_layout, &points_model_bind_group_layout],
+            bind_group_layouts: &[
+                &points_view_bind_group_layout,
+                &points_model_bind_group_layout,
+            ],
             push_constant_ranges: &[],
         });
 
         // Load points shader
         let points_shader = ctxt.create_shader_module(
             Some("wireframe_points_shader"),
-            include_str!("wireframe_points.wgsl").into(),
+            include_str!("wireframe_points.wgsl"),
         );
 
         // Instance vertex buffer layouts for points (similar to wireframe but with points_colors/sizes)
@@ -1306,7 +1307,8 @@ impl Material for ObjectMaterial {
             let faces_len = mesh.faces().read().unwrap().len();
             let faces_hash = faces_len as u64;
 
-            if gpu_data.wireframe_edges.is_none() || gpu_data.wireframe_edges_mesh_hash != faces_hash
+            if gpu_data.wireframe_edges.is_none()
+                || gpu_data.wireframe_edges_mesh_hash != faces_hash
             {
                 let coords_guard = mesh.coords().read().unwrap();
                 let faces_guard = mesh.faces().read().unwrap();
@@ -1413,21 +1415,19 @@ impl Material for ObjectMaterial {
 
                 // Get or create wireframe bind groups
                 if gpu_data.wireframe_view_bind_group.is_none() {
-                    gpu_data.wireframe_view_bind_group = Some(
-                        self.create_wireframe_view_bind_group(
+                    gpu_data.wireframe_view_bind_group =
+                        Some(self.create_wireframe_view_bind_group(
                             &gpu_data.wireframe_view_uniform_buffer,
-                        ),
-                    );
+                        ));
                 }
                 if gpu_data.wireframe_model_bind_group.is_none() {
                     let edge_size = (num_edges * std::mem::size_of::<GpuEdge>()) as u64;
-                    gpu_data.wireframe_model_bind_group = Some(
-                        self.create_wireframe_model_bind_group(
+                    gpu_data.wireframe_model_bind_group =
+                        Some(self.create_wireframe_model_bind_group(
                             &gpu_data.wireframe_model_uniform_buffer,
                             &gpu_data.wireframe_edge_buffer,
                             edge_size,
-                        ),
-                    );
+                        ));
                 }
 
                 let wireframe_view_bind_group =
@@ -1436,31 +1436,32 @@ impl Material for ObjectMaterial {
                     gpu_data.wireframe_model_bind_group.as_ref().unwrap();
 
                 // Begin wireframe render pass
-                let mut render_pass = context
-                    .encoder
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("wireframe_render_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: context.color_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: Some(
-                            wgpu::RenderPassDepthStencilAttachment {
-                                view: context.depth_view,
-                                depth_ops: Some(wgpu::Operations {
+                let mut render_pass =
+                    context
+                        .encoder
+                        .begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("wireframe_render_pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: context.color_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
                                     load: wgpu::LoadOp::Load,
                                     store: wgpu::StoreOp::Store,
-                                }),
-                                stencil_ops: None,
-                            },
-                        ),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
+                                },
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: context.depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
 
                 render_pass.set_pipeline(&self.wireframe_pipeline);
                 render_pass.set_bind_group(0, wireframe_view_bind_group, &[]);
@@ -1492,12 +1493,13 @@ impl Material for ObjectMaterial {
                 hasher.finish()
             };
 
-            if gpu_data.points_vertices.is_none() || gpu_data.points_vertices_mesh_hash != coords_hash
+            if gpu_data.points_vertices.is_none()
+                || gpu_data.points_vertices_mesh_hash != coords_hash
             {
                 // Rebuild vertex cache from mesh coords
                 let coords_guard = mesh.coords().read().unwrap();
                 if let Some(coords) = coords_guard.data() {
-                    gpu_data.points_vertices = Some(coords.iter().cloned().collect());
+                    gpu_data.points_vertices = Some(coords.to_vec());
                     gpu_data.points_vertices_mesh_hash = coords_hash;
                     // Invalidate model bind group since vertices changed
                     gpu_data.points_model_bind_group = None;
@@ -1584,8 +1586,9 @@ impl Material for ObjectMaterial {
 
                 // Get or create points bind groups
                 if gpu_data.points_view_bind_group.is_none() {
-                    gpu_data.points_view_bind_group =
-                        Some(self.create_points_view_bind_group(&gpu_data.points_view_uniform_buffer));
+                    gpu_data.points_view_bind_group = Some(
+                        self.create_points_view_bind_group(&gpu_data.points_view_uniform_buffer),
+                    );
                 }
                 if gpu_data.points_model_bind_group.is_none() {
                     let vertex_size = (num_vertices * std::mem::size_of::<GpuVertex>()) as u64;
@@ -1600,29 +1603,32 @@ impl Material for ObjectMaterial {
                 let points_model_bind_group = gpu_data.points_model_bind_group.as_ref().unwrap();
 
                 // Begin points render pass
-                let mut render_pass = context
-                    .encoder
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("points_render_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: context.color_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                            view: context.depth_view,
-                            depth_ops: Some(wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            }),
-                            stencil_ops: None,
-                        }),
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
+                let mut render_pass =
+                    context
+                        .encoder
+                        .begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("points_render_pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: context.color_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: context.depth_view,
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
 
                 render_pass.set_pipeline(&self.points_pipeline);
                 render_pass.set_bind_group(0, points_view_bind_group, &[]);

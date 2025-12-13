@@ -206,10 +206,18 @@ fn draw_polyline(window: &mut Window, polyline: &[Point2<f32>], points: &[Point2
     );
 
     for pt in points.iter() {
-        window.draw_point(&Point3::new(pt.x, pt.y, 0.0), &Point3::new(0.0, 0.0, 1.0), 4.0);
+        window.draw_point(
+            &Point3::new(pt.x, pt.y, 0.0),
+            &Point3::new(0.0, 0.0, 1.0),
+            4.0,
+        );
     }
 
     for pt in polyline.iter() {
-        window.draw_point(&Point3::new(pt.x, pt.y, 0.0), &Point3::new(1.0, 0.0, 0.0), 4.0);
+        window.draw_point(
+            &Point3::new(pt.x, pt.y, 0.0),
+            &Point3::new(1.0, 0.0, 0.0),
+            4.0,
+        );
     }
 }

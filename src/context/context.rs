@@ -6,16 +6,16 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 
-/// The global wgpu context singleton (native).
-/// We use RefCell<Option<>> instead of OnceLock to allow resetting the context
-/// when creating new windows (required for multi-window support).
+// The global wgpu context singleton (native).
+// We use RefCell<Option<>> instead of OnceLock to allow resetting the context
+// when creating new windows (required for multi-window support).
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     static CONTEXT_SINGLETON: RefCell<Option<Context>> = const { RefCell::new(None) };
 }
 
-/// The global wgpu context singleton (WASM).
-/// We use RefCell<Option<>> to allow resetting the context when creating new windows.
+// The global wgpu context singleton (WASM).
+// We use RefCell<Option<>> to allow resetting the context when creating new windows.
 #[cfg(target_arch = "wasm32")]
 thread_local! {
     static CONTEXT_SINGLETON: RefCell<Option<Context>> = const { RefCell::new(None) };

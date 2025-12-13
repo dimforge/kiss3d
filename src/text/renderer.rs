@@ -159,7 +159,10 @@ impl TextRenderer {
         //
         // Create shader.
         //
-        let shader = ctxt.create_shader_module(Some("text_renderer_shader"), include_str!("../builtin/text.wgsl").into());
+        let shader = ctxt.create_shader_module(
+            Some("text_renderer_shader"),
+            include_str!("../builtin/text.wgsl"),
+        );
 
         // Vertex buffer layout - interleaved position, UV, and color
         let vertex_buffer_layout = wgpu::VertexBufferLayout {
@@ -318,7 +321,11 @@ impl TextRenderer {
 
                 for glyph in layout {
                     self.cache.queue_glyph(font_uid, glyph.clone());
-                    all_glyphs.push(GlyphData { glyph, font_uid, color });
+                    all_glyphs.push(GlyphData {
+                        glyph,
+                        font_uid,
+                        color,
+                    });
                 }
             }
             pos += text_context.len;
@@ -460,20 +467,22 @@ impl TextRenderer {
 
         // Create render pass and draw all text
         {
-            let mut render_pass = context.encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("text_renderer_render_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: context.color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
+            let mut render_pass = context
+                .encoder
+                .begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("text_renderer_render_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: context.color_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
 
             render_pass.set_pipeline(&self.pipeline);
             render_pass.set_bind_group(0, &uniform_bind_group, &[]);

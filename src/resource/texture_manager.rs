@@ -111,8 +111,7 @@ impl Texture {
                 let new_width = (current_width / 2).max(1);
                 let new_height = (current_height / 2).max(1);
 
-                let new_data =
-                    Self::downsample_rgba(&current_data, current_width, current_height);
+                let new_data = Self::downsample_rgba(&current_data, current_width, current_height);
 
                 ctxt.write_texture(
                     wgpu::TexelCopyTextureInfo {

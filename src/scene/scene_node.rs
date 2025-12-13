@@ -227,7 +227,7 @@ impl SceneNodeData {
     /// # Arguments
     /// * `width` - The line width
     /// * `use_perspective` - If true, width is in world units and scales with distance.
-    ///                       If false, width is in screen pixels and stays constant.
+    ///   If false, width is in screen pixels and stays constant.
     #[inline]
     pub fn set_lines_width(&mut self, width: f32, use_perspective: bool) {
         self.apply_to_objects_mut(&mut |o| o.set_lines_width(width, use_perspective))
@@ -247,7 +247,7 @@ impl SceneNodeData {
     /// # Arguments
     /// * `size` - The point size
     /// * `use_perspective` - If true, size is in world units and scales with distance.
-    ///                       If false, size is in screen pixels and stays constant.
+    ///   If false, size is in screen pixels and stays constant.
     #[inline]
     pub fn set_points_size(&mut self, size: f32, use_perspective: bool) {
         self.apply_to_objects_mut(&mut |o| o.set_points_size(size, use_perspective))

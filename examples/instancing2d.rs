@@ -23,7 +23,7 @@ async fn main() {
             let ii = i as f32;
             let jj = j as f32;
             let color = [ii / count as f32, jj / count as f32, 1.0, 1.0];
-            let mut lines_color = color.map(|c| 1.0 -  c);
+            let mut lines_color = color.map(|c| 1.0 - c);
             lines_color[3] = 1.0;
             instances.push(PlanarInstanceData {
                 position: Point2::new((ii - shift) * 150.0, (jj - shift) * 150.0),

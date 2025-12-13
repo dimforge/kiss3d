@@ -349,10 +349,8 @@ impl PlanarObjectMaterial {
         });
 
         // Load shader
-        let shader = ctxt.create_shader_module(
-            Some("planar_material_shader"),
-            include_str!("planar.wgsl").into(),
-        );
+        let shader =
+            ctxt.create_shader_module(Some("planar_material_shader"), include_str!("planar.wgsl"));
 
         // Vertex buffer layouts
         // Note: We use separate buffers for instance data (positions, colors, deformations)
@@ -515,7 +513,7 @@ impl PlanarObjectMaterial {
         // Load wireframe shader
         let wireframe_shader = ctxt.create_shader_module(
             Some("planar_wireframe_shader"),
-            include_str!("wireframe_planar_polyline.wgsl").into(),
+            include_str!("wireframe_planar_polyline.wgsl"),
         );
 
         // Wireframe instance vertex buffer layouts
@@ -676,7 +674,7 @@ impl PlanarObjectMaterial {
         // Load points shader
         let points_shader = ctxt.create_shader_module(
             Some("planar_points_shader"),
-            include_str!("wireframe_planar_points.wgsl").into(),
+            include_str!("wireframe_planar_points.wgsl"),
         );
 
         // Points instance vertex buffer layouts (same as wireframe but with points_colors/sizes)
@@ -1071,22 +1069,23 @@ impl PlanarMaterial for PlanarObjectMaterial {
 
             // Create render pass (no depth for 2D)
             {
-                let mut render_pass = context
-                    .encoder
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("planar_material_render_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: context.color_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
+                let mut render_pass =
+                    context
+                        .encoder
+                        .begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("planar_material_render_pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: context.color_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
 
                 render_pass.set_pipeline(&self.pipeline);
                 render_pass.set_bind_group(0, frame_bind_group, &[]);
@@ -1173,7 +1172,12 @@ impl PlanarMaterial for PlanarObjectMaterial {
             let wireframe_view_uniforms = WireframeViewUniforms {
                 view: Self::mat3_to_padded(&view),
                 proj: Self::mat3_to_padded(&proj),
-                viewport: [0.0, 0.0, context.viewport_width as f32, context.viewport_height as f32],
+                viewport: [
+                    0.0,
+                    0.0,
+                    context.viewport_width as f32,
+                    context.viewport_height as f32,
+                ],
             };
             ctxt.write_buffer(
                 &gpu_data.wireframe_view_uniform_buffer,
@@ -1226,22 +1230,23 @@ impl PlanarMaterial for PlanarObjectMaterial {
 
             // Create wireframe render pass
             {
-                let mut render_pass = context
-                    .encoder
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("planar_wireframe_render_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: context.color_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
+                let mut render_pass =
+                    context
+                        .encoder
+                        .begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("planar_wireframe_render_pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: context.color_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
 
                 render_pass.set_pipeline(&self.wireframe_pipeline);
                 render_pass.set_bind_group(0, wireframe_view_bind_group, &[]);
@@ -1312,7 +1317,12 @@ impl PlanarMaterial for PlanarObjectMaterial {
             let points_view_uniforms = WireframeViewUniforms {
                 view: Self::mat3_to_padded(&view),
                 proj: Self::mat3_to_padded(&proj),
-                viewport: [0.0, 0.0, context.viewport_width as f32, context.viewport_height as f32],
+                viewport: [
+                    0.0,
+                    0.0,
+                    context.viewport_width as f32,
+                    context.viewport_height as f32,
+                ],
             };
             ctxt.write_buffer(
                 &gpu_data.points_view_uniform_buffer,
@@ -1347,9 +1357,8 @@ impl PlanarMaterial for PlanarObjectMaterial {
 
             // Get or create cached points bind groups
             if gpu_data.points_view_bind_group.is_none() {
-                gpu_data.points_view_bind_group = Some(
-                    self.create_points_view_bind_group(&gpu_data.points_view_uniform_buffer),
-                );
+                gpu_data.points_view_bind_group =
+                    Some(self.create_points_view_bind_group(&gpu_data.points_view_uniform_buffer));
             }
             if gpu_data.points_model_bind_group.is_none() {
                 let vertex_size = (num_verts * std::mem::size_of::<GpuVertex2D>()) as u64;
@@ -1365,22 +1374,23 @@ impl PlanarMaterial for PlanarObjectMaterial {
 
             // Create points render pass
             {
-                let mut render_pass = context
-                    .encoder
-                    .begin_render_pass(&wgpu::RenderPassDescriptor {
-                        label: Some("planar_points_render_pass"),
-                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                            view: context.color_view,
-                            resolve_target: None,
-                            ops: wgpu::Operations {
-                                load: wgpu::LoadOp::Load,
-                                store: wgpu::StoreOp::Store,
-                            },
-                        })],
-                        depth_stencil_attachment: None,
-                        timestamp_writes: None,
-                        occlusion_query_set: None,
-                    });
+                let mut render_pass =
+                    context
+                        .encoder
+                        .begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("planar_points_render_pass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: context.color_view,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            depth_stencil_attachment: None,
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                        });
 
                 render_pass.set_pipeline(&self.points_pipeline);
                 render_pass.set_bind_group(0, points_view_bind_group, &[]);

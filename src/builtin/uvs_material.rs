@@ -132,7 +132,7 @@ impl UvsMaterial {
 
         // Load shader
         let shader =
-            ctxt.create_shader_module(Some("uvs_material_shader"), include_str!("uvs.wgsl").into());
+            ctxt.create_shader_module(Some("uvs_material_shader"), include_str!("uvs.wgsl"));
 
         // Vertex buffer layouts
         let vertex_buffer_layouts = [

@@ -16,9 +16,9 @@ use winit::event::{MouseScrollDelta, TouchPhase, WindowEvent as WinitWindowEvent
 #[cfg(not(target_arch = "wasm32"))]
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::EventLoop;
+use winit::keyboard::ModifiersState;
 #[cfg(not(target_arch = "wasm32"))]
 use winit::keyboard::{KeyCode, PhysicalKey};
-use winit::keyboard::ModifiersState;
 use winit::window::{Icon, Window, WindowAttributes};
 
 #[cfg(target_arch = "wasm32")]
@@ -28,10 +28,10 @@ use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
 
-/// Thread-local EventLoop singleton for native platforms.
-/// winit only allows one EventLoop per program, so we store it in thread-local
-/// storage and reuse it across window recreations. EventLoop is not Send/Sync,
-/// so we use thread_local! instead of a static Mutex.
+// Thread-local EventLoop singleton for native platforms.
+// winit only allows one EventLoop per program, so we store it in thread-local
+// storage and reuse it across window recreations. EventLoop is not Send/Sync,
+// so we use thread_local! instead of a static Mutex.
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     static EVENT_LOOP: RefCell<Option<EventLoop<()>>> = const { RefCell::new(None) };
@@ -128,7 +128,8 @@ impl WgpuCanvas {
 
                     // Append to body
                     if let Some(body) = document.body() {
-                        body.append_child(&canvas).expect("Failed to append canvas to body");
+                        body.append_child(&canvas)
+                            .expect("Failed to append canvas to body");
                     }
 
                     canvas
@@ -264,7 +265,8 @@ impl WgpuCanvas {
         };
 
         // Create readback texture for screenshots
-        let readback_texture = Self::create_readback_texture(&device, width, height, surface_format);
+        let readback_texture =
+            Self::create_readback_texture(&device, width, height, surface_format);
 
         // Initialize the global context
         Context::init(device, queue, adapter, surface_format);
@@ -282,185 +284,216 @@ impl WgpuCanvas {
                 {
                     let pending = pending_events.clone();
                     let canvas_clone = canvas.clone();
-                    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::PointerEvent| {
-                        // Get coordinates relative to canvas, accounting for CSS scaling
-                        let rect = canvas_clone.get_bounding_client_rect();
-                        let css_x = event.client_x() as f64 - rect.left();
-                        let css_y = event.client_y() as f64 - rect.top();
+                    let closure =
+                        Closure::<dyn FnMut(_)>::new(move |event: web_sys::PointerEvent| {
+                            // Get coordinates relative to canvas, accounting for CSS scaling
+                            let rect = canvas_clone.get_bounding_client_rect();
+                            let css_x = event.client_x() as f64 - rect.left();
+                            let css_y = event.client_y() as f64 - rect.top();
 
-                        // Scale from CSS pixels to canvas pixels
-                        let scale_x = canvas_clone.width() as f64 / rect.width();
-                        let scale_y = canvas_clone.height() as f64 / rect.height();
-                        let x = css_x * scale_x;
-                        let y = css_y * scale_y;
+                            // Scale from CSS pixels to canvas pixels
+                            let scale_x = canvas_clone.width() as f64 / rect.width();
+                            let scale_y = canvas_clone.height() as f64 / rect.height();
+                            let x = css_x * scale_x;
+                            let y = css_y * scale_y;
 
-                        pending
-                            .borrow_mut()
-                            .push(WindowEvent::CursorPos(x, y, Modifiers::empty()));
-                    });
-                    let _ = canvas
-                        .add_event_listener_with_callback("pointermove", closure.as_ref().unchecked_ref());
+                            pending.borrow_mut().push(WindowEvent::CursorPos(
+                                x,
+                                y,
+                                Modifiers::empty(),
+                            ));
+                        });
+                    let _ = canvas.add_event_listener_with_callback(
+                        "pointermove",
+                        closure.as_ref().unchecked_ref(),
+                    );
                     closures.push(closure.into_js_value());
                 }
 
                 // Pointer down
                 {
                     let pending = pending_events.clone();
-                    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::PointerEvent| {
-                        // Only handle mouse pointer type (not touch - that's handled separately)
-                        if event.pointer_type() == "mouse" {
-                            let button = translate_web_mouse_button(event.button());
-                            pending.borrow_mut().push(WindowEvent::MouseButton(
-                                button,
-                                Action::Press,
-                                Modifiers::empty(),
-                            ));
-                        }
-                    });
-                    let _ = canvas
-                        .add_event_listener_with_callback("pointerdown", closure.as_ref().unchecked_ref());
+                    let closure =
+                        Closure::<dyn FnMut(_)>::new(move |event: web_sys::PointerEvent| {
+                            // Only handle mouse pointer type (not touch - that's handled separately)
+                            if event.pointer_type() == "mouse" {
+                                let button = translate_web_mouse_button(event.button());
+                                pending.borrow_mut().push(WindowEvent::MouseButton(
+                                    button,
+                                    Action::Press,
+                                    Modifiers::empty(),
+                                ));
+                            }
+                        });
+                    let _ = canvas.add_event_listener_with_callback(
+                        "pointerdown",
+                        closure.as_ref().unchecked_ref(),
+                    );
                     closures.push(closure.into_js_value());
                 }
 
                 // Pointer up
                 {
                     let pending = pending_events.clone();
-                    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::PointerEvent| {
-                        // Only handle mouse pointer type (not touch - that's handled separately)
-                        if event.pointer_type() == "mouse" {
-                            let button = translate_web_mouse_button(event.button());
-                            pending.borrow_mut().push(WindowEvent::MouseButton(
-                                button,
-                                Action::Release,
-                                Modifiers::empty(),
-                            ));
-                        }
-                    });
-                    let _ = canvas
-                        .add_event_listener_with_callback("pointerup", closure.as_ref().unchecked_ref());
+                    let closure =
+                        Closure::<dyn FnMut(_)>::new(move |event: web_sys::PointerEvent| {
+                            // Only handle mouse pointer type (not touch - that's handled separately)
+                            if event.pointer_type() == "mouse" {
+                                let button = translate_web_mouse_button(event.button());
+                                pending.borrow_mut().push(WindowEvent::MouseButton(
+                                    button,
+                                    Action::Release,
+                                    Modifiers::empty(),
+                                ));
+                            }
+                        });
+                    let _ = canvas.add_event_listener_with_callback(
+                        "pointerup",
+                        closure.as_ref().unchecked_ref(),
+                    );
                     closures.push(closure.into_js_value());
                 }
 
                 // Wheel
                 {
                     let pending = pending_events.clone();
-                    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::WheelEvent| {
-                        // Prevent default scrolling behavior
-                        event.prevent_default();
-                        // Scale based on delta mode:
-                        // 0 = DOM_DELTA_PIXEL, 1 = DOM_DELTA_LINE, 2 = DOM_DELTA_PAGE
-                        let scale = match event.delta_mode() {
-                            0 => 0.01,  // Pixel mode - very small scale
-                            1 => 0.1,   // Line mode - moderate scale
-                            _ => 1.0,   // Page mode - use as-is
-                        };
-                        let dx = event.delta_x() * scale;
-                        let dy = -event.delta_y() * scale; // Invert for natural scrolling
-                        pending
-                            .borrow_mut()
-                            .push(WindowEvent::Scroll(dx, dy, Modifiers::empty()));
-                    });
-                    let _ = canvas
-                        .add_event_listener_with_callback("wheel", closure.as_ref().unchecked_ref());
+                    let closure =
+                        Closure::<dyn FnMut(_)>::new(move |event: web_sys::WheelEvent| {
+                            // Prevent default scrolling behavior
+                            event.prevent_default();
+                            // Scale based on delta mode:
+                            // 0 = DOM_DELTA_PIXEL, 1 = DOM_DELTA_LINE, 2 = DOM_DELTA_PAGE
+                            let scale = match event.delta_mode() {
+                                0 => 0.01, // Pixel mode - very small scale
+                                1 => 0.1,  // Line mode - moderate scale
+                                _ => 1.0,  // Page mode - use as-is
+                            };
+                            let dx = event.delta_x() * scale;
+                            let dy = -event.delta_y() * scale; // Invert for natural scrolling
+                            pending.borrow_mut().push(WindowEvent::Scroll(
+                                dx,
+                                dy,
+                                Modifiers::empty(),
+                            ));
+                        });
+                    let _ = canvas.add_event_listener_with_callback(
+                        "wheel",
+                        closure.as_ref().unchecked_ref(),
+                    );
                     closures.push(closure.into_js_value());
                 }
 
                 // Context menu (prevent right-click menu)
                 {
-                    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::MouseEvent| {
-                        event.prevent_default();
-                    });
-                    let _ = canvas
-                        .add_event_listener_with_callback("contextmenu", closure.as_ref().unchecked_ref());
+                    let closure =
+                        Closure::<dyn FnMut(_)>::new(move |event: web_sys::MouseEvent| {
+                            event.prevent_default();
+                        });
+                    let _ = canvas.add_event_listener_with_callback(
+                        "contextmenu",
+                        closure.as_ref().unchecked_ref(),
+                    );
                     closures.push(closure.into_js_value());
                 }
 
                 // Touch events
                 {
                     let pending = pending_events.clone();
-                    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
-                        event.prevent_default();
-                        let touches = event.changed_touches();
-                        for i in 0..touches.length() {
-                            if let Some(touch) = touches.get(i) {
-                                pending.borrow_mut().push(WindowEvent::Touch(
-                                    touch.identifier() as u64,
-                                    touch.client_x() as f64,
-                                    touch.client_y() as f64,
-                                    TouchAction::Start,
-                                    Modifiers::empty(),
-                                ));
+                    let closure =
+                        Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
+                            event.prevent_default();
+                            let touches = event.changed_touches();
+                            for i in 0..touches.length() {
+                                if let Some(touch) = touches.get(i) {
+                                    pending.borrow_mut().push(WindowEvent::Touch(
+                                        touch.identifier() as u64,
+                                        touch.client_x() as f64,
+                                        touch.client_y() as f64,
+                                        TouchAction::Start,
+                                        Modifiers::empty(),
+                                    ));
+                                }
                             }
-                        }
-                    });
-                    let _ = canvas
-                        .add_event_listener_with_callback("touchstart", closure.as_ref().unchecked_ref());
+                        });
+                    let _ = canvas.add_event_listener_with_callback(
+                        "touchstart",
+                        closure.as_ref().unchecked_ref(),
+                    );
                     closures.push(closure.into_js_value());
                 }
 
                 {
                     let pending = pending_events.clone();
-                    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
-                        event.prevent_default();
-                        let touches = event.changed_touches();
-                        for i in 0..touches.length() {
-                            if let Some(touch) = touches.get(i) {
-                                pending.borrow_mut().push(WindowEvent::Touch(
-                                    touch.identifier() as u64,
-                                    touch.client_x() as f64,
-                                    touch.client_y() as f64,
-                                    TouchAction::Move,
-                                    Modifiers::empty(),
-                                ));
+                    let closure =
+                        Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
+                            event.prevent_default();
+                            let touches = event.changed_touches();
+                            for i in 0..touches.length() {
+                                if let Some(touch) = touches.get(i) {
+                                    pending.borrow_mut().push(WindowEvent::Touch(
+                                        touch.identifier() as u64,
+                                        touch.client_x() as f64,
+                                        touch.client_y() as f64,
+                                        TouchAction::Move,
+                                        Modifiers::empty(),
+                                    ));
+                                }
                             }
-                        }
-                    });
-                    let _ = canvas
-                        .add_event_listener_with_callback("touchmove", closure.as_ref().unchecked_ref());
+                        });
+                    let _ = canvas.add_event_listener_with_callback(
+                        "touchmove",
+                        closure.as_ref().unchecked_ref(),
+                    );
                     closures.push(closure.into_js_value());
                 }
 
                 {
                     let pending = pending_events.clone();
-                    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
-                        event.prevent_default();
-                        let touches = event.changed_touches();
-                        for i in 0..touches.length() {
-                            if let Some(touch) = touches.get(i) {
-                                pending.borrow_mut().push(WindowEvent::Touch(
-                                    touch.identifier() as u64,
-                                    touch.client_x() as f64,
-                                    touch.client_y() as f64,
-                                    TouchAction::End,
-                                    Modifiers::empty(),
-                                ));
+                    let closure =
+                        Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
+                            event.prevent_default();
+                            let touches = event.changed_touches();
+                            for i in 0..touches.length() {
+                                if let Some(touch) = touches.get(i) {
+                                    pending.borrow_mut().push(WindowEvent::Touch(
+                                        touch.identifier() as u64,
+                                        touch.client_x() as f64,
+                                        touch.client_y() as f64,
+                                        TouchAction::End,
+                                        Modifiers::empty(),
+                                    ));
+                                }
                             }
-                        }
-                    });
-                    let _ = canvas
-                        .add_event_listener_with_callback("touchend", closure.as_ref().unchecked_ref());
+                        });
+                    let _ = canvas.add_event_listener_with_callback(
+                        "touchend",
+                        closure.as_ref().unchecked_ref(),
+                    );
                     closures.push(closure.into_js_value());
                 }
 
                 {
                     let pending = pending_events.clone();
-                    let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
-                        event.prevent_default();
-                        let touches = event.changed_touches();
-                        for i in 0..touches.length() {
-                            if let Some(touch) = touches.get(i) {
-                                pending.borrow_mut().push(WindowEvent::Touch(
-                                    touch.identifier() as u64,
-                                    touch.client_x() as f64,
-                                    touch.client_y() as f64,
-                                    TouchAction::Cancel,
-                                    Modifiers::empty(),
-                                ));
+                    let closure =
+                        Closure::<dyn FnMut(_)>::new(move |event: web_sys::TouchEvent| {
+                            event.prevent_default();
+                            let touches = event.changed_touches();
+                            for i in 0..touches.length() {
+                                if let Some(touch) = touches.get(i) {
+                                    pending.borrow_mut().push(WindowEvent::Touch(
+                                        touch.identifier() as u64,
+                                        touch.client_x() as f64,
+                                        touch.client_y() as f64,
+                                        TouchAction::Cancel,
+                                        Modifiers::empty(),
+                                    ));
+                                }
                             }
-                        }
-                    });
-                    let _ = canvas
-                        .add_event_listener_with_callback("touchcancel", closure.as_ref().unchecked_ref());
+                        });
+                    let _ = canvas.add_event_listener_with_callback(
+                        "touchcancel",
+                        closure.as_ref().unchecked_ref(),
+                    );
                     closures.push(closure.into_js_value());
                 }
             }
@@ -909,7 +942,7 @@ impl WgpuCanvas {
         let bytes_per_pixel = 4; // RGBA or BGRA
         let unpadded_bytes_per_row = width * bytes_per_pixel;
         let align = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT as usize;
-        let padded_bytes_per_row = (unpadded_bytes_per_row + align - 1) / align * align;
+        let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let buffer_size = padded_bytes_per_row * height;
 
         // Create staging buffer

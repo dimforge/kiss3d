@@ -133,7 +133,7 @@ impl NormalsMaterial {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("normals_material_shader"),
-            include_str!("normals.wgsl").into(),
+            include_str!("normals.wgsl"),
         );
 
         // Vertex buffer layouts
@@ -207,7 +207,8 @@ impl NormalsMaterial {
             })
         };
 
-        let pipeline_cull = create_pipeline(Some(wgpu::Face::Back), "normals_material_pipeline_cull");
+        let pipeline_cull =
+            create_pipeline(Some(wgpu::Face::Back), "normals_material_pipeline_cull");
         let pipeline_no_cull = create_pipeline(None, "normals_material_pipeline_no_cull");
 
         NormalsMaterial {

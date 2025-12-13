@@ -129,7 +129,7 @@ impl PlanarPolylineRenderer {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("planar_polyline_shader"),
-            include_str!("builtin/planar_polyline.wgsl").into(),
+            include_str!("builtin/planar_polyline.wgsl"),
         );
 
         // Vertex buffer layout - each instance is a line segment with material data
@@ -304,7 +304,11 @@ impl PlanarPolylineRenderer {
         self.ensure_segment_buffer_capacity(self.segments.len());
 
         // Upload all segment data at once
-        ctxt.write_buffer(&self.segment_buffer, 0, bytemuck::cast_slice(&self.segments));
+        ctxt.write_buffer(
+            &self.segment_buffer,
+            0,
+            bytemuck::cast_slice(&self.segments),
+        );
 
         // Create bind group
         let view_bind_group = self.create_view_bind_group();

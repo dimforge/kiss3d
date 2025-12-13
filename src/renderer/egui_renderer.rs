@@ -59,7 +59,7 @@ impl EguiRenderer {
             &ctxt.device,
             ctxt.surface_format,
             Some(Context::depth_format()),
-            1, // sample count
+            1,    // sample count
             true, // dithering
         );
 

@@ -336,8 +336,15 @@ impl Window {
     /// * `color` - RGB color (each component from 0.0 to 1.0)
     /// * `width` - Line width in pixels
     #[inline]
-    pub fn draw_planar_line(&mut self, a: &Point2<f32>, b: &Point2<f32>, color: &Point3<f32>, width: f32) {
-        self.planar_polyline_renderer.draw_line(*a, *b, *color, width);
+    pub fn draw_planar_line(
+        &mut self,
+        a: &Point2<f32>,
+        b: &Point2<f32>,
+        color: &Point3<f32>,
+        width: f32,
+    ) {
+        self.planar_polyline_renderer
+            .draw_line(*a, *b, *color, width);
     }
 
     /// Draws a 2D polyline (connected line segments) with configurable width.
@@ -1144,7 +1151,12 @@ impl Window {
     ///
     /// # Returns
     /// A new `Window` instance
-    pub async fn new_with_setup(title: &str, width: u32, height: u32, setup: CanvasSetup) -> Window {
+    pub async fn new_with_setup(
+        title: &str,
+        width: u32,
+        height: u32,
+        setup: CanvasSetup,
+    ) -> Window {
         Window::do_new(title, false, width, height, Some(setup)).await
     }
 
@@ -1180,11 +1192,7 @@ impl Window {
             text_renderer: TextRenderer::new(),
             #[cfg(feature = "egui")]
             egui_context: EguiContext::new(),
-            post_process_render_target: framebuffer_manager.new_render_target(
-                width,
-                height,
-                true,
-            ),
+            post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             framebuffer_manager,
             #[cfg(not(target_arch = "wasm32"))]
             curr_time: std::time::Instant::now(),
@@ -1459,10 +1467,10 @@ impl Window {
     /// ```
     #[cfg(feature = "recording")]
     pub fn end_recording<P: AsRef<Path>>(&mut self, path: P, fps: u32) -> Result<(), String> {
-        use ffmpeg_the_third as ffmpeg;
         use ffmpeg::{
             codec, encoder, format, frame, software::scaling, Dictionary, Packet, Rational,
         };
+        use ffmpeg_the_third as ffmpeg;
 
         let recording = self
             .recording
@@ -1480,18 +1488,20 @@ impl Window {
         ffmpeg::init().map_err(|e| format!("Failed to initialize FFmpeg: {}", e))?;
 
         // Create output context
-        let mut octx = format::output(&path)
-            .map_err(|e| format!("Failed to create output context: {}", e))?;
+        let mut octx =
+            format::output(&path).map_err(|e| format!("Failed to create output context: {}", e))?;
 
         // Check if global header is required before borrowing octx mutably
         let global_header = octx.format().flags().contains(format::Flags::GLOBAL_HEADER);
 
         // Find H.264 encoder
-        let codec = encoder::find(codec::Id::H264)
-            .ok_or_else(|| "H.264 encoder not found. Install FFmpeg with libx264 support.".to_string())?;
+        let codec = encoder::find(codec::Id::H264).ok_or_else(|| {
+            "H.264 encoder not found. Install FFmpeg with libx264 support.".to_string()
+        })?;
 
         // Add video stream
-        let mut ost = octx.add_stream(Some(codec))
+        let mut ost = octx
+            .add_stream(Some(codec))
             .map_err(|e| format!("Failed to add stream: {}", e))?;
 
         let ost_index = ost.index();
@@ -1537,7 +1547,8 @@ impl Window {
             width,
             height,
             scaling::Flags::BILINEAR,
-        ).map_err(|e| format!("Failed to create scaler: {}", e))?;
+        )
+        .map_err(|e| format!("Failed to create scaler: {}", e))?;
 
         let ost_time_base = octx.stream(ost_index).unwrap().time_base();
 
@@ -1551,14 +1562,16 @@ impl Window {
 
             // Scale to YUV420P
             let mut yuv_frame = frame::Video::empty();
-            scaler.run(&rgb_frame, &mut yuv_frame)
+            scaler
+                .run(&rgb_frame, &mut yuv_frame)
                 .map_err(|e| format!("Failed to scale frame: {}", e))?;
 
             // Set PTS (presentation timestamp)
             yuv_frame.set_pts(Some(i as i64));
 
             // Send frame to encoder
-            encoder.send_frame(&yuv_frame)
+            encoder
+                .send_frame(&yuv_frame)
                 .map_err(|e| format!("Failed to send frame: {}", e))?;
 
             // Receive and write encoded packets
@@ -1566,20 +1579,23 @@ impl Window {
             while encoder.receive_packet(&mut packet).is_ok() {
                 packet.set_stream(ost_index);
                 packet.rescale_ts(Rational::new(1, fps as i32), ost_time_base);
-                packet.write_interleaved(&mut octx)
+                packet
+                    .write_interleaved(&mut octx)
                     .map_err(|e| format!("Failed to write packet: {}", e))?;
             }
         }
 
         // Flush encoder
-        encoder.send_eof()
+        encoder
+            .send_eof()
             .map_err(|e| format!("Failed to send EOF: {}", e))?;
 
         let mut packet = Packet::empty();
         while encoder.receive_packet(&mut packet).is_ok() {
             packet.set_stream(ost_index);
             packet.rescale_ts(Rational::new(1, fps as i32), ost_time_base);
-            packet.write_interleaved(&mut octx)
+            packet
+                .write_interleaved(&mut octx)
                 .map_err(|e| format!("Failed to write packet: {}", e))?;
         }
 

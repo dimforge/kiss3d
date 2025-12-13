@@ -6,8 +6,8 @@ pub use self::object::{
 };
 pub use self::planar_object::{
     PlanarInstanceData, PlanarInstancesBuffer, PlanarObject, PlanarObjectData,
-    PLANAR_LINES_COLOR_USE_OBJECT, PLANAR_LINES_WIDTH_USE_OBJECT,
-    PLANAR_POINTS_COLOR_USE_OBJECT, PLANAR_POINTS_SIZE_USE_OBJECT,
+    PLANAR_LINES_COLOR_USE_OBJECT, PLANAR_LINES_WIDTH_USE_OBJECT, PLANAR_POINTS_COLOR_USE_OBJECT,
+    PLANAR_POINTS_SIZE_USE_OBJECT,
 };
 pub use self::planar_scene_node::{PlanarSceneNode, PlanarSceneNodeData};
 pub use self::scene_node::{SceneNode, SceneNodeData};

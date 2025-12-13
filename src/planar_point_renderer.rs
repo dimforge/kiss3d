@@ -88,7 +88,7 @@ impl PlanarPointRenderer {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("planar_point_renderer_shader"),
-            include_str!("builtin/planar_points.wgsl").into(),
+            include_str!("builtin/planar_points.wgsl"),
         );
 
         // No vertex buffers - using storage buffer and vertex_index

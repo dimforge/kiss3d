@@ -87,7 +87,7 @@ impl PointRenderer {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("point_renderer_shader"),
-            include_str!("../builtin/points.wgsl").into(),
+            include_str!("../builtin/points.wgsl"),
         );
 
         // No vertex buffers - using storage buffer and vertex_index
@@ -227,7 +227,12 @@ impl Renderer for PointRenderer {
         let frame_uniforms = FrameUniforms {
             view: view.to_homogeneous().into(),
             proj: proj.into(),
-            viewport: [0.0, 0.0, context.viewport_width as f32, context.viewport_height as f32],
+            viewport: [
+                0.0,
+                0.0,
+                context.viewport_width as f32,
+                context.viewport_height as f32,
+            ],
         };
         ctxt.write_buffer(
             &self.frame_uniform_buffer,

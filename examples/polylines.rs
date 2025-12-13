@@ -218,9 +218,8 @@ fn physics_step(bodies: &mut [Body], dt: f32) {
     let n = bodies.len();
 
     // Store accelerations
-    let accelerations: Vec<Vector3<f32>> = (0..n)
-        .map(|i| compute_acceleration(bodies, i))
-        .collect();
+    let accelerations: Vec<Vector3<f32>> =
+        (0..n).map(|i| compute_acceleration(bodies, i)).collect();
 
     // Update positions
     for (i, body) in bodies.iter_mut().enumerate() {
@@ -228,9 +227,8 @@ fn physics_step(bodies: &mut [Body], dt: f32) {
     }
 
     // Compute new accelerations
-    let new_accelerations: Vec<Vector3<f32>> = (0..n)
-        .map(|i| compute_acceleration(bodies, i))
-        .collect();
+    let new_accelerations: Vec<Vector3<f32>> =
+        (0..n).map(|i| compute_acceleration(bodies, i)).collect();
 
     // Update velocities
     for (i, body) in bodies.iter_mut().enumerate() {
