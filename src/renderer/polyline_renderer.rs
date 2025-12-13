@@ -1,6 +1,6 @@
 //! A polyline renderer with configurable line width.
 //!
-//! Based on bevy_polyline (https://github.com/ForesightMiningSoftwareCorporation/bevy_polyline)
+//! Based on [bevy_polyline](https://github.com/ForesightMiningSoftwareCorporation/bevy_polyline)
 //! which uses instanced rendering to draw thick lines efficiently.
 
 use crate::camera::Camera;
