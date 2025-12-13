@@ -256,6 +256,7 @@ async fn main() {
     let mut polylines = init_polylines();
 
     // UI state
+    #[allow(unused_mut)] // Silence warning appearing when the "egui" feature isn’t.
     let mut perspective_mode = false;
 
     while window.render_with_camera(&mut camera).await {

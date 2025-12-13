@@ -1,10 +1,6 @@
 extern crate kiss3d;
 extern crate nalgebra as na;
 
-use kiss3d::light::Light;
-use kiss3d::window::Window;
-use na::{UnitQuaternion, Vector3};
-
 /// This example demonstrates how to record a screencast of the 3D scene.
 ///
 /// Requires the `recording` feature to be enabled:
@@ -14,7 +10,9 @@ use na::{UnitQuaternion, Vector3};
 #[kiss3d::main]
 #[cfg(feature = "recording")]
 async fn main() {
-    use kiss3d::window::RecordingConfig;
+    use kiss3d::light::Light;
+    use kiss3d::window::Window;
+    use na::{UnitQuaternion, Vector3};
 
     let mut window = Window::new("Kiss3d: recording").await;
     let mut c = window.add_cube(0.2, 0.2, 0.2);
