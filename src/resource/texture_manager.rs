@@ -10,6 +10,7 @@ use crate::context::Context;
 
 /// Wrapping parameters for a texture.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TextureWrapping {
     /// Repeats the texture when a texture coordinate is out of bounds.
     Repeat,
@@ -216,6 +217,62 @@ impl Texture {
             1,
             &white_pixel,
             wgpu::TextureFormat::Rgba8UnormSrgb,
+            wgpu::AddressMode::Repeat,
+            false,
+        )
+    }
+
+    /// Creates a default flat normal map (1x1, pointing straight up in tangent space).
+    ///
+    /// The RGB value (128, 128, 255) represents a normal of (0, 0, 1) in tangent space.
+    pub fn new_default_normal_map() -> Arc<Texture> {
+        let normal_pixel: [u8; 4] = [128, 128, 255, 255];
+        Self::new(
+            1,
+            1,
+            &normal_pixel,
+            wgpu::TextureFormat::Rgba8Unorm, // Normal maps use linear data, not sRGB
+            wgpu::AddressMode::Repeat,
+            false,
+        )
+    }
+
+    /// Creates a default metallic-roughness map (1x1, non-metallic with medium roughness).
+    ///
+    /// Follows glTF convention: B channel = metallic (0), G channel = roughness (0.5).
+    pub fn new_default_metallic_roughness_map() -> Arc<Texture> {
+        let mr_pixel: [u8; 4] = [0, 128, 0, 255]; // R=unused, G=roughness(0.5), B=metallic(0)
+        Self::new(
+            1,
+            1,
+            &mr_pixel,
+            wgpu::TextureFormat::Rgba8Unorm, // Data texture, not sRGB
+            wgpu::AddressMode::Repeat,
+            false,
+        )
+    }
+
+    /// Creates a default ambient occlusion map (1x1, white = no occlusion).
+    pub fn new_default_ao_map() -> Arc<Texture> {
+        let ao_pixel: [u8; 4] = [255, 255, 255, 255];
+        Self::new(
+            1,
+            1,
+            &ao_pixel,
+            wgpu::TextureFormat::Rgba8Unorm, // Data texture, not sRGB
+            wgpu::AddressMode::Repeat,
+            false,
+        )
+    }
+
+    /// Creates a default emissive map (1x1, black = no emission).
+    pub fn new_default_emissive_map() -> Arc<Texture> {
+        let emissive_pixel: [u8; 4] = [0, 0, 0, 255];
+        Self::new(
+            1,
+            1,
+            &emissive_pixel,
+            wgpu::TextureFormat::Rgba8UnormSrgb, // Emissive is color data, use sRGB
             wgpu::AddressMode::Repeat,
             false,
         )

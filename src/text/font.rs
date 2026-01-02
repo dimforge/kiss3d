@@ -66,14 +66,13 @@ impl Font {
     ///
     /// # Example
     /// ```no_run
-    /// # use kiss3d::text::Font;
-    /// # use kiss3d::window::Window;
-    /// # use nalgebra::{Point2, Point3};
+    /// # use kiss3d::prelude::*;
+    /// # use glamx::Vec2;
     /// # #[kiss3d::main]
     /// # async fn main() {
     /// # let mut window = Window::new("Example").await;
     /// let font = Font::default();
-    /// window.draw_text("Hello", &Point2::new(10.0, 10.0), 60.0, &font, &Point3::new(1.0, 1.0, 1.0));
+    /// window.draw_text("Hello", Vec2::new(10.0, 10.0), 60.0, &font, WHITE);
     /// # }
     /// ```
     #[allow(clippy::should_implement_trait)]

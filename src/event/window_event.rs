@@ -2,7 +2,8 @@
 ///
 /// These events are produced during each frame and can be accessed via
 /// [`Window::events()`](crate::window::Window::events).
-#[derive(Copy, Clone, PartialEq, PartialOrd, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, PartialEq, PartialOrd, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum WindowEvent {
     /// The window position changed (x, y in screen coordinates).
     Pos(i32, i32),
@@ -67,7 +68,8 @@ impl WindowEvent {
 }
 
 // NOTE: list of keys inspired from glutin.
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Key {
     Key1,
     Key2,
@@ -236,7 +238,8 @@ pub enum Key {
 ///
 /// These represent physical mouse buttons that can be clicked.
 /// Button1 is typically the left button, Button2 is typically the right button.
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum MouseButton {
     /// Left mouse button (primary button).
     Button1,
@@ -257,7 +260,8 @@ pub enum MouseButton {
 }
 
 /// The state of a button or key.
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Action {
     /// The button/key was released.
     Release,
@@ -266,7 +270,8 @@ pub enum Action {
 }
 
 /// Touch event actions for touch-screen devices.
-#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug, Serialize, Deserialize)]
+#[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum TouchAction {
     /// A new touch point started (finger pressed down).
     Start,
@@ -290,7 +295,8 @@ bitflags! {
     /// // Ctrl+Shift combination
     /// let mods = Modifiers::Control | Modifiers::Shift;
     /// ```
-    #[derive(Serialize, Deserialize, Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+    #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
     pub struct Modifiers: i32 {
         /// The Shift key modifier.
         const Shift       = 0b0001;

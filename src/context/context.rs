@@ -3,22 +3,16 @@
 //! This module provides a global wgpu context that can be initialized and reset
 //! across window recreations.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 
-// The global wgpu context singleton (native).
+// The global wgpu context singleton.
 // We use RefCell<Option<>> instead of OnceLock to allow resetting the context
 // when creating new windows (required for multi-window support).
-#[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     static CONTEXT_SINGLETON: RefCell<Option<Context>> = const { RefCell::new(None) };
-}
-
-// The global wgpu context singleton (WASM).
-// We use RefCell<Option<>> to allow resetting the context when creating new windows.
-#[cfg(target_arch = "wasm32")]
-thread_local! {
-    static CONTEXT_SINGLETON: RefCell<Option<Context>> = const { RefCell::new(None) };
+    // Track number of active windows to know when to reset the context
+    static WINDOW_COUNT: Cell<usize> = const { Cell::new(0) };
 }
 
 /// The wgpu rendering context containing all GPU resources needed for rendering.
@@ -27,6 +21,8 @@ thread_local! {
 /// to allow sharing across the application.
 #[derive(Clone)]
 pub struct Context {
+    /// The wgpu instance used for creating surfaces.
+    pub instance: Arc<wgpu::Instance>,
     /// The wgpu device used for creating GPU resources.
     pub device: Arc<wgpu::Device>,
     /// The wgpu queue used for submitting commands.
@@ -44,11 +40,13 @@ impl Context {
     /// this will replace the existing context with a new one.
     ///
     /// # Arguments
+    /// * `instance` - The wgpu instance
     /// * `device` - The wgpu device
     /// * `queue` - The wgpu queue
     /// * `adapter` - The wgpu adapter
     /// * `surface_format` - The preferred surface texture format
     pub fn init(
+        instance: wgpu::Instance,
         device: wgpu::Device,
         queue: wgpu::Queue,
         adapter: wgpu::Adapter,
@@ -56,6 +54,7 @@ impl Context {
     ) {
         CONTEXT_SINGLETON.with(|cell| {
             *cell.borrow_mut() = Some(Context {
+                instance: Arc::new(instance),
                 device: Arc::new(device),
                 queue: Arc::new(queue),
                 adapter: Arc::new(adapter),
@@ -80,6 +79,50 @@ impl Context {
     /// Checks if the context has been initialized.
     pub fn is_initialized() -> bool {
         CONTEXT_SINGLETON.with(|cell| cell.borrow().is_some())
+    }
+
+    /// Resets the global wgpu context, dropping all GPU resources.
+    ///
+    /// This should be called before thread-local storage destruction begins
+    /// to avoid TLS access order issues with wgpu internals.
+    ///
+    /// After calling this, `is_initialized()` will return `false` and
+    /// `get()` will panic until `init()` is called again.
+    pub fn reset() {
+        CONTEXT_SINGLETON.with(|cell| {
+            *cell.borrow_mut() = None;
+        });
+    }
+
+    /// Increments the window reference count.
+    ///
+    /// Called when a new window is created to track how many windows
+    /// are using the context.
+    pub fn increment_window_count() {
+        WINDOW_COUNT.with(|count| {
+            count.set(count.get() + 1);
+        });
+    }
+
+    /// Decrements the window reference count and returns true if this was the last window.
+    ///
+    /// Called when a window is dropped. Returns true if all windows have been closed
+    /// and it's safe to reset the context.
+    pub fn decrement_window_count() -> bool {
+        WINDOW_COUNT.with(|count| {
+            let current = count.get();
+            if current > 0 {
+                count.set(current - 1);
+                current == 1 // Was this the last window?
+            } else {
+                false
+            }
+        })
+    }
+
+    /// Returns the current number of active windows.
+    pub fn window_count() -> usize {
+        WINDOW_COUNT.with(|count| count.get())
     }
 
     /// Creates a new buffer on the GPU using a descriptor.

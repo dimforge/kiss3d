@@ -6,14 +6,7 @@
 //!
 //! Use the UI panel to toggle perspective mode for the polylines.
 
-extern crate kiss3d;
-extern crate nalgebra as na;
-
-use kiss3d::camera::ArcBall;
-use kiss3d::light::Light;
-use kiss3d::renderer::Polyline;
-use kiss3d::window::Window;
-use na::{Point3, Vector3};
+use kiss3d::prelude::*;
 
 // Simulation parameters
 const NUM_BODIES: usize = 128;
@@ -25,14 +18,14 @@ const SUBSTEPS: usize = 2; // Physics substeps per frame
 
 /// A body in the simulation
 struct Body {
-    position: Vector3<f32>,
-    velocity: Vector3<f32>,
+    position: Vec3,
+    velocity: Vec3,
     mass: f32,
 }
 
 /// Trail storing position history as a ring buffer
 struct Trail {
-    positions: Vec<Point3<f32>>,
+    positions: Vec<Vec3>,
     head: usize,
     len: usize,
 }
@@ -40,13 +33,13 @@ struct Trail {
 impl Trail {
     fn new() -> Self {
         Self {
-            positions: vec![Point3::origin(); TRAIL_LENGTH],
+            positions: vec![Vec3::ZERO; TRAIL_LENGTH],
             head: 0,
             len: 0,
         }
     }
 
-    fn push(&mut self, pos: Point3<f32>) {
+    fn push(&mut self, pos: Vec3) {
         self.positions[self.head] = pos;
         self.head = (self.head + 1) % TRAIL_LENGTH;
         if self.len < TRAIL_LENGTH {
@@ -55,7 +48,7 @@ impl Trail {
     }
 
     /// Copy trail points into destination vector (avoids allocation)
-    fn copy_to(&self, dest: &mut Vec<Point3<f32>>) {
+    fn copy_to(&self, dest: &mut Vec<Vec3>) {
         dest.clear();
         if self.len == 0 {
             return;
@@ -76,7 +69,7 @@ impl Trail {
 }
 
 /// HSL to RGB conversion
-fn hsl_to_rgb(h: f32, s: f32, l: f32) -> Point3<f32> {
+fn hsl_to_rgb(h: f32, s: f32, l: f32) -> Vec3 {
     let c = (1.0 - (2.0 * l - 1.0).abs()) * s;
     let h_prime = h / 60.0;
     let x = c * (1.0 - ((h_prime % 2.0) - 1.0).abs());
@@ -96,7 +89,7 @@ fn hsl_to_rgb(h: f32, s: f32, l: f32) -> Point3<f32> {
         (c, 0.0, x)
     };
 
-    Point3::new(r + m, g + m, b + m)
+    Vec3::new(r + m, g + m, b + m)
 }
 
 /// Simple pseudo-random number generator (xorshift)
@@ -126,8 +119,8 @@ fn init_bodies() -> Vec<Body> {
 
     // Add a central massive body
     bodies.push(Body {
-        position: Vector3::zeros(),
-        velocity: Vector3::zeros(),
+        position: Vec3::ZERO,
+        velocity: Vec3::ZERO,
         mass: 100.0,
     });
 
@@ -137,11 +130,11 @@ fn init_bodies() -> Vec<Body> {
         let radius = 1.0 + rng.next_f32() * 8.0;
         let height = (rng.next_f32() - 0.5) * 1.0;
 
-        let position = Vector3::new(radius * angle.cos(), height, radius * angle.sin());
+        let position = Vec3::new(radius * angle.cos(), height, radius * angle.sin());
 
         // Calculate orbital velocity for roughly circular orbit
         let orbital_speed = (G * 100.0 / radius).sqrt() * (0.9 + rng.next_f32() * 0.2);
-        let tangent = Vector3::new(-angle.sin(), 0.0, angle.cos());
+        let tangent = Vec3::new(-angle.sin(), 0.0, angle.cos());
         let velocity = tangent * orbital_speed;
 
         let mass = 0.01 + rng.next_f32() * 0.1;
@@ -157,14 +150,14 @@ fn init_bodies() -> Vec<Body> {
 }
 
 /// Initialize polylines with colors and widths for each body
-fn init_polylines() -> Vec<Polyline> {
+fn init_polylines() -> Vec<Polyline3d> {
     let mut rng = Rng::new(42);
     let mut polylines = Vec::with_capacity(NUM_BODIES);
 
     // Central body (yellow star)
     polylines.push(
-        Polyline::new(Vec::with_capacity(TRAIL_LENGTH))
-            .with_color(1.0, 1.0, 0.5)
+        Polyline3d::new(Vec::with_capacity(TRAIL_LENGTH))
+            .with_color(Color::new(1.0, 1.0, 0.5, 1.0))
             .with_width(3.0),
     );
 
@@ -184,8 +177,8 @@ fn init_polylines() -> Vec<Polyline> {
         let line_width = 0.5 + rng.next_f32() * 9.5;
 
         polylines.push(
-            Polyline::new(Vec::with_capacity(TRAIL_LENGTH))
-                .with_color(color.x, color.y, color.z)
+            Polyline3d::new(Vec::with_capacity(TRAIL_LENGTH))
+                .with_color(Color::new(color.x, color.y, color.z, 1.0))
                 .with_width(line_width),
         );
     }
@@ -194,8 +187,8 @@ fn init_polylines() -> Vec<Polyline> {
 }
 
 /// Compute gravitational acceleration on body i from all other bodies
-fn compute_acceleration(bodies: &[Body], i: usize) -> Vector3<f32> {
-    let mut acceleration = Vector3::zeros();
+fn compute_acceleration(bodies: &[Body], i: usize) -> Vec3 {
+    let mut acceleration = Vec3::ZERO;
     let pos_i = bodies[i].position;
 
     for (j, body_j) in bodies.iter().enumerate() {
@@ -204,7 +197,7 @@ fn compute_acceleration(bodies: &[Body], i: usize) -> Vector3<f32> {
         }
 
         let offset = body_j.position - pos_i;
-        let dist_sq = offset.norm_squared() + EPSILON * EPSILON;
+        let dist_sq = offset.length_squared() + EPSILON * EPSILON;
         let dist = dist_sq.sqrt();
         let force_mag = G * body_j.mass / dist_sq;
         acceleration += offset / dist * force_mag;
@@ -218,8 +211,7 @@ fn physics_step(bodies: &mut [Body], dt: f32) {
     let n = bodies.len();
 
     // Store accelerations
-    let accelerations: Vec<Vector3<f32>> =
-        (0..n).map(|i| compute_acceleration(bodies, i)).collect();
+    let accelerations: Vec<Vec3> = (0..n).map(|i| compute_acceleration(bodies, i)).collect();
 
     // Update positions
     for (i, body) in bodies.iter_mut().enumerate() {
@@ -227,8 +219,7 @@ fn physics_step(bodies: &mut [Body], dt: f32) {
     }
 
     // Compute new accelerations
-    let new_accelerations: Vec<Vector3<f32>> =
-        (0..n).map(|i| compute_acceleration(bodies, i)).collect();
+    let new_accelerations: Vec<Vec3> = (0..n).map(|i| compute_acceleration(bodies, i)).collect();
 
     // Update velocities
     for (i, body) in bodies.iter_mut().enumerate() {
@@ -239,14 +230,17 @@ fn physics_step(bodies: &mut [Body], dt: f32) {
 #[kiss3d::main]
 async fn main() {
     let mut window = Window::new("Kiss3d: N-Body Polyline Simulation").await;
+    let mut scene = SceneNode3d::empty();
+    scene
+        .add_light(Light::point(100.0))
+        .set_position(Vec3::new(0.0, 10.0, 10.0));
 
-    window.set_light(Light::StickToCamera);
-    window.set_background_color(0.02, 0.02, 0.05);
+    window.set_background_color(Color::new(0.02, 0.02, 0.05, 1.0));
 
     // Set up camera looking at the simulation (user can control it)
-    let eye = Point3::new(0.0, 15.0, 25.0);
-    let at = Point3::origin();
-    let mut camera = ArcBall::new(eye, at);
+    let eye = Vec3::new(0.0, 15.0, 25.0);
+    let at = Vec3::ZERO;
+    let mut camera = OrbitCamera3d::new(eye, at);
 
     // Initialize simulation
     let mut bodies = init_bodies();
@@ -256,10 +250,10 @@ async fn main() {
     let mut polylines = init_polylines();
 
     // UI state
-    #[allow(unused_mut)] // Silence warning appearing when the "egui" feature isn’t.
+    #[allow(unused_mut)] // Silence warning appearing when the "egui" feature isn't.
     let mut perspective_mode = false;
 
-    while window.render_with_camera(&mut camera).await {
+    while window.render_3d(&mut scene, &mut camera).await {
         // Draw UI
         #[cfg(feature = "egui")]
         window.draw_ui(|ctx| {
@@ -279,7 +273,7 @@ async fn main() {
 
         // Update trails with current positions
         for (i, body) in bodies.iter().enumerate() {
-            trails[i].push(Point3::from(body.position));
+            trails[i].push(body.position);
         }
 
         // Draw trails as polylines (reusing pre-allocated polylines)

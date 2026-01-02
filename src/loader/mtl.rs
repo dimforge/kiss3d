@@ -2,7 +2,6 @@
 
 use crate::loader::obj;
 use crate::loader::obj::Words;
-use na::Vector3;
 use std::fs::File;
 use std::io::Read;
 use std::io::Result as IoResult;
@@ -98,7 +97,7 @@ fn parse_name<'a>(_: usize, ws: Words<'a>) -> String {
     res.join(" ")
 }
 
-fn parse_color(l: usize, mut ws: Words) -> Vector3<f32> {
+fn parse_color(l: usize, mut ws: Words) -> [f32; 3] {
     let sx = ws
         .next()
         .unwrap_or_else(|| error(l, "3 components were expected, found 0."));
@@ -120,7 +119,7 @@ fn parse_color(l: usize, mut ws: Words) -> Vector3<f32> {
     let z =
         z.unwrap_or_else(|e| error(l, &format!("failed to parse `{}' as a f32: {}", sz, e)[..]));
 
-    Vector3::new(x, y, z)
+    [x, y, z]
 }
 
 fn parse_scalar(l: usize, mut ws: Words) -> f32 {
@@ -144,11 +143,11 @@ pub struct MtlMaterial {
     /// Path to the opacity map.
     pub opacity_map: Option<String>,
     /// The ambient color.
-    pub ambient: Vector3<f32>,
+    pub ambient: [f32; 3],
     /// The diffuse color.
-    pub diffuse: Vector3<f32>,
+    pub diffuse: [f32; 3],
     /// The specular color.
-    pub specular: Vector3<f32>,
+    pub specular: [f32; 3],
     /// The shininess.
     pub shininess: f32,
     /// Alpha blending.
@@ -166,9 +165,9 @@ impl MtlMaterial {
             diffuse_texture: None,
             specular_texture: None,
             opacity_map: None,
-            ambient: Vector3::new(1.0, 1.0, 1.0),
-            diffuse: Vector3::new(1.0, 1.0, 1.0),
-            specular: Vector3::new(1.0, 1.0, 1.0),
+            ambient: [1.0, 1.0, 1.0],
+            diffuse: [1.0, 1.0, 1.0],
+            specular: [1.0, 1.0, 1.0],
         }
     }
 
@@ -177,9 +176,9 @@ impl MtlMaterial {
         name: String,
         shininess: f32,
         alpha: f32,
-        ambient: Vector3<f32>,
-        diffuse: Vector3<f32>,
-        specular: Vector3<f32>,
+        ambient: [f32; 3],
+        diffuse: [f32; 3],
+        specular: [f32; 3],
         ambient_texture: Option<String>,
         diffuse_texture: Option<String>,
         specular_texture: Option<String>,

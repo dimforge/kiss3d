@@ -1,7 +1,6 @@
 use super::utils;
 use super::{IndexBuffer, RenderMesh};
-use na;
-use na::{Point3, Vector3};
+use glamx::Vec3;
 
 /// Generates a cone mesh with the specified dimensions.
 ///
@@ -25,7 +24,7 @@ use na::{Point3, Vector3};
 pub fn cone(diameter: f32, height: f32, nsubdiv: u32) -> RenderMesh {
     let mut cone = unit_cone(nsubdiv);
 
-    cone.scale_by(&Vector3::new(diameter, height, diameter));
+    cone.scale_by(Vec3::new(diameter, height, diameter));
 
     cone
 }
@@ -52,13 +51,13 @@ pub fn unit_cone(nsubdiv: u32) -> RenderMesh {
     let dtheta = two_pi / (nsubdiv as f32);
     let mut coords = Vec::new();
     let mut indices = Vec::new();
-    let mut normals: Vec<Vector3<f32>>;
+    let mut normals: Vec<Vec3>;
 
     utils::push_circle(0.5, nsubdiv, dtheta, -0.5, &mut coords);
 
-    normals = coords.iter().map(|p| p.coords).collect();
+    normals = coords.clone();
 
-    coords.push(Point3::new(na::zero(), 0.5, na::zero()));
+    coords.push(Vec3::new(0.0, 0.5, 0.0));
 
     utils::push_degenerate_top_ring_indices(0, coords.len() as u32 - 1, nsubdiv, &mut indices);
     utils::push_filled_circle_indices(0, nsubdiv, &mut indices);
@@ -70,17 +69,13 @@ pub fn unit_cone(nsubdiv: u32) -> RenderMesh {
 
     // Adjust the normals:
     let shift = 0.05f32 / 0.475;
-    let div = (shift * shift + 0.25).sqrt();
     for n in normals.iter_mut() {
         n.y += shift;
-        // FIXME: f32 / div does not work?
-        n.x /= div;
-        n.y /= div;
-        n.z /= div;
+        *n = n.normalize();
     }
 
     // Normal for the basis.
-    normals.push(Vector3::new(na::zero(), -1.0, na::zero()));
+    normals.push(Vec3::new(0.0, -1.0, 0.0));
 
     let ilen = indices.len();
     let nlen = normals.len() as u32;
@@ -88,13 +83,13 @@ pub fn unit_cone(nsubdiv: u32) -> RenderMesh {
         .iter_mut()
         .enumerate()
     {
-        i.y.y = id as u32;
+        i[1][1] = id as u32;
     }
 
     for i in indices[ilen - (nsubdiv as usize - 2)..].iter_mut() {
-        i.x.y = nlen - 1;
-        i.y.y = nlen - 1;
-        i.z.y = nlen - 1;
+        i[0][1] = nlen - 1;
+        i[1][1] = nlen - 1;
+        i[2][1] = nlen - 1;
     }
 
     // Normal for the body.
@@ -106,5 +101,5 @@ pub fn unit_cone(nsubdiv: u32) -> RenderMesh {
         Some(IndexBuffer::Split(indices)),
     )
 
-    // XXX: uvs
+    // TODO: uvs
 }

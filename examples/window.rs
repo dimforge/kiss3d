@@ -1,12 +1,12 @@
-extern crate kiss3d;
-
-use kiss3d::window::Window;
+use kiss3d::prelude::*;
 
 #[kiss3d::main]
 async fn main() {
     let mut window = Window::new("Kiss3d: window").await;
+    let mut camera = OrbitCamera3d::default();
+    let mut scene = SceneNode3d::empty();
 
-    window.set_background_color(0.0, 0.0, 0.3);
+    window.set_background_color(LIGHT_BLUE);
 
-    while window.render().await {}
+    while window.render_3d(&mut scene, &mut camera).await {}
 }

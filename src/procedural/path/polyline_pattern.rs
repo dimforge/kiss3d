@@ -1,11 +1,11 @@
 use crate::procedural::path::{CurveSampler, PathSample, StrokePattern};
 use crate::procedural::render_mesh::{IndexBuffer, RenderMesh};
 use crate::procedural::utils;
-use na::{self, Isometry3, Point2, Point3, Vector3};
+use glamx::{Pose3, Vec2, Vec3};
 
 /// A pattern composed of polyline and two caps.
 pub struct PolylinePattern<C1, C2> {
-    pattern: Vec<Point3<f32>>,
+    pattern: Vec<Vec3>,
     closed: bool,
     last_start_id: u32,
     start_cap: C1,
@@ -18,24 +18,24 @@ pub trait PolylineCompatibleCap {
     fn gen_start_cap(
         &self,
         attach_id: u32,
-        pattern: &[Point3<f32>],
-        pt: &Point3<f32>,
-        dir: &Vector3<f32>,
+        pattern: &[Vec3],
+        pt: Vec3,
+        dir: Vec3,
         closed: bool,
-        coords: &mut Vec<Point3<f32>>,
-        indices: &mut Vec<Point3<u32>>,
+        coords: &mut Vec<Vec3>,
+        indices: &mut Vec<[u32; 3]>,
     );
 
     /// Generates the mesh for the cap at the end of a path.
     fn gen_end_cap(
         &self,
         attach_id: u32,
-        pattern: &[Point3<f32>],
-        pt: &Point3<f32>,
-        dir: &Vector3<f32>,
+        pattern: &[Vec3],
+        pt: Vec3,
+        dir: Vec3,
         closed: bool,
-        coords: &mut Vec<Point3<f32>>,
-        indices: &mut Vec<Point3<u32>>,
+        coords: &mut Vec<Vec3>,
+        indices: &mut Vec<[u32; 3]>,
     );
 }
 
@@ -46,7 +46,7 @@ where
 {
     /// Creates a new polyline pattern.
     pub fn new(
-        pattern: &[Point2<f32>],
+        pattern: &[Vec2],
         closed: bool,
         start_cap: C1,
         end_cap: C2,
@@ -54,7 +54,7 @@ where
         let mut coords3d = Vec::with_capacity(pattern.len());
 
         for v in pattern.iter() {
-            coords3d.push(Point3::new(v.x, v.y, na::zero()));
+            coords3d.push(Vec3::new(v.x, v.y, 0.0));
         }
 
         PolylinePattern {
@@ -76,7 +76,7 @@ where
         let mut vertices = Vec::new();
         let mut indices = Vec::new();
         let npts = self.pattern.len() as u32;
-        // FIXME: collect the normals too.
+        // TODO: collect the normals too.
         // let mut normals  = Vec::new();
 
         loop {
@@ -90,10 +90,10 @@ where
                     let mut new_polyline = self.pattern.clone();
 
                     let transform = if dir.x == 0.0 && dir.z == 0.0 {
-                        // FIXME: this might not be enough to avoid singularities.
-                        Isometry3::face_towards(pt, &(*pt + *dir), &Vector3::x())
+                        // TODO: this might not be enough to avoid singularities.
+                        Pose3::face_towards(*pt, *pt + *dir, Vec3::X)
                     } else {
-                        Isometry3::face_towards(pt, &(*pt + *dir), &Vector3::y())
+                        Pose3::face_towards(*pt, *pt + *dir, Vec3::Y)
                     };
 
                     for p in &mut new_polyline {
@@ -135,9 +135,9 @@ where
             }
 
             // third match to add the end cap
-            // FIXME: this will fail with patterns having multiple starting and end points!
+            // TODO: this will fail with patterns having multiple starting and end points!
             match next {
-                PathSample::StartPoint(ref pt, ref dir) => {
+                PathSample::StartPoint(pt, dir) => {
                     self.start_cap.gen_start_cap(
                         0,
                         &self.pattern,
@@ -148,7 +148,7 @@ where
                         &mut indices,
                     );
                 }
-                PathSample::EndPoint(ref pt, ref dir) => {
+                PathSample::EndPoint(pt, dir) => {
                     self.end_cap.gen_end_cap(
                         vertices.len() as u32 - npts,
                         &self.pattern,

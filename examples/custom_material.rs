@@ -1,14 +1,5 @@
-extern crate kiss3d;
-extern crate nalgebra as na;
-
-use kiss3d::camera::Camera;
-use kiss3d::context::Context;
-use kiss3d::light::Light;
-use kiss3d::resource::vertex_index::VERTEX_INDEX_FORMAT;
-use kiss3d::resource::{GpuData, GpuMesh, Material, RenderContext};
-use kiss3d::scene::{InstancesBuffer, ObjectData};
-use kiss3d::window::Window;
-use na::{Isometry3, Matrix3, Translation3, UnitQuaternion, Vector3};
+use kiss3d::prelude::vertex_index::VERTEX_INDEX_FORMAT;
+use kiss3d::prelude::*;
 use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -16,18 +7,23 @@ use std::rc::Rc;
 #[kiss3d::main]
 async fn main() {
     let mut window = Window::new("Kiss3d: custom_material").await;
-    let mut c = window.add_sphere(1.0);
+    let mut camera = OrbitCamera3d::new(Vec3::new(0.0, 0.0, 6.0), Vec3::ZERO);
+    let mut scene = SceneNode3d::empty();
+    scene
+        .add_light(Light::point(100.0))
+        .set_position(Vec3::new(0.0, 10.0, 10.0));
     let material = Rc::new(RefCell::new(
-        Box::new(NormalMaterial::new()) as Box<dyn Material + 'static>
+        Box::new(NormalMaterial::new()) as Box<dyn Material3d + 'static>
     ));
+    let mut c = scene
+        .add_sphere(1.0)
+        .set_material(material)
+        .translate(Vec3::new(0.0, 0.0, 2.0));
 
-    c.set_material(material);
-    c.append_translation(&Translation3::new(0.0, 0.0, 2.0));
+    let rot = Quat::from_axis_angle(Vec3::Y, 0.014);
 
-    let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
-
-    while window.render().await {
-        c.prepend_to_local_rotation(&rot);
+    while window.render_3d(&mut scene, &mut camera).await {
+        c.rotate(rot);
     }
 }
 
@@ -52,6 +48,10 @@ struct ObjectUniforms {
 pub struct NormalMaterialGpuData {
     frame_uniform_buffer: wgpu::Buffer,
     object_uniform_buffer: wgpu::Buffer,
+    /// Cached frame bind group
+    frame_bind_group: Option<wgpu::BindGroup>,
+    /// Cached object bind group
+    object_bind_group: Option<wgpu::BindGroup>,
 }
 
 impl NormalMaterialGpuData {
@@ -75,6 +75,8 @@ impl NormalMaterialGpuData {
         Self {
             frame_uniform_buffer,
             object_uniform_buffer,
+            frame_bind_group: None,
+            object_bind_group: None,
         }
     }
 }
@@ -240,29 +242,24 @@ impl NormalMaterial {
     }
 }
 
-impl Material for NormalMaterial {
+impl Material3d for NormalMaterial {
     fn create_gpu_data(&self) -> Box<dyn GpuData> {
         Box::new(NormalMaterialGpuData::new())
     }
 
-    fn render(
+    fn prepare(
         &mut self,
         pass: usize,
-        transform: &Isometry3<f32>,
-        scale: &Vector3<f32>,
-        camera: &mut dyn Camera,
-        _: &Light,
-        data: &ObjectData,
-        mesh: &mut GpuMesh,
-        _instances: &mut InstancesBuffer,
+        transform: Pose3,
+        scale: Vec3,
+        camera: &mut dyn Camera3d,
+        _lights: &LightCollection,
+        _data: &ObjectData3d,
         gpu_data: &mut dyn GpuData,
-        context: &mut RenderContext,
+        _viewport_width: u32,
+        _viewport_height: u32,
     ) {
         let ctxt = Context::get();
-
-        if !data.surface_rendering_active() {
-            return;
-        }
 
         // Downcast gpu_data to our specific type
         let gpu_data = gpu_data
@@ -274,8 +271,8 @@ impl Material for NormalMaterial {
         let (view, proj) = camera.view_transform_pair(pass);
 
         let frame_uniforms = FrameUniforms {
-            view: view.to_homogeneous().into(),
-            proj: proj.into(),
+            view: view.to_mat4().to_cols_array_2d(),
+            proj: proj.to_cols_array_2d(),
         };
         ctxt.write_buffer(
             &gpu_data.frame_uniform_buffer,
@@ -284,33 +281,33 @@ impl Material for NormalMaterial {
         );
 
         // Update object uniforms
-        let formatted_transform = transform.to_homogeneous();
-        let formatted_scale = Matrix3::from_diagonal(&Vector3::new(scale.x, scale.y, scale.z));
+        let formatted_transform = transform.to_mat4();
+        let formatted_scale = Mat3::from_diagonal(scale);
 
         // Pad mat3x3 to mat3x4 for proper alignment
         let scale_padded: [[f32; 4]; 3] = [
             [
-                formatted_scale[(0, 0)],
-                formatted_scale[(1, 0)],
-                formatted_scale[(2, 0)],
+                formatted_scale.x_axis.x,
+                formatted_scale.x_axis.y,
+                formatted_scale.x_axis.z,
                 0.0,
             ],
             [
-                formatted_scale[(0, 1)],
-                formatted_scale[(1, 1)],
-                formatted_scale[(2, 1)],
+                formatted_scale.y_axis.x,
+                formatted_scale.y_axis.y,
+                formatted_scale.y_axis.z,
                 0.0,
             ],
             [
-                formatted_scale[(0, 2)],
-                formatted_scale[(1, 2)],
-                formatted_scale[(2, 2)],
+                formatted_scale.z_axis.x,
+                formatted_scale.z_axis.y,
+                formatted_scale.z_axis.z,
                 0.0,
             ],
         ];
 
         let object_uniforms = ObjectUniforms {
-            transform: formatted_transform.into(),
+            transform: formatted_transform.to_cols_array_2d(),
             scale: scale_padded,
             _padding: [0.0; 4],
         };
@@ -319,6 +316,37 @@ impl Material for NormalMaterial {
             0,
             bytemuck::bytes_of(&object_uniforms),
         );
+
+        // Cache bind groups
+        gpu_data.frame_bind_group =
+            Some(self.create_frame_bind_group(&gpu_data.frame_uniform_buffer));
+        gpu_data.object_bind_group =
+            Some(self.create_object_bind_group(&gpu_data.object_uniform_buffer));
+    }
+
+    fn render(
+        &mut self,
+        _pass: usize,
+        _transform: Pose3,
+        _scale: Vec3,
+        _camera: &mut dyn Camera3d,
+        _lights: &LightCollection,
+        data: &ObjectData3d,
+        mesh: &mut GpuMesh3d,
+        _instances: &mut InstancesBuffer3d,
+        gpu_data: &mut dyn GpuData,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        _context: &RenderContext,
+    ) {
+        if !data.surface_rendering_active() {
+            return;
+        }
+
+        // Downcast gpu_data to our specific type
+        let gpu_data = gpu_data
+            .as_any_mut()
+            .downcast_mut::<NormalMaterialGpuData>()
+            .expect("NormalMaterial requires NormalMaterialGpuData");
 
         // Ensure mesh buffers are on GPU
         mesh.coords().write().unwrap().load_to_gpu();
@@ -342,46 +370,25 @@ impl Material for NormalMaterial {
             None => return,
         };
 
-        // Create bind groups with per-object buffers
-        let frame_bind_group = self.create_frame_bind_group(&gpu_data.frame_uniform_buffer);
-        let object_bind_group = self.create_object_bind_group(&gpu_data.object_uniform_buffer);
+        // Use cached bind groups
+        let frame_bind_group = gpu_data
+            .frame_bind_group
+            .as_ref()
+            .expect("prepare() must be called before render()");
+        let object_bind_group = gpu_data
+            .object_bind_group
+            .as_ref()
+            .expect("prepare() must be called before render()");
 
-        // Create render pass
-        {
-            let mut render_pass = context
-                .encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("custom_material_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: context.color_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: context.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, frame_bind_group, &[]);
+        render_pass.set_bind_group(1, object_bind_group, &[]);
 
-            render_pass.set_pipeline(&self.pipeline);
-            render_pass.set_bind_group(0, &frame_bind_group, &[]);
-            render_pass.set_bind_group(1, &object_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, coords_buf.slice(..));
+        render_pass.set_vertex_buffer(1, normals_buf.slice(..));
+        render_pass.set_index_buffer(faces_buf.slice(..), VERTEX_INDEX_FORMAT);
 
-            render_pass.set_vertex_buffer(0, coords_buf.slice(..));
-            render_pass.set_vertex_buffer(1, normals_buf.slice(..));
-            render_pass.set_index_buffer(faces_buf.slice(..), VERTEX_INDEX_FORMAT);
-
-            render_pass.draw_indexed(0..mesh.num_indices(), 0, 0..1);
-        }
+        render_pass.draw_indexed(0..mesh.num_indices(), 0, 0..1);
     }
 }
 

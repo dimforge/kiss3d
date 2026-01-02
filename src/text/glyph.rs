@@ -2,31 +2,25 @@
 // available under the BSD-3 licence.
 // It has been modified to work with gl-rs, nalgebra, and rust-freetype
 
-use na::Vector2;
+use glamx::Vec2;
 
 /// A ttf glyph.
 pub struct Glyph {
     #[doc(hidden)]
-    pub tex: Vector2<f32>,
+    pub tex: Vec2,
     #[doc(hidden)]
-    pub advance: Vector2<f32>,
+    pub advance: Vec2,
     #[doc(hidden)]
-    pub dimensions: Vector2<f32>,
+    pub dimensions: Vec2,
     #[doc(hidden)]
-    pub offset: Vector2<f32>,
+    pub offset: Vec2,
     #[doc(hidden)]
     pub buffer: Vec<u8>,
 }
 
 impl Glyph {
     /// Creates a new empty glyph.
-    pub fn new(
-        tex: Vector2<f32>,
-        advance: Vector2<f32>,
-        dimensions: Vector2<f32>,
-        offset: Vector2<f32>,
-        buffer: Vec<u8>,
-    ) -> Glyph {
+    pub fn new(tex: Vec2, advance: Vec2, dimensions: Vec2, offset: Vec2, buffer: Vec<u8>) -> Glyph {
         Glyph {
             tex,
             advance,

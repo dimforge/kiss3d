@@ -1,7 +1,7 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="clippy" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
     <option name="buildProfileId" value="release" />
-    <option name="command" value="clippy" />
+    <option name="command" value="clippy --all-features" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <envs />
     <option name="emulateTerminal" value="true" />

@@ -1,4 +1,4 @@
-name: Rapier CI build
+name: CI build
 
 on:
   push:

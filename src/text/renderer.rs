@@ -3,13 +3,14 @@
 // It has been modified to work with wgpu, nalgebra, and rusttype
 
 use crate::context::Context;
-use crate::resource::PlanarRenderContext;
+use crate::resource::RenderContext2dEncoder;
 use crate::text::Font;
 use bytemuck::{Pod, Zeroable};
-use na::{Point2, Point3};
+use glamx::Vec2;
 use rusttype;
 use rusttype::gpu_cache::Cache;
 use std::sync::Arc;
+use crate::color::Color;
 
 /// Vertex data for a text quad.
 #[repr(C)]
@@ -17,8 +18,7 @@ use std::sync::Arc;
 struct TextVertex {
     position: [f32; 2],
     tex_coord: [f32; 2],
-    color: [f32; 3],
-    _padding: f32,
+    color: [f32; 4],
 }
 
 /// Uniforms for text rendering.
@@ -32,8 +32,8 @@ struct TextUniforms {
 struct TextRenderContext {
     len: usize,
     scale: f32,
-    color: Point3<f32>,
-    pos: Point2<f32>,
+    color: [f32; 4],
+    pos: Vec2,
     font: Arc<Font>,
 }
 
@@ -182,7 +182,7 @@ impl TextRenderer {
                 wgpu::VertexAttribute {
                     offset: 16,
                     shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3, // color
+                    format: wgpu::VertexFormat::Float32x4, // color (RGBA)
                 },
             ],
         };
@@ -267,23 +267,23 @@ impl TextRenderer {
     pub fn draw_text(
         &mut self,
         text: &str,
-        pos: &Point2<f32>,
+        pos: Vec2,
         scale: f32,
         font: &Arc<Font>,
-        color: &Point3<f32>,
+        color: Color,
     ) {
         self.text.push_str(text);
         self.contexts.push(TextRenderContext {
             len: text.len(),
             scale,
-            color: *color,
-            pos: *pos,
+            color: [color.r, color.g, color.b, color.a],
+            pos,
             font: font.clone(),
         })
     }
 
     /// Actually draws the text.
-    pub fn render(&mut self, width: f32, height: f32, context: &mut PlanarRenderContext) {
+    pub fn render(&mut self, width: f32, height: f32, context: &mut RenderContext2dEncoder) {
         if self.contexts.is_empty() {
             return;
         }
@@ -295,7 +295,7 @@ impl TextRenderer {
         struct GlyphData {
             glyph: rusttype::PositionedGlyph<'static>,
             font_uid: usize,
-            color: [f32; 3],
+            color: [f32; 4],
         }
         let mut all_glyphs: Vec<GlyphData> = Vec::new();
 
@@ -307,7 +307,7 @@ impl TextRenderer {
             let line_height = vmetrics.ascent - vmetrics.descent;
             let text = &self.text[pos..pos + text_context.len];
             let font_uid = Font::uid(&text_context.font);
-            let color: [f32; 3] = text_context.color.coords.into();
+            let color = text_context.color;
             let mut vshift = 0.0;
 
             for line in text.lines() {
@@ -375,38 +375,32 @@ impl TextRenderer {
                     position: [min_px, min_py],
                     tex_coord: [tex.min.x, tex.min.y],
                     color,
-                    _padding: 0.0,
                 });
                 self.vertices.push(TextVertex {
                     position: [min_px, max_py],
                     tex_coord: [tex.min.x, tex.max.y],
                     color,
-                    _padding: 0.0,
                 });
                 self.vertices.push(TextVertex {
                     position: [max_px, min_py],
                     tex_coord: [tex.max.x, tex.min.y],
                     color,
-                    _padding: 0.0,
                 });
 
                 self.vertices.push(TextVertex {
                     position: [max_px, min_py],
                     tex_coord: [tex.max.x, tex.min.y],
                     color,
-                    _padding: 0.0,
                 });
                 self.vertices.push(TextVertex {
                     position: [min_px, max_py],
                     tex_coord: [tex.min.x, tex.max.y],
                     color,
-                    _padding: 0.0,
                 });
                 self.vertices.push(TextVertex {
                     position: [max_px, max_py],
                     tex_coord: [tex.max.x, tex.max.y],
                     color,
-                    _padding: 0.0,
                 });
             }
         }

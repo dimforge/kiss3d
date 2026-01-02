@@ -1,6 +1,6 @@
 use crate::procedural::path::PolylineCompatibleCap;
 use crate::procedural::utils;
-use na::{self, Isometry3, Point3, Vector3};
+use glamx::{Pose3, Vec3};
 
 /// A cap that looks like an arrow.
 pub struct ArrowheadCap {
@@ -27,13 +27,13 @@ impl ArrowheadCap {
     fn do_gen_cap(
         &self,
         attach_id: u32,
-        pattern: &[Point3<f32>],
-        pt: &Point3<f32>,
-        dir: &Vector3<f32>,
+        pattern: &[Vec3],
+        pt: Vec3,
+        dir: Vec3,
         closed: bool,
         negative_shifts: bool,
-        coords: &mut Vec<Point3<f32>>,
-        indices: &mut Vec<Point3<u32>>,
+        coords: &mut Vec<Vec3>,
+        indices: &mut Vec<[u32; 3]>,
     ) {
         let front_dist_to_head = if negative_shifts {
             -self.front_dist_to_head
@@ -45,25 +45,25 @@ impl ArrowheadCap {
         } else {
             self.back_dist_to_head
         };
-        let pointy_thing = *pt + *dir * front_dist_to_head;
+        let pointy_thing = pt + dir * front_dist_to_head;
         let start_id = coords.len() as u32;
         let npts = pattern.len() as u32;
         let mut attach_id = attach_id;
 
         if !(self.radius_scale == 1.0) || back_dist_to_head != 0.0 {
-            let mut new_pattern: Vec<Point3<f32>> =
-                pattern.iter().map(|p| p * self.radius_scale).collect();
+            let mut new_pattern: Vec<Vec3> =
+                pattern.iter().map(|p| *p * self.radius_scale).collect();
 
             // NOTE: this is done exactly the same on the PolylinePattern::stroke method.
             // Refactor?
 
-            let back_shift = *dir * back_dist_to_head;
+            let back_shift = dir * back_dist_to_head;
 
             let transform = if dir.x == 0.0 && dir.z == 0.0 {
-                // FIXME: this might not be enough to avoid singularities.
-                Isometry3::face_towards(&(*pt - back_shift), &(*pt + *dir), &Vector3::x())
+                // TODO: this might not be enough to avoid singularities.
+                Pose3::face_towards(pt - back_shift, pt + dir, Vec3::X)
             } else {
-                Isometry3::face_towards(&(*pt - back_shift), &(*pt + *dir), &Vector3::y())
+                Pose3::face_towards(pt - back_shift, pt + dir, Vec3::Y)
             };
 
             for p in &mut new_pattern {
@@ -100,12 +100,12 @@ impl PolylineCompatibleCap for ArrowheadCap {
     fn gen_end_cap(
         &self,
         attach_id: u32,
-        pattern: &[Point3<f32>],
-        pt: &Point3<f32>,
-        dir: &Vector3<f32>,
+        pattern: &[Vec3],
+        pt: Vec3,
+        dir: Vec3,
         closed: bool,
-        coords: &mut Vec<Point3<f32>>,
-        indices: &mut Vec<Point3<u32>>,
+        coords: &mut Vec<Vec3>,
+        indices: &mut Vec<[u32; 3]>,
     ) {
         let start_indices_id = indices.len();
 
@@ -116,12 +116,12 @@ impl PolylineCompatibleCap for ArrowheadCap {
     fn gen_start_cap(
         &self,
         attach_id: u32,
-        pattern: &[Point3<f32>],
-        pt: &Point3<f32>,
-        dir: &Vector3<f32>,
+        pattern: &[Vec3],
+        pt: Vec3,
+        dir: Vec3,
         closed: bool,
-        coords: &mut Vec<Point3<f32>>,
-        indices: &mut Vec<Point3<u32>>,
+        coords: &mut Vec<Vec3>,
+        indices: &mut Vec<[u32; 3]>,
     ) {
         self.do_gen_cap(attach_id, pattern, pt, dir, closed, true, coords, indices)
     }

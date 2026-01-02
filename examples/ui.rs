@@ -1,13 +1,3 @@
-extern crate kiss3d;
-extern crate nalgebra as na;
-
-#[cfg(feature = "egui")]
-use kiss3d::light::Light;
-#[cfg(feature = "egui")]
-use kiss3d::window::Window;
-#[cfg(feature = "egui")]
-use na::{UnitQuaternion, Vector3};
-
 #[cfg(not(feature = "egui"))]
 #[kiss3d::main]
 async fn main() {
@@ -17,26 +7,32 @@ async fn main() {
 #[cfg(feature = "egui")]
 #[kiss3d::main]
 async fn main() {
+    use kiss3d::prelude::*;
+
     let mut window = Window::new("Kiss3d: egui UI").await;
-    window.set_background_color(0.9, 0.9, 0.9);
+    let mut camera = OrbitCamera3d::new(Vec3::new(0.0, 0.5, 1.0), Vec3::ZERO);
+    let mut scene = SceneNode3d::empty();
+    scene
+        .add_light(Light::point(100.0))
+        .set_position(Vec3::new(0.0, 10.0, 10.0));
 
-    let mut cube = window.add_cube(0.2, 0.2, 0.2);
-    cube.set_color(1.0, 0.0, 0.0);
+    window.set_background_color(LIGHT_STEEL_BLUE);
 
-    window.set_light(Light::StickToCamera);
+    let mut cube = scene.add_cube(0.2, 0.2, 0.2).set_color(RED);
 
     // UI state
     let mut rotation_speed = 0.014;
+    let mut opacity = 1.0;
     let mut cube_color = [1.0, 0.0, 0.0];
 
     // Render loop
-    while window.render().await {
+    while window.render_3d(&mut scene, &mut camera).await {
         // Rotate cube
-        let rot_current = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), rotation_speed);
-        cube.prepend_to_local_rotation(&rot_current);
+        let rot_current = Quat::from_axis_angle(Vec3::Y, rotation_speed);
+        cube.rotate(rot_current);
 
         // Update cube color
-        cube.set_color(cube_color[0], cube_color[1], cube_color[2]);
+        cube.set_color(Color::new(cube_color[0], cube_color[1], cube_color[2], opacity));
 
         // Draw UI
         window.draw_ui(|ctx| {
@@ -48,6 +44,10 @@ async fn main() {
                     ui.add(egui::Slider::new(&mut rotation_speed, 0.0..=0.1));
 
                     ui.separator();
+
+                    // Opacity control
+                    ui.label("Opacity:");
+                    ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0));
 
                     // Color picker
                     ui.label("Cube Color:");

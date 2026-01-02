@@ -1,18 +1,14 @@
 use super::RenderMesh;
-use na::{self, Point3};
+use glamx::Vec3;
 use std::ptr;
 
 // De-Casteljau algorithm.
 // Evaluates the bezier curve with control points `control_points`.
 #[doc(hidden)]
-pub fn bezier_curve_at(
-    control_points: &[Point3<f32>],
-    t: f32,
-    cache: &mut Vec<Point3<f32>>,
-) -> Point3<f32> {
+pub fn bezier_curve_at(control_points: &[Vec3], t: f32, cache: &mut Vec<Vec3>) -> Vec3 {
     if control_points.len() > cache.len() {
         let diff = control_points.len() - cache.len();
-        cache.extend(std::iter::repeat_n(Point3::origin(), diff))
+        cache.extend(std::iter::repeat_n(Vec3::ZERO, diff))
     }
 
     let cache = &mut cache[..];
@@ -30,7 +26,7 @@ pub fn bezier_curve_at(
 
     for i in 1usize..control_points.len() {
         for j in 0usize..control_points.len() - i {
-            cache[j] = cache[j] * t_1 + cache[j + 1].coords * t;
+            cache[j] = cache[j] * t_1 + cache[j + 1] * t;
         }
     }
 
@@ -40,20 +36,20 @@ pub fn bezier_curve_at(
 // Evaluates the bezier curve with control points `control_points`.
 #[doc(hidden)]
 pub fn bezier_surface_at(
-    control_points: &[Point3<f32>],
+    control_points: &[Vec3],
     nupoints: usize,
     nvpoints: usize,
     u: f32,
     v: f32,
-    ucache: &mut Vec<Point3<f32>>,
-    vcache: &mut Vec<Point3<f32>>,
-) -> Point3<f32> {
+    ucache: &mut Vec<Vec3>,
+    vcache: &mut Vec<Vec3>,
+) -> Vec3 {
     if vcache.len() < nvpoints {
         let diff = nvpoints - vcache.len();
-        vcache.extend(std::iter::repeat_n(Point3::origin(), diff));
+        vcache.extend(std::iter::repeat_n(Vec3::ZERO, diff));
     }
 
-    // FIXME: start with u or v, depending on which dimension has more control points.
+    // TODO: start with u or v, depending on which dimension has more control points.
     let vcache = &mut vcache[..];
 
     #[allow(clippy::needless_range_loop)]
@@ -68,7 +64,7 @@ pub fn bezier_surface_at(
 }
 
 /// Given a set of control points, generates a (non-rational) Bezier curve.
-pub fn bezier_curve(control_points: &[Point3<f32>], nsubdivs: usize) -> Vec<Point3<f32>> {
+pub fn bezier_curve(control_points: &[Vec3], nsubdivs: usize) -> Vec<Vec3> {
     let mut coords = Vec::with_capacity(nsubdivs);
     let mut cache = Vec::new();
     let tstep = 1.0 / (nsubdivs as f32);
@@ -84,7 +80,7 @@ pub fn bezier_curve(control_points: &[Point3<f32>], nsubdivs: usize) -> Vec<Poin
 
 /// Given a set of control points, generates a (non-rational) Bezier surface.
 pub fn bezier_surface(
-    control_points: &[Point3<f32>],
+    control_points: &[Vec3],
     nupoints: usize,
     nvpoints: usize,
     usubdivs: usize,

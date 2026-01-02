@@ -1,7 +1,7 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="test" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
     <option name="buildProfileId" value="test" />
-    <option name="command" value="test --package kiss3d" />
+    <option name="command" value="test --package kiss3d --features parry" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <envs />
     <option name="emulateTerminal" value="true" />

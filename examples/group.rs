@@ -1,36 +1,34 @@
-extern crate kiss3d;
-extern crate nalgebra as na;
-
-use kiss3d::light::Light;
-use kiss3d::window::Window;
-use na::{Translation3, UnitQuaternion, Vector3};
+use kiss3d::prelude::*;
 
 #[kiss3d::main]
 async fn main() {
-    let mut window = Window::new("Kiss3d: cube").await;
+    let mut window = Window::new("Kiss3d: group").await;
+    let mut camera = OrbitCamera3d::new(Vec3::new(0.0, 0.0, 10.0), Vec3::ZERO);
+    let mut scene = SceneNode3d::empty();
+    scene
+        .add_light(Light::point(100.0))
+        .set_position(Vec3::new(0.0, 10.0, 10.0));
 
-    let mut g1 = window.add_group();
-    let mut g2 = window.add_group();
-
-    g1.append_translation(&Translation3::new(2.0f32, 0.0, 0.0));
-    g2.append_translation(&Translation3::new(-2.0f32, 0.0, 0.0));
+    let mut g1 = scene
+        .add_group()
+        .set_position(Vec3::new(2.0, 0.0, 0.0));
+    let mut g2 = scene
+        .add_group()
+        .set_position(Vec3::new(-2.0, 0.0, 0.0));
 
     g1.add_cube(1.0, 5.0, 1.0);
     g1.add_cube(5.0, 1.0, 1.0);
+    g1.set_color(RED);
 
     g2.add_cube(1.0, 5.0, 1.0);
     g2.add_cube(1.0, 1.0, 5.0);
+    g2.set_color(GREEN);
 
-    g1.set_color(1.0, 0.0, 0.0);
-    g2.set_color(0.0, 1.0, 0.0);
+    let rot1 = Quat::from_axis_angle(Vec3::Y, 0.014);
+    let rot2 = Quat::from_axis_angle(Vec3::X, 0.014);
 
-    window.set_light(Light::StickToCamera);
-
-    let rot1 = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
-    let rot2 = UnitQuaternion::from_axis_angle(&Vector3::x_axis(), 0.014);
-
-    while window.render().await {
-        g1.prepend_to_local_rotation(&rot1);
-        g2.prepend_to_local_rotation(&rot2);
+    while window.render_3d(&mut scene, &mut camera).await {
+        g1.rotate(rot1);
+        g2.rotate(rot2);
     }
 }
