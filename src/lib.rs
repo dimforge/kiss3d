@@ -26,33 +26,28 @@ Most features are one-liners.
 * a first-person camera is available too and user-defined cameras are possible.
 * display boxes, spheres, cones, cylinders, quads and lines.
 * change an object color or texture.
-* change an object transform (we use the [nalgebra](http://nalgebra.org) library
-  to do that).
+* change an object transform (we use the [glam](https://docs.rs/glam/) library
+  for math operations).
 * create basic post-processing effects.
 
 As an example, having a red, rotating cube with the light attached to the camera is as simple as:
 
 ```no_run
-extern crate kiss3d;
-extern crate nalgebra as na;
-
-use kiss3d::light::Light;
-use kiss3d::window::Window;
-use na::{UnitQuaternion, Vector3};
+use kiss3d::prelude::*;
 
 #[kiss3d::main]
 async fn main() {
     let mut window = Window::new("Kiss3d: cube").await;
-    let mut c = window.add_cube(1.0, 1.0, 1.0);
+    let mut camera = OrbitCamera3d::default();
+    let mut scene = SceneNode3d::empty();
 
-    c.set_color(1.0, 0.0, 0.0);
+    let mut c = scene.add_cube(1.0, 1.0, 1.0);
+    c.set_color(RED);
 
-    window.set_light(Light::StickToCamera);
+    let rot = Quat::from_axis_angle(Vec3::Y, 0.014);
 
-    let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
-
-    while window.render().await {
-        c.prepend_to_local_rotation(&rot);
+    while window.render_3d(&mut scene, &mut camera).await {
+        c.rotate(rot);
     }
 }
 ```
@@ -93,7 +88,7 @@ I'd love to see people improving this library for their own needs. However, keep
 Thanks to all the Rustaceans for their help, and their OpenGL bindings.
 */
 #![allow(non_upper_case_globals)]
-#![allow(unused_unsafe)] // FIXME: should be denied
+#![allow(unused_unsafe)] // TODO: should be denied
 #![allow(missing_copy_implementations)]
 #![doc(html_root_url = "http://kiss3d.org/doc")]
 #![allow(clippy::module_inception)]
@@ -102,19 +97,16 @@ Thanks to all the Rustaceans for their help, and their OpenGL bindings.
 
 #[macro_use]
 extern crate bitflags;
-extern crate nalgebra as na;
 extern crate num_traits as num;
 extern crate rusttype;
-#[macro_use]
-extern crate serde_derive;
+#[cfg(feature = "serde")]
 extern crate serde;
 
 #[cfg(feature = "egui")]
 pub extern crate egui;
 
-extern crate instant;
-
-pub use nalgebra;
+pub use glamx;
+#[cfg(feature = "parry")]
 pub use parry3d;
 
 // Re-export the procedural macro and its runtime dependencies
@@ -129,17 +121,15 @@ pub use pollster;
 pub use wasm_bindgen_futures;
 
 #[deprecated(note = "Use the `renderer` module instead.")]
-pub use crate::renderer::point_renderer;
+pub use crate::renderer::point_renderer3d;
 
 pub mod builtin;
 pub mod camera;
+pub mod color;
 pub mod context;
 pub mod event;
 pub mod light;
 pub mod loader;
-pub mod planar_camera;
-pub mod planar_point_renderer;
-pub mod planar_polyline_renderer;
 pub mod post_processing;
 pub mod procedural;
 pub mod renderer;
@@ -151,16 +141,19 @@ pub mod window;
 pub mod prelude {
     pub use crate::builtin::*;
     pub use crate::camera::*;
+    pub use crate::color::*;
     pub use crate::context::*;
     pub use crate::event::*;
     pub use crate::light::*;
     pub use crate::loader::*;
-    pub use crate::planar_camera::*;
-    pub use crate::planar_point_renderer::*;
-    pub use crate::planar_polyline_renderer::*;
     pub use crate::renderer::*;
     pub use crate::resource::*;
     pub use crate::scene::*;
     pub use crate::text::*;
     pub use crate::window::*;
+    pub use glamx::{
+        Mat2, Mat3, Pose2, Pose3, Quat, Rot2, Rot3, Vec2, Vec2Swizzles, Vec3, Vec3Swizzles,
+    };
+    pub use std::cell::RefCell;
+    pub use std::rc::Rc;
 }

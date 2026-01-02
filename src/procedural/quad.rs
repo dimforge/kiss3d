@@ -1,5 +1,5 @@
 use super::{IndexBuffer, RenderMesh};
-use na::{self, Point2, Point3, Vector3};
+use glamx::{Vec2, Vec3};
 
 /// Generates a double-sided subdivided quad mesh.
 ///
@@ -28,12 +28,9 @@ use na::{self, Point2, Point3, Vector3};
 pub fn quad(width: f32, height: f32, usubdivs: usize, vsubdivs: usize) -> RenderMesh {
     let mut quad = unit_quad(usubdivs, vsubdivs);
 
-    let mut s = Vector3::zeros();
-    s[0] = width;
-    s[1] = height;
-    s[2] = 1.0;
+    let s = Vec3::new(width, height, 1.0);
 
-    quad.scale_by(&s);
+    quad.scale_by(s);
 
     quad
 }
@@ -44,7 +41,7 @@ pub fn quad(width: f32, height: f32, usubdivs: usize, vsubdivs: usize) -> Render
 /// deformed surfaces. Normals are automatically computed based on the surface geometry.
 ///
 /// # Arguments
-/// * `vertices` - Array of vertex positions defining the surface (must have `nhpoints × nvpoints` elements)
+/// * `vertices` - Array of vertex positions defining the surface (must have `nhpoints x nvpoints` elements)
 /// * `nhpoints` - Number of points along the horizontal direction (columns)
 /// * `nvpoints` - Number of points along the vertical direction (rows)
 ///
@@ -54,23 +51,19 @@ pub fn quad(width: f32, height: f32, usubdivs: usize, vsubdivs: usize) -> Render
 /// # Example
 /// ```no_run
 /// # use kiss3d::procedural::quad_with_vertices;
-/// # use nalgebra::Point3;
+/// # use glamx::Vec3;
 /// // Create a 3x3 grid of vertices for a simple heightmap
 /// let vertices = vec![
-///     Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0), Point3::new(2.0, 0.0, 0.0),
-///     Point3::new(0.0, 0.5, 1.0), Point3::new(1.0, 0.5, 1.0), Point3::new(2.0, 0.5, 1.0),
-///     Point3::new(0.0, 0.0, 2.0), Point3::new(1.0, 0.0, 2.0), Point3::new(2.0, 0.0, 2.0),
+///     Vec3::new(0.0, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0), Vec3::new(2.0, 0.0, 0.0),
+///     Vec3::new(0.0, 0.5, 1.0), Vec3::new(1.0, 0.5, 1.0), Vec3::new(2.0, 0.5, 1.0),
+///     Vec3::new(0.0, 0.0, 2.0), Vec3::new(1.0, 0.0, 2.0), Vec3::new(2.0, 0.0, 2.0),
 /// ];
 /// let quad_mesh = quad_with_vertices(&vertices, 3, 3);
 /// ```
 ///
 /// # Panics
 /// Panics if `nhpoints` or `nvpoints` is less than 2.
-pub fn quad_with_vertices(
-    vertices: &[Point3<f32>],
-    nhpoints: usize,
-    nvpoints: usize,
-) -> RenderMesh {
+pub fn quad_with_vertices(vertices: &[Vec3], nhpoints: usize, nvpoints: usize) -> RenderMesh {
     assert!(
         nhpoints > 1 && nvpoints > 1,
         "The number of points must be at least 2 in each dimension."
@@ -87,7 +80,7 @@ pub fn quad_with_vertices(
 
 /// Generates a double-sided unit quad mesh.
 ///
-/// Creates a 1×1 quad centered at the origin on the XY plane with its normal pointing
+/// Creates a 1x1 quad centered at the origin on the XY plane with its normal pointing
 /// along the Z axis. The quad is subdivided into a grid of triangles.
 ///
 /// # Arguments
@@ -128,28 +121,24 @@ pub fn unit_quad(usubdivs: usize, vsubdivs: usize) -> RenderMesh {
             let ni: f32 = i as f32;
             let nj: f32 = j as f32;
 
-            let mut v = Point3::origin();
-            v[0] = nj * wstep - cw;
-            v[1] = ni * hstep - ch;
+            let v = Vec3::new(nj * wstep - cw, ni * hstep - ch, 0.0);
             vertices.push(v);
-            tex_coords.push(Point2::new(1.0 - nj * wstep, 1.0 - ni * hstep))
+            tex_coords.push(Vec2::new(1.0 - nj * wstep, 1.0 - ni * hstep))
         }
     }
 
     // create the normals
     for _ in 0..(vsubdivs + 1) * (usubdivs + 1) {
-        let mut n = Vector3::zeros();
-        n[0] = 1.0;
-        normals.push(n)
+        normals.push(Vec3::new(1.0, 0.0, 0.0))
     }
 
     // create triangles
-    fn dl_triangle(i: u32, j: u32, ws: u32) -> Point3<u32> {
-        Point3::new((i + 1) * ws + j, i * ws + j, (i + 1) * ws + j + 1)
+    fn dl_triangle(i: u32, j: u32, ws: u32) -> [u32; 3] {
+        [(i + 1) * ws + j, i * ws + j, (i + 1) * ws + j + 1]
     }
 
-    fn ur_triangle(i: u32, j: u32, ws: u32) -> Point3<u32> {
-        Point3::new(i * ws + j, i * ws + (j + 1), (i + 1) * ws + j + 1)
+    fn ur_triangle(i: u32, j: u32, ws: u32) -> [u32; 3] {
+        [i * ws + j, i * ws + (j + 1), (i + 1) * ws + j + 1]
     }
 
     for i in 0usize..vsubdivs {

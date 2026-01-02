@@ -12,10 +12,12 @@ EXAMPLES=(
     primitives
     primitives_scale
     primitives2d
+    multi_light
     wireframe
     lines
-    planar_lines
+    lines2d
     points
+    points2d
     text
     group
     add_remove
@@ -38,7 +40,7 @@ EXAMPLES=(
     instancing3d
     polylines
     polyline_strip
-    planar_polylines
+    polylines2d
     screenshot
     recording
     window
@@ -52,7 +54,7 @@ echo ""
 
 for example in "${EXAMPLES[@]}"; do
     echo "=== Running: $example ==="
-    cargo run --release --example "$example" --features egui
+    cargo run --release --example "$example" --features egui,parry
     echo ""
 done
 

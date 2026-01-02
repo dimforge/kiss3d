@@ -4,9 +4,8 @@ use crate::loader::mtl;
 use crate::loader::mtl::MtlMaterial;
 use crate::resource::vertex_index::VertexIndex;
 use crate::resource::GPUVec;
-use crate::resource::{AllocationType, BufferType, GpuMesh};
-use na::{Point2, Point3, Vector3};
-use num::Bounded;
+use crate::resource::{AllocationType, BufferType, GpuMesh3d};
+use glamx::{Vec2, Vec3};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::fs::File;
@@ -19,16 +18,16 @@ use std::str::Split;
 use std::sync::{Arc, RwLock};
 
 /// The type of vertex coordinates.
-pub type Coord = Point3<f32>;
+pub type Coord = Vec3;
 /// The type of normals.
-pub type Normal = Vector3<f32>;
+pub type Normal = Vec3;
 /// The type of texture coordinates.
-pub type UV = Point2<f32>;
+pub type UV = Vec2;
 
 /// Iterator through words.
 pub type Words<'a> = Filter<Split<'a, fn(char) -> bool>, fn(&&str) -> bool>;
 
-// FIXME: replace by split_whitespaces from rust 1.1
+// TODO: replace by split_whitespaces from rust 1.1
 /// Returns an iterator through all the words of a string.
 pub fn split_words(s: &str) -> Words<'_> {
     fn is_not_empty(s: &&str) -> bool {
@@ -83,7 +82,7 @@ pub fn parse_file(
     path: &Path,
     mtl_base_dir: &Path,
     basename: &str,
-) -> IoResult<Vec<(String, GpuMesh, Option<MtlMaterial>)>> {
+) -> IoResult<Vec<(String, GpuMesh3d, Option<MtlMaterial>)>> {
     match File::open(path) {
         Ok(mut file) => {
             let mut sfile = String::new();
@@ -91,6 +90,21 @@ pub fn parse_file(
                 .map(|_| parse(&sfile[..], mtl_base_dir, basename))
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Index triplet for a face vertex: (coord_idx, uv_idx, normal_idx)
+/// Uses i32 to handle negative (relative) indices, or i32::MAX for missing
+#[derive(Clone, Copy)]
+struct FaceVertex {
+    coord: i32,
+    uv: i32,
+    normal: i32,
+}
+
+impl FaceVertex {
+    fn new(coord: i32, uv: i32, normal: i32) -> Self {
+        Self { coord, uv, normal }
     }
 }
 
@@ -109,12 +123,12 @@ pub fn parse(
     string: &str,
     mtl_base_dir: &Path,
     basename: &str,
-) -> Vec<(String, GpuMesh, Option<MtlMaterial>)> {
+) -> Vec<(String, GpuMesh3d, Option<MtlMaterial>)> {
     let mut coords: Vec<Coord> = Vec::new();
     let mut normals: Vec<Normal> = Vec::new();
     let mut uvs: Vec<UV> = Vec::new();
     let mut groups: HashMap<String, usize> = HashMap::new();
-    let mut groups_ids: Vec<Vec<Point3<VertexIndex>>> = Vec::new();
+    let mut groups_ids: Vec<Vec<FaceVertex>> = Vec::new();
     let mut curr_group: usize = 0;
     let mut ignore_normals = false;
     let mut ignore_uvs = false;
@@ -133,7 +147,7 @@ pub fn parse(
             Some(w) => {
                 if !w.is_empty() && w.as_bytes()[0] != b'#' {
                     match w {
-                        "v" => coords.push(Point3::from(parse_v_or_vn(l, words))),
+                        "v" => coords.push(parse_v_or_vn(l, words)),
                         "vn" => {
                             if !ignore_normals {
                                 normals.push(parse_v_or_vn(l, words))
@@ -208,7 +222,7 @@ fn parse_usemtl<'a>(
     mtllib: &HashMap<String, MtlMaterial>,
     group2mtl: &mut HashMap<usize, MtlMaterial>,
     groups: &mut HashMap<String, usize>,
-    groups_ids: &mut Vec<Vec<Point3<VertexIndex>>>,
+    groups_ids: &mut Vec<Vec<FaceVertex>>,
     curr_mtl: &mut Option<MtlMaterial>,
 ) -> usize {
     let mname: Vec<&'a str> = ws.collect();
@@ -279,7 +293,7 @@ fn parse_mtllib<'a>(
     }
 }
 
-fn parse_v_or_vn(l: usize, mut ws: Words) -> Vector3<f32> {
+fn parse_v_or_vn(l: usize, mut ws: Words) -> Vec3 {
     let sx = ws
         .next()
         .unwrap_or_else(|| error(l, "3 components were expected, found 0."));
@@ -301,78 +315,83 @@ fn parse_v_or_vn(l: usize, mut ws: Words) -> Vector3<f32> {
     let z =
         z.unwrap_or_else(|e| error(l, &format!("failed to parse `{}' as a f32: {}", sz, e)[..]));
 
-    Vector3::new(x, y, z)
+    Vec3::new(x, y, z)
 }
 
 fn parse_f<'a>(
     l: usize,
     ws: Words<'a>,
-    coords: &[Point3<f32>],
-    uvs: &[Point2<f32>],
-    normals: &[Vector3<f32>],
+    coords: &[Vec3],
+    uvs: &[Vec2],
+    normals: &[Vec3],
     ignore_uvs: &mut bool,
     ignore_normals: &mut bool,
-    groups_ids: &mut Vec<Vec<Point3<VertexIndex>>>,
+    groups_ids: &mut [Vec<FaceVertex>],
     curr_group: usize,
 ) {
     // Four formats possible: v   v/t   v//n   v/t/n
     let mut i = 0;
     for word in ws {
-        let mut curr_ids: Vector3<i32> = Bounded::max_value();
+        let mut coord_idx = i32::MAX;
+        let mut uv_idx = i32::MAX;
+        let mut normal_idx = i32::MAX;
 
-        for (i, w) in word.split('/').enumerate() {
-            if i == 0 || !w.is_empty() {
-                let idx: Result<i32, _> = FromStr::from_str(w);
-                match idx {
-                    Ok(id) => curr_ids[i] = id - 1,
+        for (idx, w) in word.split('/').enumerate() {
+            if idx == 0 || !w.is_empty() {
+                let parsed_idx: Result<i32, _> = FromStr::from_str(w);
+                match parsed_idx {
+                    Ok(id) => {
+                        let adjusted = id - 1; // OBJ indices are 1-based
+                        match idx {
+                            0 => coord_idx = adjusted,
+                            1 => uv_idx = adjusted,
+                            2 => normal_idx = adjusted,
+                            _ => {}
+                        }
+                    }
                     Err(e) => error(l, &format!("failed to parse `{}' as a i32: {}", w, e)[..]),
                 }
             }
         }
 
         if i > 2 {
-            // on the fly triangulation as trangle fan
+            // on the fly triangulation as triangle fan
             let g = &mut groups_ids[curr_group];
-            let p1 = (*g)[g.len() - i];
-            let p2 = (*g)[g.len() - 1];
+            let p1 = g[g.len() - i];
+            let p2 = g[g.len() - 1];
             g.push(p1);
             g.push(p2);
         }
 
-        if curr_ids.y == i32::MAX {
+        if uv_idx == i32::MAX {
             *ignore_uvs = true;
         }
 
-        if curr_ids.z == i32::MAX {
+        if normal_idx == i32::MAX {
             *ignore_normals = true;
         }
 
-        // Handle relatives indice
-
-        let x = if curr_ids.x < 0 {
-            coords.len() as i32 + curr_ids.x + 1
+        // Handle relative indices
+        let x = if coord_idx < 0 {
+            coords.len() as i32 + coord_idx + 1
         } else {
-            curr_ids.x
+            coord_idx
         };
 
-        let y = if curr_ids.y < 0 {
-            uvs.len() as i32 + curr_ids.y + 1
+        let y = if uv_idx < 0 {
+            uvs.len() as i32 + uv_idx + 1
         } else {
-            curr_ids.y
+            uv_idx
         };
 
-        let z = if curr_ids.z < 0 {
-            normals.len() as i32 + curr_ids.z + 1
+        let z = if normal_idx < 0 {
+            normals.len() as i32 + normal_idx + 1
         } else {
-            curr_ids.z
+            normal_idx
         };
 
         assert!(x >= 0 && y >= 0 && z >= 0);
-        groups_ids[curr_group].push(Point3::new(
-            x as VertexIndex,
-            y as VertexIndex,
-            z as VertexIndex,
-        ));
+        groups_ids[curr_group].push(FaceVertex::new(x, y, z));
 
         i += 1;
     }
@@ -380,7 +399,7 @@ fn parse_f<'a>(
     // there is not enough vertex to form a triangle. Complete it.
     if i < 2 {
         for _ in 0usize..3 - i {
-            let last = *(*groups_ids)[curr_group].last().unwrap();
+            let last = *groups_ids[curr_group].last().unwrap();
             groups_ids[curr_group].push(last);
         }
     }
@@ -402,7 +421,7 @@ fn parse_vt(l: usize, mut ws: Words) -> UV {
     let y =
         y.unwrap_or_else(|e| error(l, &format!("failed to parse `{}' as a f32: {}", sy, e)[..]));
 
-    Point2::new(x, y)
+    Vec2::new(x, y)
 }
 
 fn parse_g<'a>(
@@ -410,7 +429,7 @@ fn parse_g<'a>(
     ws: Words<'a>,
     prefix: &str,
     groups: &mut HashMap<String, usize>,
-    groups_ids: &mut Vec<Vec<Point3<VertexIndex>>>,
+    groups_ids: &mut Vec<Vec<FaceVertex>>,
 ) -> usize {
     let suffix: Vec<&'a str> = ws.collect();
     let suffix = suffix.join(" ");
@@ -435,17 +454,17 @@ fn reformat(
     coords: Vec<Coord>,
     normals: Option<Vec<Normal>>,
     uvs: Option<Vec<UV>>,
-    groups_ids: Vec<Vec<Point3<VertexIndex>>>,
+    groups_ids: Vec<Vec<FaceVertex>>,
     groups: HashMap<String, usize>,
     group2mtl: HashMap<usize, MtlMaterial>,
-) -> Vec<(String, GpuMesh, Option<MtlMaterial>)> {
-    let mut vt2id: HashMap<Point3<VertexIndex>, VertexIndex> = HashMap::new();
+) -> Vec<(String, GpuMesh3d, Option<MtlMaterial>)> {
+    let mut vt2id: HashMap<[i32; 3], VertexIndex> = HashMap::new();
     let mut vertex_ids: Vec<VertexIndex> = Vec::new();
     let mut resc: Vec<Coord> = Vec::new();
     let mut resn: Option<Vec<Normal>> = normals.as_ref().map(|_| Vec::new());
     let mut resu: Option<Vec<UV>> = uvs.as_ref().map(|_| Vec::new());
-    let mut resfs: Vec<Vec<Point3<VertexIndex>>> = Vec::new();
-    let mut allfs: Vec<Point3<VertexIndex>> = Vec::new();
+    let mut resfs: Vec<Vec<[VertexIndex; 3]>> = Vec::new();
+    let mut allfs: Vec<[VertexIndex; 3]> = Vec::new();
     let mut names: Vec<String> = Vec::new();
     let mut mtls: Vec<Option<MtlMaterial>> = Vec::new();
 
@@ -453,8 +472,9 @@ fn reformat(
         names.push(name);
         mtls.push(group2mtl.get(&i).cloned());
 
-        for point in groups_ids[i].iter() {
-            let idx = match vt2id.get(point) {
+        for fv in groups_ids[i].iter() {
+            let point_key = [fv.coord, fv.uv, fv.normal];
+            let idx = match vt2id.get(&point_key) {
                 Some(i) => {
                     vertex_ids.push(*i);
                     None
@@ -462,14 +482,14 @@ fn reformat(
                 None => {
                     let idx = resc.len() as VertexIndex;
 
-                    resc.push(coords[point.x as usize]);
+                    resc.push(coords[fv.coord as usize]);
 
                     let _ = resu
                         .as_mut()
-                        .map(|l| l.push((*uvs.as_ref().unwrap())[point.y as usize]));
+                        .map(|l| l.push((*uvs.as_ref().unwrap())[fv.uv as usize]));
                     let _ = resn
                         .as_mut()
-                        .map(|l| l.push((*normals.as_ref().unwrap())[point.z as usize]));
+                        .map(|l| l.push((*normals.as_ref().unwrap())[fv.normal as usize]));
 
                     vertex_ids.push(idx);
 
@@ -477,7 +497,7 @@ fn reformat(
                 }
             };
 
-            let _ = idx.map(|i| vt2id.insert(*point, i));
+            let _ = idx.map(|i| vt2id.insert(point_key, i));
         }
 
         let mut resf = Vec::with_capacity(vertex_ids.len() / 3);
@@ -485,21 +505,21 @@ fn reformat(
         assert!(vertex_ids.len().is_multiple_of(3));
 
         for f in vertex_ids[..].chunks(3) {
-            resf.push(Point3::new(f[0], f[1], f[2]));
-            allfs.push(Point3::new(f[0], f[1], f[2]));
+            resf.push([f[0], f[1], f[2]]);
+            allfs.push([f[0], f[1], f[2]]);
         }
 
         resfs.push(resf);
         vertex_ids.clear();
     }
 
-    let resn = resn.unwrap_or_else(|| GpuMesh::compute_normals_array(&resc[..], &allfs[..]));
+    let resn = resn.unwrap_or_else(|| GpuMesh3d::compute_normals_array(&resc[..], &allfs[..]));
     let resn = Arc::new(RwLock::new(GPUVec::new(
         resn,
         BufferType::Array,
         AllocationType::StaticDraw,
     )));
-    let resu = resu.unwrap_or_else(|| std::iter::repeat_n(Point2::origin(), resc.len()).collect());
+    let resu = resu.unwrap_or_else(|| std::iter::repeat_n(Vec2::ZERO, resc.len()).collect());
     let resu = Arc::new(RwLock::new(GPUVec::new(
         resu,
         BufferType::Array,
@@ -523,7 +543,7 @@ fn reformat(
                 BufferType::ElementArray,
                 AllocationType::StaticDraw,
             )));
-            let mesh = GpuMesh::new_with_gpu_vectors(resc.clone(), fs, resn.clone(), resu.clone());
+            let mesh = GpuMesh3d::new_with_gpu_vectors(resc.clone(), fs, resn.clone(), resu.clone());
             meshes.push((name, mesh, mtl))
         }
     }

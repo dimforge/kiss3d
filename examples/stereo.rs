@@ -1,33 +1,35 @@
-extern crate kiss3d;
-extern crate nalgebra as na;
-
-use kiss3d::camera::FirstPersonStereo;
-use kiss3d::event::{Action, Key, WindowEvent};
-use kiss3d::light::Light;
 use kiss3d::post_processing::OculusStereo;
-use kiss3d::window::Window;
-use na::Point3;
+use kiss3d::prelude::*;
 
 #[kiss3d::main]
 async fn main() {
     let mut window = Window::new_with_size("Kiss3d: stereo", 1280, 800).await;
+    let mut scene = SceneNode3d::empty();
+    scene
+        .add_light(Light::point(100.0))
+        .set_position(Vec3::new(0.0, 10.0, 10.0));
+    let mut cube = scene
+        .add_cube(1.0, 1.0, 1.0)
+        .set_color(RED);
 
-    let mut c = window.add_cube(1.0, 1.0, 1.0);
-
-    let eye = Point3::new(0.0f32, 0.0, 10.0);
-    let at = Point3::new(0.0f32, 0.0, 0.0);
-    let mut camera = FirstPersonStereo::new(eye, at, 0.3f32);
-
-    c.set_color(1.0, 0.0, 0.0);
-
-    window.set_light(Light::StickToCamera);
+    let eye = Vec3::new(1.0f32, 2.0, 10.0);
+    let at = Vec3::ZERO;
+    let mut camera = FirstPersonCamera3dStereo::new(eye, at, 0.3f32);
 
     let mut oculus_stereo = OculusStereo::new();
 
     while window
-        .render_with_camera_and_effect(&mut camera, &mut oculus_stereo)
+        .render(
+            Some(&mut scene),
+            None,
+            Some(&mut camera),
+            None,
+            None,
+            Some(&mut oculus_stereo),
+        )
         .await
     {
+        cube.rotate(Quat::from_rotation_y(0.02));
         for event in window.events().iter() {
             match event.value {
                 WindowEvent::Key(Key::Numpad1, Action::Release, _) => {

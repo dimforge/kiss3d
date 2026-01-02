@@ -1,31 +1,45 @@
-extern crate kiss3d;
-extern crate nalgebra as na;
-
-use kiss3d::light::Light;
-use kiss3d::window::Window;
-use na::{Translation2, UnitComplex, UnitQuaternion, Vector3};
+use kiss3d::prelude::*;
 use std::path::Path;
 
 #[kiss3d::main]
 async fn main() {
     let mut window = Window::new("Kiss3d: texturing").await;
+    let mut camera_3d = OrbitCamera3d::default();
+    let mut scene_3d = SceneNode3d::empty();
+    let mut camera_2d = PanZoomCamera2d::default();
+    let mut scene_2d = SceneNode2d::empty();
 
-    let mut c = window.add_cube(1.0, 1.0, 1.0);
-    c.set_color(1.0, 0.0, 0.0);
-    c.set_texture_from_file(Path::new("./examples/media/kitten.png"), "kitten");
+    scene_3d
+        .add_light(Light::point(100.0))
+        .set_position(Vec3::new(0.0, 2.0, -10.0));
 
-    let mut r = window.add_rectangle(100.0, 100.0);
-    r.append_translation(&Translation2::new(-100.0, -100.0));
-    r.set_color(0.0, 0.0, 1.0);
-    r.set_texture_from_memory(include_bytes!("./media/kitten.png"), "kitten_mem");
+    let mut c = scene_3d
+        .add_cube(1.0, 1.0, 1.0)
+        .set_color(RED)
+        .set_texture_from_file(Path::new("./examples/media/kitten.png"), "kitten");
 
-    window.set_light(Light::StickToCamera);
+    let mut r = scene_2d
+        .add_rectangle(100.0, 100.0)
+        .set_position(Vec2::new(-100.0, -100.0))
+        .set_color(BLUE)
+        .set_texture_from_memory(include_bytes!("./media/kitten.png"), "kitten_mem");
 
-    let rot3d = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
-    let rot2d = UnitComplex::new(0.01);
+    let rot3d = Quat::from_axis_angle(Vec3::Y, 0.014);
+    let rot2d = 0.01;
 
-    while window.render().await {
-        c.append_rotation(&rot3d);
-        r.prepend_to_local_rotation(&rot2d)
+    // Render 3D and 2D scenes alternately
+    while window
+        .render(
+            Some(&mut scene_3d),
+            Some(&mut scene_2d),
+            Some(&mut camera_3d),
+            Some(&mut camera_2d),
+            None,
+            None,
+        )
+        .await
+    {
+        c.append_rotation(rot3d);
+        r.append_rotation(rot2d);
     }
 }

@@ -1,4 +1,4 @@
-use crate::camera::Camera;
+use crate::camera::Camera3d;
 use crate::resource::RenderContext;
 
 /// Trait for implementing custom rendering logic.
@@ -6,7 +6,7 @@ use crate::resource::RenderContext;
 /// Implement this trait to create custom renderers that can draw additional
 /// geometry or effects during the render pipeline. Custom renderers are invoked
 /// during each rendering pass.
-pub trait Renderer {
+pub trait Renderer3d {
     /// Performs a custom rendering pass.
     ///
     /// This method is called during each rendering pass, after the main scene
@@ -15,6 +15,13 @@ pub trait Renderer {
     /// # Arguments
     /// * `pass` - The current rendering pass index (0 for single-pass rendering)
     /// * `camera` - The camera being used for rendering
-    /// * `context` - The render context with encoder and views
-    fn render(&mut self, pass: usize, camera: &mut dyn Camera, context: &mut RenderContext);
+    /// * `render_pass` - The active wgpu render pass to draw into
+    /// * `context` - The render context with viewport info
+    fn render(
+        &mut self,
+        pass: usize,
+        camera: &mut dyn Camera3d,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        context: &RenderContext,
+    );
 }

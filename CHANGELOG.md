@@ -1,3 +1,203 @@
+# v0.39.0
+
+Major API overhaul: scene separation from window, glam math library, simplified transform API, and 2D/3D naming conventions.
+
+## Breaking Changes
+
+### Scene Separation from Window
+- **Scenes are no longer owned by the Window** - Create scenes independently and pass them to render
+- **New render methods**: `window.render_3d(&mut scene, &mut camera)` and `window.render_2d(&mut scene, &mut camera)`
+- **Removed**: `window.add_cube()`, `window.add_sphere()`, etc. - use `scene.add_cube()` instead
+- **Removed**: `window.scene()` and `window.scene_mut()` - manage scenes directly
+- Cameras must now be created and managed by user code
+
+### 3D Type Renaming
+- `SceneNode` → `SceneNode3d`
+- `Object` → `Object3d`
+- `GpuMesh` → `GpuMesh3d`
+- `MeshManager` → `MeshManager3d`
+- `MaterialManager` → `MaterialManager3d`
+- `PointRenderer` → `PointRenderer3d`
+- `PolylineRenderer` → `PolylineRenderer3d`
+- `Camera` trait → `Camera3d` trait
+
+### Math Library: nalgebra → glam
+- **Switched** from `nalgebra` to `glamx` (glam wrapper) for all public APIs
+- Key type changes:
+  - `Point3<f32>` → `Vec3`
+  - `Vector3<f32>` → `Vec3`
+  - `UnitQuaternion<f32>` → `Quat`
+  - `Translation3<f32>` → `Vec3`
+  - `Isometry3<f32>` → `Pose3`
+  - `Point2<f32>` / `Vector2<f32>` → `Vec2`
+  - `UnitComplex<f32>` → `f32` (just use angle in radians directly)
+- Common conversions:
+  - `Vector3::y_axis()` → `Vec3::Y`
+  - `Point3::origin()` → `Vec3::ZERO`
+  - `UnitQuaternion::from_axis_angle(&Vector3::y_axis(), angle)` → `Quat::from_axis_angle(Vec3::Y, angle)`
+
+### Simplified Transform API
+- `prepend_to_local_rotation(&rot)` → `rotate(rot)`
+- `prepend_to_local_translation(&t)` → `translate(t)`
+- `set_local_rotation(r)` → `set_rotation(r)`
+- `set_local_translation(t)` → `set_position(t)`
+- `local_rotation()` → `rotation()`
+- `local_translation()` → `position()`
+- Rotation values passed by value, not reference
+
+### 2D API Renaming ("planar" → "2d")
+- `PlanarSceneNode` → `SceneNode2d`
+- `PlanarCamera` → `Camera2d`
+- `FixedView` (planar) → `FixedView2d`
+- `Sidescroll` → `PanZoomCamera2d`
+- `draw_planar_line()` → `draw_line_2d()`
+- `draw_planar_point()` → `draw_point_2d()`
+- `add_rectangle()` / `add_circle()` now on `SceneNode2d`
+- Modules renamed: `planar_camera` → `camera2d`, `planar_polyline_renderer` → `polyline_renderer2d`
+
+### Camera Renaming
+- `ArcBall` → `OrbitCamera3d`
+- `FirstPerson` → `FirstPersonCamera3d`
+- `FirstPersonStereo` → `FirstPersonStereoCamera3d`
+- `FixedView` → `FixedViewCamera3d`
+
+### Color API
+- Colors now use `[f32; 3]` arrays instead of `Point3<f32>`
+- `set_color(r, g, b)` now takes a `[f32; 3]` and you can use color constants directly: `set_color(RED)`
+- `set_lines_color(Some(Point3::new(1.0, 0.0, 0.0)))` → `set_lines_color(Some(RED))`
+- New `color` module with CSS named color constants (re-exported in prelude)
+
+### parry3d Now Optional
+- `parry3d` moved behind `parry` feature flag
+- `parry3d` now uses glam directly (no nalgebra conversion needed)
+- `add_trimesh()` requires `parry` feature
+- Examples `procedural` and `decomp` require `--features parry`
+
+### Lighting API
+- **Replaced** `Light::Absolute(Point3)` and `Light::StickToCamera` enum with new `Light` struct
+- **Removed** `window.set_light()` - use `scene.add_light()` instead
+- Lights are now scene nodes, not window-level configuration
+
+### Other Breaking Changes
+- `SceneNode::new_empty()` → `SceneNode3d::empty()`
+- `SceneNode::unlink()` → `SceneNode3d::detach()`
+- Index buffers always use `u32` (removed `vertex_index_u32` feature)
+- `instant` crate replaced with `web_time`
+- Camera modules merged: `camera2d` and `camera3d` now under single `camera` module
+- **Removed** `Window::set_frame_limit()` method
+- `set_background_color(r, g, b)` → `set_background_color(Color)`
+- `draw_line(a, b, color, width)` → `draw_line(a, b, color, width, perspective)`
+
+## Migration Guide
+
+### Basic 3D scene (before):
+```rust
+use kiss3d::window::Window;
+use nalgebra::{UnitQuaternion, Vector3};
+
+#[kiss3d::main]
+async fn main() {
+    let mut window = Window::new("Example").await;
+    let mut cube = window.add_cube(1.0, 1.0, 1.0);
+    cube.set_color(1.0, 0.0, 0.0);
+
+    let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.01);
+    while window.render().await {
+        cube.prepend_to_local_rotation(&rot);
+    }
+}
+```
+
+### Basic 3D scene (after):
+```rust
+use kiss3d::prelude::*;
+
+#[kiss3d::main]
+async fn main() {
+    let mut window = Window::new("Example").await;
+    let mut camera = OrbitCamera3d::default();
+    let mut scene = SceneNode3d::empty();
+
+    let mut cube = scene.add_cube(1.0, 1.0, 1.0);
+    cube.set_color(RED);
+
+    let rot = Quat::from_axis_angle(Vec3::Y, 0.01);
+    while window.render_3d(&mut scene, &mut camera).await {
+        cube.rotate(rot);
+    }
+}
+```
+
+### Basic 2D scene (before):
+```rust
+use kiss3d::window::Window;
+use nalgebra::UnitComplex;
+
+let mut window = Window::new("2D").await;
+let mut rect = window.add_rectangle(50.0, 100.0);
+let rot = UnitComplex::new(0.01);
+while window.render().await {
+    rect.prepend_to_local_rotation(&rot);
+}
+```
+
+### Basic 2D scene (after):
+```rust
+use kiss3d::prelude::*;
+
+let mut window = Window::new("2D").await;
+let mut camera = PanZoomCamera2d::default();
+let mut scene = SceneNode2d::empty();
+
+let mut rect = scene.add_rectangle(50.0, 100.0);
+while window.render_2d(&mut scene, &mut camera).await {
+    rect.rotate(0.01);
+}
+```
+
+## New Features
+
+### Multiple Lights Support
+- Scene now supports up to 8 lights (instead of just one)
+- **New light types**: `Light::point()`, `Light::directional()`, `Light::spot()`
+- Lights attach to scene nodes via `scene.add_light(light)`
+- Convenience methods: `add_point_light()`, `add_directional_light()`, `add_spot_light()`
+- Lights inherit transforms from parent scene nodes
+- Light properties: `color`, `intensity`, `enabled`, `attenuation_radius`
+- Builder pattern: `Light::point(100.0).with_color(RED).with_intensity(5.0)`
+
+### Ambient Light Control
+- `window.set_ambient(f32)` - set ambient light intensity
+- `window.ambient()` - get current ambient light intensity
+
+### Color Module
+- New `kiss3d::color` module with all CSS named colors
+- Example: `color::RED`, `color::LIME_GREEN`, `color::STEEL_BLUE`
+- New `Color` struct (alias of `Rgba<f32>`) for colors with alpha channel
+
+### Subdivision Control for Primitives
+- `add_sphere_with_subdiv(r, ntheta, nphi)` - control sphere tessellation
+- `add_cone_with_subdiv(r, h, nsubdiv)` - control cone segments
+- `add_cylinder_with_subdiv(r, h, nsubdiv)` - control cylinder segments
+- `add_capsule_with_subdiv(r, h, ntheta, nphi)` - control capsule tessellation
+
+### Optional Serde Support
+- New `serde` feature flag for serialization support
+- Enable with: `kiss3d = { version = "0.39", features = ["serde"] }`
+
+### Default Cameras
+- `OrbitCamera3d::default()` - starts at (0, 0, -2) looking at origin
+- `PanZoomCamera2d::default()` - centered at origin with 2x zoom
+
+### Multi-Window Support Improvements
+- Better handling of multiple windows in the same application
+
+### Line Rendering
+- `draw_line()` now takes a `perspective` parameter to control size scaling with distance
+- 2D lines now render on top of 2D surfaces
+
+---
+
 # v0.38.0
 
 Switch from OpenGL (glow/glutin) to wgpu for cross-platform GPU support.

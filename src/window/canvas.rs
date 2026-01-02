@@ -5,7 +5,8 @@ use crate::window::WgpuCanvas;
 use image::{GenericImage, Pixel};
 
 /// The possible number of samples for multisample anti-aliasing.
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NumSamples {
     /// Multisampling disabled.
     Zero = 0,
@@ -37,7 +38,8 @@ impl NumSamples {
     }
 }
 
-#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 /// Canvas options.
 pub struct CanvasSetup {
     /// Is vsync enabled?

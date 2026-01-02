@@ -35,12 +35,33 @@ use wasm_bindgen::JsCast;
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     static EVENT_LOOP: RefCell<Option<EventLoop<()>>> = const { RefCell::new(None) };
+    // Shared event storage for multi-window support. Events are stored per window_id
+    // so each window can retrieve only its own events after pump_app_events runs.
+    static PENDING_WINDOW_EVENTS: RefCell<std::collections::HashMap<winit::window::WindowId, Vec<PendingEvent>>> = RefCell::new(std::collections::HashMap::new());
+}
+
+/// Internal event type that stores both the event data and state updates needed.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone)]
+enum PendingEvent {
+    WindowEvent(WindowEvent),
+    ButtonState(MouseButton, Action),
+    KeyState(Key, Action),
+    CursorPos(f64, f64),
+    #[allow(dead_code)]
+    Modifiers(ModifiersState),
+    Resize {
+        width: u32,
+        height: u32,
+    },
 }
 
 /// A unified canvas based on wgpu that works on both native and web platforms.
 #[allow(dead_code)]
 pub struct WgpuCanvas {
     window: Arc<Window>,
+    #[cfg(not(target_arch = "wasm32"))]
+    window_id: winit::window::WindowId,
     surface: wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     cursor_pos: Option<(f64, f64)>,
@@ -175,56 +196,88 @@ impl WgpuCanvas {
 
         let window = Arc::new(window);
 
-        // Initialize wgpu
-        let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..Default::default()
-        });
+        // Check if we already have a context initialized (multi-window case)
+        let (surface, surface_format) = if Context::is_initialized() {
+            // Reuse the existing context - create a new surface using the shared instance
+            let ctxt = Context::get();
 
-        // Create surface
-        let surface = instance
-            .create_surface(window.clone())
-            .expect("Failed to create surface");
+            let surface = ctxt
+                .instance
+                .create_surface(window.clone())
+                .expect("Failed to create surface");
 
-        // Request adapter (async on all platforms)
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::default(),
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .expect("Failed to find an appropriate adapter");
+            // Configure surface with existing device
+            let surface_caps = surface.get_capabilities(&ctxt.adapter);
+            let surface_format = surface_caps
+                .formats
+                .iter()
+                .find(|f| !f.is_srgb())
+                .copied()
+                .unwrap_or(surface_caps.formats[0]);
 
-        // Request device (async on all platforms)
-        // Use downlevel defaults for WebGL2 compatibility
-        #[cfg(target_arch = "wasm32")]
-        let limits = wgpu::Limits::downlevel_webgl2_defaults();
-        #[cfg(not(target_arch = "wasm32"))]
-        let limits = wgpu::Limits::default();
+            (surface, surface_format)
+        } else {
+            // First window - create the full wgpu context
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::all(),
+                ..Default::default()
+            });
 
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("kiss3d device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: limits,
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .expect("Failed to create device");
+            // Create surface
+            let surface = instance
+                .create_surface(window.clone())
+                .expect("Failed to create surface");
 
-        // Get surface capabilities
-        // We explicitly prefer non-sRGB formats for consistent behavior across platforms.
-        // WebGL2 often doesn't support sRGB framebuffers, so we do manual gamma correction
-        // in shaders instead. This ensures colors look the same on native and web.
-        let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
-            .iter()
-            .find(|f| !f.is_srgb())
-            .copied()
-            .unwrap_or(surface_caps.formats[0]);
+            // Request adapter (async on all platforms)
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::default(),
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter: false,
+                })
+                .await
+                .expect("Failed to find an appropriate adapter");
+
+            // Request device (async on all platforms)
+            // Use downlevel defaults for WebGL2 compatibility
+            #[cfg(target_arch = "wasm32")]
+            let limits = wgpu::Limits::downlevel_webgl2_defaults();
+            #[cfg(not(target_arch = "wasm32"))]
+            let limits = wgpu::Limits::default();
+
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("kiss3d device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: limits,
+                    memory_hints: wgpu::MemoryHints::default(),
+                    trace: wgpu::Trace::Off,
+                })
+                .await
+                .expect("Failed to create device");
+
+            // Get surface capabilities
+            // We explicitly prefer non-sRGB formats for consistent behavior across platforms.
+            // WebGL2 often doesn't support sRGB framebuffers, so we do manual gamma correction
+            // in shaders instead. This ensures colors look the same on native and web.
+            let surface_caps = surface.get_capabilities(&adapter);
+            let surface_format = surface_caps
+                .formats
+                .iter()
+                .find(|f| !f.is_srgb())
+                .copied()
+                .unwrap_or(surface_caps.formats[0]);
+
+            // Initialize the global context (only for first window)
+            Context::init(instance, device, queue, adapter, surface_format);
+
+            (surface, surface_format)
+        };
+
+        let ctxt = Context::get();
+
+        // Get surface capabilities for alpha mode
+        let surface_caps = surface.get_capabilities(&ctxt.adapter);
 
         // Get the actual window size
         let size = window.inner_size();
@@ -248,17 +301,22 @@ impl WgpuCanvas {
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
-        surface.configure(&device, &surface_config);
+        surface.configure(&ctxt.device, &surface_config);
 
         // Create depth texture
         let (depth_texture, depth_view) =
-            Self::create_depth_texture(&device, width, height, canvas_setup.samples as u32);
+            Self::create_depth_texture(&ctxt.device, width, height, canvas_setup.samples as u32);
 
         // Create MSAA texture if needed
         let sample_count = canvas_setup.samples as u32;
         let (msaa_texture, msaa_view) = if sample_count > 1 {
-            let (tex, view) =
-                Self::create_msaa_texture(&device, width, height, surface_format, sample_count);
+            let (tex, view) = Self::create_msaa_texture(
+                &ctxt.device,
+                width,
+                height,
+                surface_format,
+                sample_count,
+            );
             (Some(tex), Some(view))
         } else {
             (None, None)
@@ -266,10 +324,7 @@ impl WgpuCanvas {
 
         // Create readback texture for screenshots
         let readback_texture =
-            Self::create_readback_texture(&device, width, height, surface_format);
-
-        // Initialize the global context
-        Context::init(device, queue, adapter, surface_format);
+            Self::create_readback_texture(&ctxt.device, width, height, surface_format);
 
         // Set up WASM event listeners
         #[cfg(target_arch = "wasm32")]
@@ -361,12 +416,13 @@ impl WgpuCanvas {
                         Closure::<dyn FnMut(_)>::new(move |event: web_sys::WheelEvent| {
                             // Prevent default scrolling behavior
                             event.prevent_default();
-                            // Scale based on delta mode:
+                            // Scale based on delta mode to match native behavior:
+                            // Native scales LineDelta by 10.0 and PixelDelta by 1.0.
                             // 0 = DOM_DELTA_PIXEL, 1 = DOM_DELTA_LINE, 2 = DOM_DELTA_PAGE
                             let scale = match event.delta_mode() {
-                                0 => 0.01, // Pixel mode - very small scale
-                                1 => 0.1,  // Line mode - moderate scale
-                                _ => 1.0,  // Page mode - use as-is
+                                0 => 1.0,   // Pixel mode - use as-is (like native PixelDelta)
+                                1 => 10.0,  // Line mode - scale by 10 (like native LineDelta)
+                                _ => 100.0, // Page mode - large jumps
                             };
                             let dx = event.delta_x() * scale;
                             let dy = -event.delta_y() * scale; // Invert for natural scrolling
@@ -533,8 +589,13 @@ impl WgpuCanvas {
             (pending_events, closures)
         };
 
+        #[cfg(not(target_arch = "wasm32"))]
+        let window_id = window.id();
+
         WgpuCanvas {
             window,
+            #[cfg(not(target_arch = "wasm32"))]
+            window_id,
             surface,
             surface_config,
             cursor_pos: None,
@@ -642,110 +703,59 @@ impl WgpuCanvas {
         {
             use winit::platform::pump_events::EventLoopExtPumpEvents;
 
-            let out_events = &self.out_events;
-            let button_states = &mut self.button_states;
-            let key_states = &mut self.key_states;
-            let cursor_pos = &mut self.cursor_pos;
-            let modifiers_state = &mut self.modifiers_state;
-            let surface = &self.surface;
-            let surface_config = &mut self.surface_config;
-            let depth_texture = &mut self.depth_texture;
-            let depth_view = &mut self.depth_view;
-            let msaa_texture = &mut self.msaa_texture;
-            let msaa_view = &mut self.msaa_view;
-            let sample_count = self.sample_count;
-            let readback_texture = &mut self.readback_texture;
+            // First, pump all events into the shared storage
+            struct EventCollector;
 
-            struct EventHandler<'a> {
-                out_events: &'a Sender<WindowEvent>,
-                button_states: &'a mut [Action],
-                key_states: &'a mut [Action],
-                cursor_pos: &'a mut Option<(f64, f64)>,
-                modifiers_state: &'a mut ModifiersState,
-                surface: &'a wgpu::Surface<'static>,
-                surface_config: &'a mut wgpu::SurfaceConfiguration,
-                depth_texture: &'a mut wgpu::Texture,
-                depth_view: &'a mut wgpu::TextureView,
-                msaa_texture: &'a mut Option<wgpu::Texture>,
-                msaa_view: &'a mut Option<wgpu::TextureView>,
-                sample_count: u32,
-                readback_texture: &'a mut wgpu::Texture,
-            }
-
-            impl ApplicationHandler for EventHandler<'_> {
+            impl ApplicationHandler for EventCollector {
                 fn resumed(&mut self, _event_loop: &ActiveEventLoop) {}
 
                 fn window_event(
                     &mut self,
                     _event_loop: &ActiveEventLoop,
-                    _window_id: winit::window::WindowId,
+                    window_id: winit::window::WindowId,
                     event: WinitWindowEvent,
                 ) {
-                    match event {
+                    let pending_events: Vec<PendingEvent> = match event {
                         WinitWindowEvent::CloseRequested => {
-                            let _ = self.out_events.send(WindowEvent::Close);
+                            vec![PendingEvent::WindowEvent(WindowEvent::Close)]
                         }
                         WinitWindowEvent::Resized(physical_size) => {
                             if physical_size.width > 0 && physical_size.height > 0 {
-                                let ctxt = Context::get();
-
-                                // Resize surface
-                                self.surface_config.width = physical_size.width;
-                                self.surface_config.height = physical_size.height;
-                                self.surface.configure(&ctxt.device, self.surface_config);
-
-                                // Recreate depth texture
-                                let (new_depth, new_depth_view) = WgpuCanvas::create_depth_texture(
-                                    &ctxt.device,
-                                    physical_size.width,
-                                    physical_size.height,
-                                    self.sample_count,
-                                );
-                                *self.depth_texture = new_depth;
-                                *self.depth_view = new_depth_view;
-
-                                // Recreate MSAA texture if needed
-                                if self.sample_count > 1 {
-                                    let (new_msaa, new_msaa_view) = WgpuCanvas::create_msaa_texture(
-                                        &ctxt.device,
+                                vec![
+                                    PendingEvent::Resize {
+                                        width: physical_size.width,
+                                        height: physical_size.height,
+                                    },
+                                    PendingEvent::WindowEvent(WindowEvent::FramebufferSize(
                                         physical_size.width,
                                         physical_size.height,
-                                        self.surface_config.format,
-                                        self.sample_count,
-                                    );
-                                    *self.msaa_texture = Some(new_msaa);
-                                    *self.msaa_view = Some(new_msaa_view);
-                                }
-
-                                // Recreate readback texture
-                                *self.readback_texture = WgpuCanvas::create_readback_texture(
-                                    &ctxt.device,
-                                    physical_size.width,
-                                    physical_size.height,
-                                    self.surface_config.format,
-                                );
-
-                                let _ = self.out_events.send(WindowEvent::FramebufferSize(
-                                    physical_size.width,
-                                    physical_size.height,
-                                ));
+                                    )),
+                                ]
+                            } else {
+                                vec![]
                             }
                         }
                         WinitWindowEvent::CursorMoved { position, .. } => {
-                            let modifiers = translate_modifiers(*self.modifiers_state);
-                            *self.cursor_pos = Some((position.x, position.y));
-                            let _ = self
-                                .out_events
-                                .send(WindowEvent::CursorPos(position.x, position.y, modifiers));
+                            vec![
+                                PendingEvent::CursorPos(position.x, position.y),
+                                PendingEvent::WindowEvent(WindowEvent::CursorPos(
+                                    position.x,
+                                    position.y,
+                                    Modifiers::empty(), // Will be filled in when processing
+                                )),
+                            ]
                         }
                         WinitWindowEvent::MouseInput { state, button, .. } => {
                             let action = translate_action(state);
                             let button = translate_mouse_button(button);
-                            let modifiers = translate_modifiers(*self.modifiers_state);
-                            self.button_states[button as usize] = action;
-                            let _ = self
-                                .out_events
-                                .send(WindowEvent::MouseButton(button, action, modifiers));
+                            vec![
+                                PendingEvent::ButtonState(button, action),
+                                PendingEvent::WindowEvent(WindowEvent::MouseButton(
+                                    button,
+                                    action,
+                                    Modifiers::empty(),
+                                )),
+                            ]
                         }
                         WinitWindowEvent::Touch(touch) => {
                             let action = match touch.phase {
@@ -754,14 +764,13 @@ impl WgpuCanvas {
                                 TouchPhase::Moved => TouchAction::Move,
                                 TouchPhase::Cancelled => TouchAction::Cancel,
                             };
-
-                            let _ = self.out_events.send(WindowEvent::Touch(
+                            vec![PendingEvent::WindowEvent(WindowEvent::Touch(
                                 touch.id,
                                 touch.location.x,
                                 touch.location.y,
                                 action,
                                 Modifiers::empty(),
-                            ));
+                            ))]
                         }
                         WinitWindowEvent::MouseWheel { delta, .. } => {
                             let (x, y) = match delta {
@@ -770,55 +779,122 @@ impl WgpuCanvas {
                                 }
                                 MouseScrollDelta::PixelDelta(delta) => (delta.x, delta.y),
                             };
-                            let modifiers = translate_modifiers(*self.modifiers_state);
-                            let _ = self.out_events.send(WindowEvent::Scroll(x, y, modifiers));
+                            vec![PendingEvent::WindowEvent(WindowEvent::Scroll(
+                                x,
+                                y,
+                                Modifiers::empty(),
+                            ))]
                         }
                         WinitWindowEvent::KeyboardInput { event, .. } => {
                             let action = translate_action(event.state);
                             let key = translate_key(event.physical_key);
-                            let modifiers = translate_modifiers(*self.modifiers_state);
-                            self.key_states[key as usize] = action;
-                            let _ = self
-                                .out_events
-                                .send(WindowEvent::Key(key, action, modifiers));
-
+                            let mut events = vec![
+                                PendingEvent::KeyState(key, action),
+                                PendingEvent::WindowEvent(WindowEvent::Key(
+                                    key,
+                                    action,
+                                    Modifiers::empty(),
+                                )),
+                            ];
                             if let winit::keyboard::Key::Character(ref c) = event.logical_key {
                                 for ch in c.chars() {
-                                    let _ = self.out_events.send(WindowEvent::Char(ch));
+                                    events.push(PendingEvent::WindowEvent(WindowEvent::Char(ch)));
                                 }
                             }
+                            events
                         }
                         WinitWindowEvent::ModifiersChanged(new_modifiers) => {
-                            *self.modifiers_state = new_modifiers.state();
+                            vec![PendingEvent::Modifiers(new_modifiers.state())]
                         }
-                        _ => {}
+                        _ => vec![],
+                    };
+
+                    if !pending_events.is_empty() {
+                        PENDING_WINDOW_EVENTS.with(|storage| {
+                            storage
+                                .borrow_mut()
+                                .entry(window_id)
+                                .or_default()
+                                .extend(pending_events);
+                        });
                     }
                 }
             }
 
-            let mut handler = EventHandler {
-                out_events,
-                button_states,
-                key_states,
-                cursor_pos,
-                modifiers_state,
-                surface,
-                surface_config,
-                depth_texture,
-                depth_view,
-                msaa_texture,
-                msaa_view,
-                sample_count,
-                readback_texture,
-            };
-
             let timeout = Some(std::time::Duration::ZERO);
-            // Use the thread-local EventLoop singleton
             EVENT_LOOP.with(|event_loop_cell| {
                 if let Some(ref mut event_loop) = *event_loop_cell.borrow_mut() {
-                    let _ = event_loop.pump_app_events(timeout, &mut handler);
+                    let mut collector = EventCollector;
+                    let _ = event_loop.pump_app_events(timeout, &mut collector);
                 }
             });
+
+            // Now process only this window's events
+            let events = PENDING_WINDOW_EVENTS.with(|storage| {
+                storage
+                    .borrow_mut()
+                    .remove(&self.window_id)
+                    .unwrap_or_default()
+            });
+
+            for event in events {
+                match event {
+                    PendingEvent::WindowEvent(we) => {
+                        let _ = self.out_events.send(we);
+                    }
+                    PendingEvent::ButtonState(button, action) => {
+                        self.button_states[button as usize] = action;
+                    }
+                    PendingEvent::KeyState(key, action) => {
+                        self.key_states[key as usize] = action;
+                    }
+                    PendingEvent::CursorPos(x, y) => {
+                        self.cursor_pos = Some((x, y));
+                    }
+                    PendingEvent::Modifiers(m) => {
+                        self.modifiers_state = m;
+                    }
+                    PendingEvent::Resize { width, height } => {
+                        let ctxt = Context::get();
+
+                        // Resize surface
+                        self.surface_config.width = width;
+                        self.surface_config.height = height;
+                        self.surface.configure(&ctxt.device, &self.surface_config);
+
+                        // Recreate depth texture
+                        let (new_depth, new_depth_view) = Self::create_depth_texture(
+                            &ctxt.device,
+                            width,
+                            height,
+                            self.sample_count,
+                        );
+                        self.depth_texture = new_depth;
+                        self.depth_view = new_depth_view;
+
+                        // Recreate MSAA texture if needed
+                        if self.sample_count > 1 {
+                            let (new_msaa, new_msaa_view) = Self::create_msaa_texture(
+                                &ctxt.device,
+                                width,
+                                height,
+                                self.surface_config.format,
+                                self.sample_count,
+                            );
+                            self.msaa_texture = Some(new_msaa);
+                            self.msaa_view = Some(new_msaa_view);
+                        }
+
+                        // Recreate readback texture
+                        self.readback_texture = Self::create_readback_texture(
+                            &ctxt.device,
+                            width,
+                            height,
+                            self.surface_config.format,
+                        );
+                    }
+                }
+            }
         }
 
         #[cfg(target_arch = "wasm32")]
@@ -1052,9 +1128,12 @@ impl WgpuCanvas {
         self.surface_config.format
     }
 
-    /// The size of the window.
+    /// The size of the render surface.
+    ///
+    /// This returns the configured surface size, which matches the depth texture
+    /// and is guaranteed to be consistent with the render targets.
     pub fn size(&self) -> (u32, u32) {
-        self.window.inner_size().into()
+        (self.surface_config.width, self.surface_config.height)
     }
 
     /// The current position of the cursor, if known.
@@ -1137,6 +1216,7 @@ fn translate_action(action: winit::event::ElementState) -> Action {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+#[allow(dead_code)]
 fn translate_modifiers(modifiers: ModifiersState) -> Modifiers {
     let mut res = Modifiers::empty();
     if modifiers.shift_key() {

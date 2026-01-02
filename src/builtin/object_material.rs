@@ -1,32 +1,74 @@
-use crate::camera::Camera;
+use crate::camera::Camera3d;
 use crate::context::Context;
-use crate::light::Light;
+use crate::light::{LightCollection, LightType, MAX_LIGHTS};
 use crate::resource::vertex_index::VERTEX_INDEX_FORMAT;
-use crate::resource::{GpuData, GpuMesh, Material, RenderContext, Texture};
-use crate::scene::{InstancesBuffer, ObjectData};
+use crate::resource::{DynamicUniformBuffer, GpuData, GpuMesh3d, Material3d, RenderContext, Texture};
+use crate::scene::{InstancesBuffer3d, ObjectData3d};
 use bytemuck::{Pod, Zeroable};
-use na::{Isometry3, Matrix3, Point3, Vector3};
+use glamx::{Mat3, Pose3, Vec3};
 use std::any::Any;
+use std::cell::Cell;
 
-/// Frame-level uniforms (view, projection, light).
+/// GPU representation of a single light.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct GpuLight {
+    position: [f32; 3],
+    light_type: u32, // 0=point, 1=directional, 2=spot
+    direction: [f32; 3],
+    intensity: f32,
+    color: [f32; 3],
+    inner_cone_cos: f32,
+    outer_cone_cos: f32,
+    attenuation_radius: f32,
+    _padding: [f32; 2],
+}
+
+impl Default for GpuLight {
+    fn default() -> Self {
+        Self {
+            position: [0.0; 3],
+            light_type: 0,
+            direction: [0.0, 0.0, -1.0],
+            intensity: 0.0,
+            color: [1.0, 1.0, 1.0],
+            inner_cone_cos: 1.0,
+            outer_cone_cos: 0.0,
+            attenuation_radius: 100.0,
+            _padding: [0.0; 2],
+        }
+    }
+}
+
+/// Frame-level uniforms (view, projection, lights).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct FrameUniforms {
     view: [[f32; 4]; 4],
     proj: [[f32; 4]; 4],
-    light_position: [f32; 3],
-    _padding: f32,
+    lights: [GpuLight; MAX_LIGHTS],
+    num_lights: u32,
+    ambient_intensity: f32,
+    _padding: [f32; 2],
 }
 
-/// Object-level uniforms (transform, scale, color).
+/// Object-level uniforms (transform, scale, color, PBR properties).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 struct ObjectUniforms {
     transform: [[f32; 4]; 4],
     ntransform: [[f32; 4]; 3], // mat3x3 padded to mat3x4 for alignment
     scale: [[f32; 4]; 3],      // mat3x3 padded to mat3x4 for alignment
-    color: [f32; 3],
-    _padding: f32,
+    color: [f32; 4],
+    metallic: f32,
+    roughness: f32,
+    _pad0: [f32; 2],
+    emissive: [f32; 4],
+    // Texture presence flags (0.0 or 1.0 - WGSL doesn't support bool in uniforms)
+    has_normal_map: f32,
+    has_metallic_roughness_map: f32,
+    has_ao_map: f32,
+    has_emissive_map: f32,
 }
 
 /// View uniforms for wireframe rendering (includes viewport).
@@ -95,39 +137,42 @@ struct GpuVertex {
 
 /// Per-object GPU data for ObjectMaterial.
 ///
-/// Each object in the scene has its own instance of this struct,
-/// containing uniform buffers specific to that object.
+/// This struct now only contains wireframe and points rendering data.
+/// The main uniform buffers and shared view uniforms are managed by ObjectMaterial.
 pub struct ObjectMaterialGpuData {
-    frame_uniform_buffer: wgpu::Buffer,
-    object_uniform_buffer: wgpu::Buffer,
-    // Cached bind groups (created lazily)
-    frame_bind_group: Option<wgpu::BindGroup>,
-    object_bind_group: Option<wgpu::BindGroup>,
     // Cached texture bind group with pointer to detect texture changes
     texture_bind_group: Option<wgpu::BindGroup>,
     cached_texture_ptr: usize,
-    // Wireframe rendering data
-    wireframe_view_uniform_buffer: wgpu::Buffer,
+    /// Offset into the dynamic object uniform buffer, set during prepare() phase.
+    object_uniform_offset: Option<u32>,
+    // PBR texture bind group (normal, metallic-roughness, ao, emissive maps)
+    pbr_texture_bind_group: Option<wgpu::BindGroup>,
+    cached_normal_map_ptr: usize,
+    cached_metallic_roughness_map_ptr: usize,
+    cached_ao_map_ptr: usize,
+    cached_emissive_map_ptr: usize,
+    // Wireframe rendering data (model uniforms are per-object)
     wireframe_model_uniform_buffer: wgpu::Buffer,
     wireframe_edge_buffer: wgpu::Buffer,
     wireframe_edge_capacity: usize,
-    wireframe_view_bind_group: Option<wgpu::BindGroup>,
     wireframe_model_bind_group: Option<wgpu::BindGroup>,
     /// Cached wireframe edges in local coordinates (built lazily from mesh).
-    wireframe_edges: Option<Vec<(Point3<f32>, Point3<f32>)>>,
+    wireframe_edges: Option<Vec<(Vec3, Vec3)>>,
     /// Hash of mesh faces to detect when edges need rebuilding.
     wireframe_edges_mesh_hash: u64,
-    // Point rendering data
-    points_view_uniform_buffer: wgpu::Buffer,
+    /// Cached wireframe model uniforms (written during prepare).
+    wireframe_model_uniforms: WireframeModelUniforms,
+    // Point rendering data (model uniforms are per-object)
     points_model_uniform_buffer: wgpu::Buffer,
     points_vertex_buffer: wgpu::Buffer,
     points_vertex_capacity: usize,
-    points_view_bind_group: Option<wgpu::BindGroup>,
     points_model_bind_group: Option<wgpu::BindGroup>,
     /// Cached vertices for point rendering (built lazily from mesh).
-    points_vertices: Option<Vec<Point3<f32>>>,
+    points_vertices: Option<Vec<Vec3>>,
     /// Hash of mesh coords to detect when vertices need rebuilding.
     points_vertices_mesh_hash: u64,
+    /// Cached points model uniforms (written during prepare).
+    points_model_uniforms: PointsModelUniforms,
 }
 
 impl ObjectMaterialGpuData {
@@ -135,28 +180,7 @@ impl ObjectMaterialGpuData {
     pub fn new() -> Self {
         let ctxt = Context::get();
 
-        let frame_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("object_material_frame_uniform_buffer"),
-            size: std::mem::size_of::<FrameUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let object_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("object_material_object_uniform_buffer"),
-            size: std::mem::size_of::<ObjectUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        // Wireframe uniform buffers
-        let wireframe_view_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("wireframe_view_uniform_buffer"),
-            size: std::mem::size_of::<WireframeViewUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
+        // Wireframe model uniform buffer (per-object)
         let wireframe_model_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
             label: Some("wireframe_model_uniform_buffer"),
             size: std::mem::size_of::<WireframeModelUniforms>() as u64,
@@ -173,14 +197,7 @@ impl ObjectMaterialGpuData {
             mapped_at_creation: false,
         });
 
-        // Point rendering uniform buffers (reuse same view uniform layout as wireframe)
-        let points_view_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("points_view_uniform_buffer"),
-            size: std::mem::size_of::<WireframeViewUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
+        // Point model uniform buffer (per-object)
         let points_model_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
             label: Some("points_model_uniform_buffer"),
             size: std::mem::size_of::<PointsModelUniforms>() as u64,
@@ -198,28 +215,46 @@ impl ObjectMaterialGpuData {
         });
 
         Self {
-            frame_uniform_buffer,
-            object_uniform_buffer,
-            frame_bind_group: None,
-            object_bind_group: None,
             texture_bind_group: None,
             cached_texture_ptr: 0,
-            wireframe_view_uniform_buffer,
+            object_uniform_offset: None,
+            // PBR texture caching
+            pbr_texture_bind_group: None,
+            cached_normal_map_ptr: 0,
+            cached_metallic_roughness_map_ptr: 0,
+            cached_ao_map_ptr: 0,
+            cached_emissive_map_ptr: 0,
+            // Wireframe rendering
             wireframe_model_uniform_buffer,
             wireframe_edge_buffer,
             wireframe_edge_capacity,
-            wireframe_view_bind_group: None,
             wireframe_model_bind_group: None,
             wireframe_edges: None,
             wireframe_edges_mesh_hash: 0,
-            points_view_uniform_buffer,
+            wireframe_model_uniforms: WireframeModelUniforms {
+                transform: [[0.0; 4]; 4],
+                scale: [0.0; 3],
+                num_edges: 0,
+                default_color: [0.0; 4],
+                default_width: 0.0,
+                use_perspective: 0,
+                _padding: [0.0; 2],
+            },
             points_model_uniform_buffer,
             points_vertex_buffer,
             points_vertex_capacity,
-            points_view_bind_group: None,
             points_model_bind_group: None,
             points_vertices: None,
             points_vertices_mesh_hash: 0,
+            points_model_uniforms: PointsModelUniforms {
+                transform: [[0.0; 4]; 4],
+                scale: [0.0; 3],
+                num_vertices: 0,
+                default_color: [0.0; 4],
+                default_size: 0.0,
+                use_perspective: 0,
+                _padding: [0.0; 2],
+            },
         }
     }
 
@@ -276,25 +311,63 @@ impl GpuData for ObjectMaterialGpuData {
 
 /// The default material used to draw objects.
 ///
-/// This struct holds shared resources (pipeline, bind group layouts) that
-/// are used by all objects. Per-object resources are stored in
-/// `ObjectMaterialGpuData` instances.
+/// This struct holds shared resources (pipeline, bind group layouts, dynamic buffers)
+/// that are used by all objects. Per-object resources for wireframe/points are stored
+/// in `ObjectMaterialGpuData` instances.
+///
+/// ## Performance Optimization
+///
+/// This material uses dynamic uniform buffers to batch uniform data writes:
+/// - Frame uniforms (view, projection, light) are written once per frame
+/// - Object uniforms are accumulated in a dynamic buffer and flushed once
+/// - Wireframe/points view uniforms (view, proj, viewport) are shared and written once per frame
+/// - This significantly reduces the number of `write_buffer` calls per frame
 pub struct ObjectMaterial {
     /// Pipeline with backface culling enabled
     pipeline_cull: wgpu::RenderPipeline,
     /// Pipeline with backface culling disabled
     pipeline_no_cull: wgpu::RenderPipeline,
-    frame_bind_group_layout: wgpu::BindGroupLayout,
     object_bind_group_layout: wgpu::BindGroupLayout,
     texture_bind_group_layout: wgpu::BindGroupLayout,
+    /// PBR texture bind group layout (normal, metallic-roughness, ao, emissive maps)
+    pbr_texture_bind_group_layout: wgpu::BindGroupLayout,
+    /// Default PBR textures for when user hasn't set any
+    default_normal_map: std::sync::Arc<crate::resource::Texture>,
+    default_metallic_roughness_map: std::sync::Arc<crate::resource::Texture>,
+    default_ao_map: std::sync::Arc<crate::resource::Texture>,
+    default_emissive_map: std::sync::Arc<crate::resource::Texture>,
     // Wireframe rendering resources
     wireframe_pipeline: wgpu::RenderPipeline,
-    wireframe_view_bind_group_layout: wgpu::BindGroupLayout,
     wireframe_model_bind_group_layout: wgpu::BindGroupLayout,
     // Point rendering resources
     points_pipeline: wgpu::RenderPipeline,
-    points_view_bind_group_layout: wgpu::BindGroupLayout,
     points_model_bind_group_layout: wgpu::BindGroupLayout,
+
+    // === Dynamic uniform buffer system ===
+    /// Shared frame uniform buffer (view, projection, light)
+    frame_uniform_buffer: wgpu::Buffer,
+    /// Shared bind group for frame uniforms
+    frame_bind_group: wgpu::BindGroup,
+    /// Dynamic buffer for object uniforms
+    object_uniform_buffer: DynamicUniformBuffer<ObjectUniforms>,
+    /// Bind group for object uniforms (recreated when buffer grows)
+    object_bind_group: Option<wgpu::BindGroup>,
+    /// Capacity when bind group was last created (to detect regrowth)
+    object_bind_group_capacity: u64,
+    /// Frame counter for detecting new frames
+    frame_counter: Cell<u64>,
+    /// Last frame we processed (to detect new frame)
+    last_frame: Cell<u64>,
+
+    // === Shared wireframe/points view uniforms ===
+    /// Shared wireframe view uniform buffer (view, proj, viewport - same for all objects)
+    wireframe_view_uniform_buffer: wgpu::Buffer,
+    /// Shared wireframe view bind group
+    wireframe_view_bind_group: wgpu::BindGroup,
+    /// Shared points view uniform buffer (view, proj, viewport - same for all objects)
+    points_view_uniform_buffer: wgpu::Buffer,
+    /// Shared points view bind group
+    points_view_bind_group: wgpu::BindGroup,
 }
 
 impl Default for ObjectMaterial {
@@ -324,6 +397,7 @@ impl ObjectMaterial {
                 }],
             });
 
+        // Object bind group uses dynamic offset for batched uniforms
         let object_bind_group_layout =
             ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("object_material_object_bind_group_layout"),
@@ -332,7 +406,7 @@ impl ObjectMaterial {
                     visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
+                        has_dynamic_offset: true, // Enable dynamic offsets!
                         min_binding_size: None,
                     },
                     count: None,
@@ -362,12 +436,95 @@ impl ObjectMaterial {
                 ],
             });
 
+        // PBR texture bind group layout (group 3): normal, metallic-roughness, ao, emissive maps
+        let pbr_texture_bind_group_layout =
+            ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("object_material_pbr_texture_bind_group_layout"),
+                entries: &[
+                    // Normal map
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // Metallic-roughness map
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // Ambient occlusion map
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // Emissive map
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 7,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
+        // Create default PBR textures
+        let default_normal_map = crate::resource::Texture::new_default_normal_map();
+        let default_metallic_roughness_map = crate::resource::Texture::new_default_metallic_roughness_map();
+        let default_ao_map = crate::resource::Texture::new_default_ao_map();
+        let default_emissive_map = crate::resource::Texture::new_default_emissive_map();
+
         let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("object_material_pipeline_layout"),
             bind_group_layouts: &[
                 &frame_bind_group_layout,
                 &object_bind_group_layout,
                 &texture_bind_group_layout,
+                &pbr_texture_bind_group_layout,
             ],
             push_constant_ranges: &[],
         });
@@ -641,7 +798,7 @@ impl ObjectMaterial {
         // Load wireframe polyline shader
         let wireframe_polyline_shader = ctxt.create_shader_module(
             Some("wireframe_polyline_shader"),
-            include_str!("wireframe_polyline.wgsl"),
+            include_str!("wireframe_polyline3d.wgsl"),
         );
 
         // Instance vertex buffer layouts for wireframe (matching InstancesBuffer)
@@ -815,7 +972,7 @@ impl ObjectMaterial {
         // Load points shader
         let points_shader = ctxt.create_shader_module(
             Some("wireframe_points_shader"),
-            include_str!("wireframe_points.wgsl"),
+            include_str!("wireframe_points3d.wgsl"),
         );
 
         // Instance vertex buffer layouts for points (similar to wireframe but with points_colors/sizes)
@@ -928,43 +1085,108 @@ impl ObjectMaterial {
             cache: None,
         });
 
+        // === Create shared dynamic buffer resources ===
+
+        // Frame uniform buffer (written once per frame)
+        let frame_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shared_frame_uniform_buffer"),
+            size: std::mem::size_of::<FrameUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Create frame bind group
+        let frame_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shared_frame_bind_group"),
+            layout: &frame_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: frame_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        // Dynamic buffer for object uniforms
+        let object_uniform_buffer =
+            DynamicUniformBuffer::<ObjectUniforms>::new("dynamic_object_uniform_buffer");
+
+        // Create initial object bind group
+        let object_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("dynamic_object_bind_group"),
+            layout: &object_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: object_uniform_buffer.buffer(),
+                    offset: 0,
+                    size: std::num::NonZeroU64::new(object_uniform_buffer.aligned_size()),
+                }),
+            }],
+        });
+
+        // Get capacity before moving into struct
+        let object_bind_group_capacity = object_uniform_buffer.capacity();
+
+        // === Shared wireframe/points view uniform buffers ===
+        // These contain view, proj, and viewport which are the same for all objects in a frame
+
+        let wireframe_view_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shared_wireframe_view_uniform_buffer"),
+            size: std::mem::size_of::<WireframeViewUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let wireframe_view_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shared_wireframe_view_bind_group"),
+            layout: &wireframe_view_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wireframe_view_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
+        let points_view_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("shared_points_view_uniform_buffer"),
+            size: std::mem::size_of::<WireframeViewUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let points_view_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shared_points_view_bind_group"),
+            layout: &points_view_bind_group_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: points_view_uniform_buffer.as_entire_binding(),
+            }],
+        });
+
         ObjectMaterial {
             pipeline_cull,
             pipeline_no_cull,
-            frame_bind_group_layout,
             object_bind_group_layout,
             texture_bind_group_layout,
+            pbr_texture_bind_group_layout,
+            default_normal_map,
+            default_metallic_roughness_map,
+            default_ao_map,
+            default_emissive_map,
             wireframe_pipeline,
-            wireframe_view_bind_group_layout,
             wireframe_model_bind_group_layout,
             points_pipeline,
-            points_view_bind_group_layout,
             points_model_bind_group_layout,
+            frame_uniform_buffer,
+            frame_bind_group,
+            object_uniform_buffer,
+            object_bind_group: Some(object_bind_group),
+            object_bind_group_capacity,
+            frame_counter: Cell::new(0),
+            last_frame: Cell::new(u64::MAX),
+            wireframe_view_uniform_buffer,
+            wireframe_view_bind_group,
+            points_view_uniform_buffer,
+            points_view_bind_group,
         }
-    }
-
-    fn create_frame_bind_group(&self, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
-        let ctxt = Context::get();
-        ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("object_material_frame_bind_group"),
-            layout: &self.frame_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        })
-    }
-
-    fn create_object_bind_group(&self, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
-        let ctxt = Context::get();
-        ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("object_material_object_bind_group"),
-            layout: &self.object_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        })
     }
 
     fn create_texture_bind_group(&self, texture: &Texture) -> wgpu::BindGroup {
@@ -985,15 +1207,55 @@ impl ObjectMaterial {
         })
     }
 
-    fn create_wireframe_view_bind_group(&self, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
+    fn create_pbr_texture_bind_group(
+        &self,
+        normal_map: &Texture,
+        metallic_roughness_map: &Texture,
+        ao_map: &Texture,
+        emissive_map: &Texture,
+    ) -> wgpu::BindGroup {
         let ctxt = Context::get();
         ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("wireframe_view_bind_group"),
-            layout: &self.wireframe_view_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
+            label: Some("object_material_pbr_texture_bind_group"),
+            layout: &self.pbr_texture_bind_group_layout,
+            entries: &[
+                // Normal map
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&normal_map.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&normal_map.sampler),
+                },
+                // Metallic-roughness map
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&metallic_roughness_map.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::Sampler(&metallic_roughness_map.sampler),
+                },
+                // Ambient occlusion map
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&ao_map.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Sampler(&ao_map.sampler),
+                },
+                // Emissive map
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(&emissive_map.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: wgpu::BindingResource::Sampler(&emissive_map.sampler),
+                },
+            ],
         })
     }
 
@@ -1024,18 +1286,6 @@ impl ObjectMaterial {
         })
     }
 
-    fn create_points_view_bind_group(&self, buffer: &wgpu::Buffer) -> wgpu::BindGroup {
-        let ctxt = Context::get();
-        ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("points_view_bind_group"),
-            layout: &self.points_view_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        })
-    }
-
     fn create_points_model_bind_group(
         &self,
         model_buffer: &wgpu::Buffer,
@@ -1062,25 +1312,308 @@ impl ObjectMaterial {
             ],
         })
     }
+
+    /// Signals the start of a new frame.
+    ///
+    /// This clears the dynamic object uniform buffer and resets the frame counter.
+    /// Should be called before rendering any objects for a new frame.
+    pub fn begin_frame(&mut self) {
+        self.frame_counter
+            .set(self.frame_counter.get().wrapping_add(1));
+        self.object_uniform_buffer.clear();
+    }
+
+    /// Flushes the accumulated object uniforms to the GPU.
+    ///
+    /// This performs a single `write_buffer` call with all accumulated object data.
+    /// Should be called after all objects have been processed for the frame.
+    pub fn flush(&mut self) {
+        let ctxt = Context::get();
+
+        self.object_uniform_buffer.flush();
+
+        // Recreate bind group if buffer grew
+        if self.object_uniform_buffer.capacity() != self.object_bind_group_capacity {
+            self.object_bind_group = Some(ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dynamic_object_bind_group"),
+                layout: &self.object_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: self.object_uniform_buffer.buffer(),
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(self.object_uniform_buffer.aligned_size()),
+                    }),
+                }],
+            }));
+            self.object_bind_group_capacity = self.object_uniform_buffer.capacity();
+        }
+    }
 }
 
-impl Material for ObjectMaterial {
+impl Material3d for ObjectMaterial {
     fn create_gpu_data(&self) -> Box<dyn GpuData> {
         Box::new(ObjectMaterialGpuData::new())
     }
 
-    fn render(
+    fn begin_frame(&mut self) {
+        self.frame_counter
+            .set(self.frame_counter.get().wrapping_add(1));
+        self.object_uniform_buffer.clear();
+    }
+
+    fn prepare(
         &mut self,
         pass: usize,
-        transform: &Isometry3<f32>,
-        scale: &Vector3<f32>,
-        camera: &mut dyn Camera,
-        light: &Light,
-        data: &ObjectData,
-        mesh: &mut GpuMesh,
-        instances: &mut InstancesBuffer,
+        transform: Pose3,
+        scale: Vec3,
+        camera: &mut dyn Camera3d,
+        lights: &LightCollection,
+        data: &ObjectData3d,
         gpu_data: &mut dyn GpuData,
-        context: &mut RenderContext,
+        viewport_width: u32,
+        viewport_height: u32,
+    ) {
+        let ctxt = Context::get();
+
+        // Downcast gpu_data to our specific type
+        let gpu_data = gpu_data
+            .as_any_mut()
+            .downcast_mut::<ObjectMaterialGpuData>()
+            .expect("ObjectMaterial requires ObjectMaterialGpuData");
+
+        // Check if this is a new frame (first object being prepared)
+        let current_frame = self.frame_counter.get();
+        let is_new_frame = current_frame != self.last_frame.get();
+
+        if is_new_frame {
+            self.last_frame.set(current_frame);
+
+            // Write frame uniforms once per frame
+            let (view, proj) = camera.view_transform_pair(pass);
+
+            // Convert collected lights to GPU format
+            let mut gpu_lights: [GpuLight; MAX_LIGHTS] = [GpuLight::default(); MAX_LIGHTS];
+            for (i, collected_light) in lights.lights.iter().take(MAX_LIGHTS).enumerate() {
+                let (light_type, inner_cone_cos, outer_cone_cos, attenuation_radius) =
+                    match &collected_light.light_type {
+                        LightType::Point { attenuation_radius } => (0u32, 1.0, 0.0, *attenuation_radius),
+                        LightType::Directional(_) => (1u32, 1.0, 0.0, 0.0),
+                        LightType::Spot {
+                            inner_cone_angle,
+                            outer_cone_angle,
+                            attenuation_radius,
+                        } => (
+                            2u32,
+                            inner_cone_angle.cos(),
+                            outer_cone_angle.cos(),
+                            *attenuation_radius,
+                        ),
+                    };
+
+                gpu_lights[i] = GpuLight {
+                    position: collected_light.world_position.into(),
+                    light_type,
+                    direction: collected_light.world_direction.into(),
+                    intensity: collected_light.intensity,
+                    color: collected_light.color.into(),
+                    inner_cone_cos,
+                    outer_cone_cos,
+                    attenuation_radius,
+                    _padding: [0.0; 2],
+                };
+            }
+
+            let frame_uniforms = FrameUniforms {
+                view: view.to_mat4().to_cols_array_2d(),
+                proj: proj.to_cols_array_2d(),
+                lights: gpu_lights,
+                num_lights: lights.lights.len().min(MAX_LIGHTS) as u32,
+                ambient_intensity: lights.ambient,
+                _padding: [0.0; 2],
+            };
+
+            ctxt.write_buffer(
+                &self.frame_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&frame_uniforms),
+            );
+
+            // Write shared wireframe/points view uniforms once per frame
+            // These contain view, proj, viewport which are same for all objects
+            let wireframe_view_uniforms = WireframeViewUniforms {
+                view: view.to_mat4().to_cols_array_2d(),
+                proj: proj.to_cols_array_2d(),
+                viewport: [0.0, 0.0, viewport_width as f32, viewport_height as f32],
+            };
+
+            ctxt.write_buffer(
+                &self.wireframe_view_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&wireframe_view_uniforms),
+            );
+
+            // Points use the same view uniform layout
+            ctxt.write_buffer(
+                &self.points_view_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&wireframe_view_uniforms),
+            );
+        }
+
+        // Create object uniforms
+        let formatted_transform = transform.to_mat4();
+        let ntransform = Mat3::from_quat(transform.rotation);
+        let formatted_scale = Mat3::from_diagonal(scale);
+
+        // Pad mat3x3 to mat3x4 for proper alignment
+        let ntransform_cols = ntransform.to_cols_array_2d();
+        let ntransform_padded: [[f32; 4]; 3] = [
+            [
+                ntransform_cols[0][0],
+                ntransform_cols[0][1],
+                ntransform_cols[0][2],
+                0.0,
+            ],
+            [
+                ntransform_cols[1][0],
+                ntransform_cols[1][1],
+                ntransform_cols[1][2],
+                0.0,
+            ],
+            [
+                ntransform_cols[2][0],
+                ntransform_cols[2][1],
+                ntransform_cols[2][2],
+                0.0,
+            ],
+        ];
+        let scale_cols = formatted_scale.to_cols_array_2d();
+        let scale_padded: [[f32; 4]; 3] = [
+            [scale_cols[0][0], scale_cols[0][1], scale_cols[0][2], 0.0],
+            [scale_cols[1][0], scale_cols[1][1], scale_cols[1][2], 0.0],
+            [scale_cols[2][0], scale_cols[2][1], scale_cols[2][2], 0.0],
+        ];
+
+        let color = data.color();
+        let emissive = data.emissive();
+        let object_uniforms = ObjectUniforms {
+            transform: formatted_transform.to_cols_array_2d(),
+            ntransform: ntransform_padded,
+            scale: scale_padded,
+            color: [color.r, color.g, color.b, color.a],
+            metallic: data.metallic(),
+            roughness: data.roughness(),
+            _pad0: [0.0; 2],
+            emissive: [emissive.r, emissive.g, emissive.b, emissive.a],
+            has_normal_map: if data.normal_map().is_some() { 1.0 } else { 0.0 },
+            has_metallic_roughness_map: if data.metallic_roughness_map().is_some() { 1.0 } else { 0.0 },
+            has_ao_map: if data.ao_map().is_some() { 1.0 } else { 0.0 },
+            has_emissive_map: if data.emissive_map().is_some() { 1.0 } else { 0.0 },
+        };
+
+        // Push to dynamic buffer and store offset in gpu_data
+        let object_offset = self.object_uniform_buffer.push(&object_uniforms);
+        gpu_data.object_uniform_offset = Some(object_offset);
+
+        // Prepare wireframe model uniforms if needed (view uniforms are shared)
+        let render_wireframe = data.lines_width() > 0.0;
+        if render_wireframe {
+            // Compute model uniforms (num_edges will be set in render when mesh is available)
+            let wireframe_color = data.lines_color().unwrap_or(data.color());
+            let cached_num_edges = gpu_data
+                .wireframe_edges
+                .as_ref()
+                .map(|e| e.len())
+                .unwrap_or(0) as u32;
+            gpu_data.wireframe_model_uniforms = WireframeModelUniforms {
+                transform: formatted_transform.to_cols_array_2d(),
+                scale: scale.into(),
+                num_edges: cached_num_edges,
+                default_color: [
+                    wireframe_color.r,
+                    wireframe_color.g,
+                    wireframe_color.b,
+                    wireframe_color.a,
+                ],
+                default_width: data.lines_width(),
+                use_perspective: if data.lines_use_perspective() { 1 } else { 0 },
+                _padding: [0.0; 2],
+            };
+
+            // Write model uniforms to GPU (view uniforms are shared and written once per frame)
+            ctxt.write_buffer(
+                &gpu_data.wireframe_model_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&gpu_data.wireframe_model_uniforms),
+            );
+        }
+
+        // Prepare points model uniforms if needed (view uniforms are shared)
+        let render_points = data.points_size() > 0.0;
+        if render_points {
+            // Compute model uniforms (num_vertices will be set in render when mesh is available)
+            let points_color = data.points_color().unwrap_or(data.color());
+            let cached_num_vertices = gpu_data
+                .points_vertices
+                .as_ref()
+                .map(|v| v.len())
+                .unwrap_or(0) as u32;
+            gpu_data.points_model_uniforms = PointsModelUniforms {
+                transform: formatted_transform.to_cols_array_2d(),
+                scale: scale.into(),
+                num_vertices: cached_num_vertices,
+                default_color: [points_color.r, points_color.g, points_color.b, points_color.a],
+                default_size: data.points_size(),
+                use_perspective: if data.points_use_perspective() { 1 } else { 0 },
+                _padding: [0.0; 2],
+            };
+
+            // Write model uniforms to GPU (view uniforms are shared and written once per frame)
+            ctxt.write_buffer(
+                &gpu_data.points_model_uniform_buffer,
+                0,
+                bytemuck::bytes_of(&gpu_data.points_model_uniforms),
+            );
+        }
+    }
+
+    fn flush(&mut self) {
+        let ctxt = Context::get();
+
+        self.object_uniform_buffer.flush();
+
+        // Recreate bind group if buffer grew
+        if self.object_uniform_buffer.capacity() != self.object_bind_group_capacity {
+            self.object_bind_group = Some(ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("dynamic_object_bind_group"),
+                layout: &self.object_bind_group_layout,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: self.object_uniform_buffer.buffer(),
+                        offset: 0,
+                        size: std::num::NonZeroU64::new(self.object_uniform_buffer.aligned_size()),
+                    }),
+                }],
+            }));
+            self.object_bind_group_capacity = self.object_uniform_buffer.capacity();
+        }
+    }
+
+    fn render(
+        &mut self,
+        _pass: usize,
+        _transform: Pose3,
+        _scale: Vec3,
+        _camera: &mut dyn Camera3d,
+        _lights: &LightCollection,
+        data: &ObjectData3d,
+        mesh: &mut GpuMesh3d,
+        instances: &mut InstancesBuffer3d,
+        gpu_data: &mut dyn GpuData,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        _context: &RenderContext,
     ) {
         let ctxt = Context::get();
 
@@ -1099,86 +1632,10 @@ impl Material for ObjectMaterial {
             .downcast_mut::<ObjectMaterialGpuData>()
             .expect("ObjectMaterial requires ObjectMaterialGpuData");
 
-        // Create frame uniforms and write to per-object buffer
-        let (view, proj) = camera.view_transform_pair(pass);
-        let light_pos = match light {
-            Light::Absolute(p) => *p,
-            Light::StickToCamera => camera.eye(),
-        };
-
-        let frame_uniforms = FrameUniforms {
-            view: view.to_homogeneous().into(),
-            proj: proj.into(),
-            light_position: light_pos.coords.into(),
-            _padding: 0.0,
-        };
-
-        ctxt.write_buffer(
-            &gpu_data.frame_uniform_buffer,
-            0,
-            bytemuck::bytes_of(&frame_uniforms),
-        );
-
-        // Create object uniforms and write to per-object buffer
-        let formatted_transform = transform.to_homogeneous();
-        let ntransform = transform.rotation.to_rotation_matrix().into_inner();
-        let formatted_scale = Matrix3::from_diagonal(&Vector3::new(scale.x, scale.y, scale.z));
-
-        // Pad mat3x3 to mat3x4 for proper alignment
-        let ntransform_padded: [[f32; 4]; 3] = [
-            [
-                ntransform[(0, 0)],
-                ntransform[(1, 0)],
-                ntransform[(2, 0)],
-                0.0,
-            ],
-            [
-                ntransform[(0, 1)],
-                ntransform[(1, 1)],
-                ntransform[(2, 1)],
-                0.0,
-            ],
-            [
-                ntransform[(0, 2)],
-                ntransform[(1, 2)],
-                ntransform[(2, 2)],
-                0.0,
-            ],
-        ];
-        let scale_padded: [[f32; 4]; 3] = [
-            [
-                formatted_scale[(0, 0)],
-                formatted_scale[(1, 0)],
-                formatted_scale[(2, 0)],
-                0.0,
-            ],
-            [
-                formatted_scale[(0, 1)],
-                formatted_scale[(1, 1)],
-                formatted_scale[(2, 1)],
-                0.0,
-            ],
-            [
-                formatted_scale[(0, 2)],
-                formatted_scale[(1, 2)],
-                formatted_scale[(2, 2)],
-                0.0,
-            ],
-        ];
-
-        let object_uniforms = ObjectUniforms {
-            transform: formatted_transform.into(),
-            ntransform: ntransform_padded,
-            scale: scale_padded,
-            color: (*data.color()).into(),
-            _padding: 0.0,
-        };
-
-        ctxt.write_buffer(
-            &gpu_data.object_uniform_buffer,
-            0,
-            bytemuck::bytes_of(&object_uniforms),
-        );
+        // Get the pre-computed object uniform offset from prepare() phase
+        let object_offset = gpu_data
+            .object_uniform_offset
+            .expect("prepare() must be called before render()");
 
         // Load instance data directly to GPU without conversion
         let num_instances = instances.len();
@@ -1228,16 +1685,6 @@ impl Material for ObjectMaterial {
             None => return,
         };
 
-        // Get or create cached bind groups
-        if gpu_data.frame_bind_group.is_none() {
-            gpu_data.frame_bind_group =
-                Some(self.create_frame_bind_group(&gpu_data.frame_uniform_buffer));
-        }
-        if gpu_data.object_bind_group.is_none() {
-            gpu_data.object_bind_group =
-                Some(self.create_object_bind_group(&gpu_data.object_uniform_buffer));
-        }
-
         // Cache texture bind group, invalidate if texture changed
         let texture_ptr = std::sync::Arc::as_ptr(data.texture()) as usize;
         if gpu_data.texture_bind_group.is_none() || gpu_data.cached_texture_ptr != texture_ptr {
@@ -1245,34 +1692,41 @@ impl Material for ObjectMaterial {
             gpu_data.cached_texture_ptr = texture_ptr;
         }
 
+        // Cache PBR texture bind group, invalidate if any PBR texture changed
+        let normal_map = data.normal_map().unwrap_or(&self.default_normal_map);
+        let metallic_roughness_map = data.metallic_roughness_map().unwrap_or(&self.default_metallic_roughness_map);
+        let ao_map = data.ao_map().unwrap_or(&self.default_ao_map);
+        let emissive_map = data.emissive_map().unwrap_or(&self.default_emissive_map);
+
+        let normal_ptr = std::sync::Arc::as_ptr(normal_map) as usize;
+        let mr_ptr = std::sync::Arc::as_ptr(metallic_roughness_map) as usize;
+        let ao_ptr = std::sync::Arc::as_ptr(ao_map) as usize;
+        let emissive_ptr = std::sync::Arc::as_ptr(emissive_map) as usize;
+
+        let pbr_textures_changed = gpu_data.pbr_texture_bind_group.is_none()
+            || gpu_data.cached_normal_map_ptr != normal_ptr
+            || gpu_data.cached_metallic_roughness_map_ptr != mr_ptr
+            || gpu_data.cached_ao_map_ptr != ao_ptr
+            || gpu_data.cached_emissive_map_ptr != emissive_ptr;
+
+        if pbr_textures_changed {
+            gpu_data.pbr_texture_bind_group = Some(self.create_pbr_texture_bind_group(
+                normal_map,
+                metallic_roughness_map,
+                ao_map,
+                emissive_map,
+            ));
+            gpu_data.cached_normal_map_ptr = normal_ptr;
+            gpu_data.cached_metallic_roughness_map_ptr = mr_ptr;
+            gpu_data.cached_ao_map_ptr = ao_ptr;
+            gpu_data.cached_emissive_map_ptr = emissive_ptr;
+        }
+
         // Render surface (filled triangles)
         if render_surface {
-            let frame_bind_group = gpu_data.frame_bind_group.as_ref().unwrap();
-            let object_bind_group = gpu_data.object_bind_group.as_ref().unwrap();
             let texture_bind_group = gpu_data.texture_bind_group.as_ref().unwrap();
-            let mut render_pass = context
-                .encoder
-                .begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("object_material_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: context.color_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: context.depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
+            let pbr_texture_bind_group = gpu_data.pbr_texture_bind_group.as_ref().unwrap();
+            let object_bind_group = self.object_bind_group.as_ref().unwrap();
 
             // Select pipeline based on backface culling setting
             let pipeline = if data.backface_culling_enabled() {
@@ -1281,9 +1735,11 @@ impl Material for ObjectMaterial {
                 &self.pipeline_no_cull
             };
             render_pass.set_pipeline(pipeline);
-            render_pass.set_bind_group(0, frame_bind_group, &[]);
-            render_pass.set_bind_group(1, object_bind_group, &[]);
+            render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            // Use dynamic offset for object uniforms!
+            render_pass.set_bind_group(1, object_bind_group, &[object_offset]);
             render_pass.set_bind_group(2, texture_bind_group, &[]);
+            render_pass.set_bind_group(3, pbr_texture_bind_group, &[]);
 
             // Set vertex buffers for mesh data
             render_pass.set_vertex_buffer(0, coords_buf.slice(..));
@@ -1316,9 +1772,9 @@ impl Material for ObjectMaterial {
                 if let (Some(coords), Some(faces)) = (coords_guard.data(), faces_guard.data()) {
                     let mut edges = Vec::with_capacity(faces.len() * 3);
                     for face in faces.iter() {
-                        let idx_a = face.x as usize;
-                        let idx_b = face.y as usize;
-                        let idx_c = face.z as usize;
+                        let idx_a = face[0] as usize;
+                        let idx_b = face[1] as usize;
+                        let idx_c = face[2] as usize;
 
                         if idx_a < coords.len() && idx_b < coords.len() && idx_c < coords.len() {
                             edges.push((coords[idx_a], coords[idx_b]));
@@ -1346,9 +1802,9 @@ impl Material for ObjectMaterial {
                 let gpu_e: Vec<GpuEdge> = edges
                     .iter()
                     .map(|(a, b)| GpuEdge {
-                        point_a: a.coords.into(),
+                        point_a: (*a).into(),
                         _pad_a: 0.0,
-                        point_b: b.coords.into(),
+                        point_b: (*b).into(),
                         _pad_b: 0.0,
                     })
                     .collect();
@@ -1370,7 +1826,7 @@ impl Material for ObjectMaterial {
                     None => return,
                 };
 
-                // Ensure edge buffer capacity and upload edges
+                // Ensure edge buffer capacity and upload edges (geometry data)
                 gpu_data.ensure_edge_buffer_capacity(num_edges);
 
                 ctxt.write_buffer(
@@ -1379,47 +1835,17 @@ impl Material for ObjectMaterial {
                     bytemuck::cast_slice(&gpu_edges),
                 );
 
-                // Update wireframe view uniforms
-                let wireframe_view_uniforms = WireframeViewUniforms {
-                    view: view.to_homogeneous().into(),
-                    proj: proj.into(),
-                    viewport: [
-                        0.0,
-                        0.0,
-                        context.viewport_width as f32,
-                        context.viewport_height as f32,
-                    ],
-                };
-                ctxt.write_buffer(
-                    &gpu_data.wireframe_view_uniform_buffer,
-                    0,
-                    bytemuck::bytes_of(&wireframe_view_uniforms),
-                );
-
-                // Update wireframe model uniforms
-                let wireframe_color = data.lines_color().unwrap_or(data.color());
-                let wireframe_model_uniforms = WireframeModelUniforms {
-                    transform: formatted_transform.into(),
-                    scale: (*scale).into(),
-                    num_edges: num_edges as u32,
-                    default_color: [wireframe_color.x, wireframe_color.y, wireframe_color.z, 1.0],
-                    default_width: data.lines_width(),
-                    use_perspective: if data.lines_use_perspective() { 1 } else { 0 },
-                    _padding: [0.0; 2],
-                };
-                ctxt.write_buffer(
-                    &gpu_data.wireframe_model_uniform_buffer,
-                    0,
-                    bytemuck::bytes_of(&wireframe_model_uniforms),
-                );
-
-                // Get or create wireframe bind groups
-                if gpu_data.wireframe_view_bind_group.is_none() {
-                    gpu_data.wireframe_view_bind_group =
-                        Some(self.create_wireframe_view_bind_group(
-                            &gpu_data.wireframe_view_uniform_buffer,
-                        ));
+                // Update num_edges in model uniforms if it changed from prepare()
+                if gpu_data.wireframe_model_uniforms.num_edges != num_edges as u32 {
+                    gpu_data.wireframe_model_uniforms.num_edges = num_edges as u32;
+                    ctxt.write_buffer(
+                        &gpu_data.wireframe_model_uniform_buffer,
+                        0,
+                        bytemuck::bytes_of(&gpu_data.wireframe_model_uniforms),
+                    );
                 }
+
+                // Get or create wireframe model bind group (view bind group is shared)
                 if gpu_data.wireframe_model_bind_group.is_none() {
                     let edge_size = (num_edges * std::mem::size_of::<GpuEdge>()) as u64;
                     gpu_data.wireframe_model_bind_group =
@@ -1430,41 +1856,12 @@ impl Material for ObjectMaterial {
                         ));
                 }
 
-                let wireframe_view_bind_group =
-                    gpu_data.wireframe_view_bind_group.as_ref().unwrap();
                 let wireframe_model_bind_group =
                     gpu_data.wireframe_model_bind_group.as_ref().unwrap();
 
-                // Begin wireframe render pass
-                let mut render_pass =
-                    context
-                        .encoder
-                        .begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("wireframe_render_pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: context.color_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: context.depth_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                        });
-
                 render_pass.set_pipeline(&self.wireframe_pipeline);
-                render_pass.set_bind_group(0, wireframe_view_bind_group, &[]);
+                // Use shared view bind group (written once per frame)
+                render_pass.set_bind_group(0, &self.wireframe_view_bind_group, &[]);
                 render_pass.set_bind_group(1, wireframe_model_bind_group, &[]);
 
                 // Set instance vertex buffers (5 total: positions, colors, deformations, lines_colors, lines_widths)
@@ -1519,7 +1916,7 @@ impl Material for ObjectMaterial {
                 let gpu_v: Vec<GpuVertex> = vertices
                     .iter()
                     .map(|p| GpuVertex {
-                        position: p.coords.into(),
+                        position: (*p).into(),
                         _pad: 0.0,
                     })
                     .collect();
@@ -1541,7 +1938,7 @@ impl Material for ObjectMaterial {
                     None => return,
                 };
 
-                // Ensure vertex buffer capacity and upload vertices
+                // Ensure vertex buffer capacity and upload vertices (geometry data)
                 gpu_data.ensure_vertex_buffer_capacity(num_vertices);
 
                 ctxt.write_buffer(
@@ -1550,46 +1947,17 @@ impl Material for ObjectMaterial {
                     bytemuck::cast_slice(&gpu_vertices),
                 );
 
-                // Update points view uniforms (same format as wireframe)
-                let points_view_uniforms = WireframeViewUniforms {
-                    view: view.to_homogeneous().into(),
-                    proj: proj.into(),
-                    viewport: [
-                        0.0,
-                        0.0,
-                        context.viewport_width as f32,
-                        context.viewport_height as f32,
-                    ],
-                };
-                ctxt.write_buffer(
-                    &gpu_data.points_view_uniform_buffer,
-                    0,
-                    bytemuck::bytes_of(&points_view_uniforms),
-                );
-
-                // Update points model uniforms
-                let points_color = data.points_color().unwrap_or(data.color());
-                let points_model_uniforms = PointsModelUniforms {
-                    transform: formatted_transform.into(),
-                    scale: (*scale).into(),
-                    num_vertices: num_vertices as u32,
-                    default_color: [points_color.x, points_color.y, points_color.z, 1.0],
-                    default_size: data.points_size(),
-                    use_perspective: if data.points_use_perspective() { 1 } else { 0 },
-                    _padding: [0.0; 2],
-                };
-                ctxt.write_buffer(
-                    &gpu_data.points_model_uniform_buffer,
-                    0,
-                    bytemuck::bytes_of(&points_model_uniforms),
-                );
-
-                // Get or create points bind groups
-                if gpu_data.points_view_bind_group.is_none() {
-                    gpu_data.points_view_bind_group = Some(
-                        self.create_points_view_bind_group(&gpu_data.points_view_uniform_buffer),
+                // Update num_vertices in model uniforms if it changed from prepare()
+                if gpu_data.points_model_uniforms.num_vertices != num_vertices as u32 {
+                    gpu_data.points_model_uniforms.num_vertices = num_vertices as u32;
+                    ctxt.write_buffer(
+                        &gpu_data.points_model_uniform_buffer,
+                        0,
+                        bytemuck::bytes_of(&gpu_data.points_model_uniforms),
                     );
                 }
+
+                // Get or create points model bind group (view bind group is shared)
                 if gpu_data.points_model_bind_group.is_none() {
                     let vertex_size = (num_vertices * std::mem::size_of::<GpuVertex>()) as u64;
                     gpu_data.points_model_bind_group = Some(self.create_points_model_bind_group(
@@ -1599,39 +1967,11 @@ impl Material for ObjectMaterial {
                     ));
                 }
 
-                let points_view_bind_group = gpu_data.points_view_bind_group.as_ref().unwrap();
                 let points_model_bind_group = gpu_data.points_model_bind_group.as_ref().unwrap();
 
-                // Begin points render pass
-                let mut render_pass =
-                    context
-                        .encoder
-                        .begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("points_render_pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: context.color_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                            })],
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: context.depth_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                        });
-
                 render_pass.set_pipeline(&self.points_pipeline);
-                render_pass.set_bind_group(0, points_view_bind_group, &[]);
+                // Use shared view bind group (written once per frame)
+                render_pass.set_bind_group(0, &self.points_view_bind_group, &[]);
                 render_pass.set_bind_group(1, points_model_bind_group, &[]);
 
                 // Set instance vertex buffers (5 total: positions, colors, deformations, points_colors, points_sizes)

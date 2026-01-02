@@ -1,7 +1,6 @@
 use super::utils;
 use super::{IndexBuffer, RenderMesh};
-use na;
-use na::{Point2, Vector3};
+use glamx::{Vec2, Vec3};
 
 /// Generates a cylinder mesh with the specified dimensions.
 ///
@@ -25,7 +24,7 @@ use na::{Point2, Vector3};
 pub fn cylinder(diameter: f32, height: f32, nsubdiv: u32) -> RenderMesh {
     let mut cylinder = unit_cylinder(nsubdiv);
 
-    cylinder.scale_by(&Vector3::new(diameter, height, diameter));
+    cylinder.scale_by(Vec3::new(diameter, height, diameter));
 
     cylinder
 }
@@ -53,11 +52,11 @@ pub fn unit_cylinder(nsubdiv: u32) -> RenderMesh {
     let dtheta = two_pi * invsubdiv;
     let mut coords = Vec::new();
     let mut indices = Vec::new();
-    let mut normals: Vec<Vector3<f32>>;
+    let mut normals: Vec<Vec3>;
 
     utils::push_circle(0.5, nsubdiv, dtheta, -0.5, &mut coords);
 
-    normals = coords.iter().map(|p| p.coords).collect();
+    normals = coords.clone();
 
     utils::push_circle(0.5, nsubdiv, dtheta, 0.5, &mut coords);
 
@@ -78,14 +77,14 @@ pub fn unit_cylinder(nsubdiv: u32) -> RenderMesh {
     let mut uvs = Vec::with_capacity(coords.len());
     let mut curr_u = 0.0;
     for _ in 0..nsubdiv {
-        uvs.push(Point2::new(curr_u, na::zero()));
+        uvs.push(Vec2::new(curr_u, 0.0));
         curr_u += invsubdiv;
     }
 
     // top ring uvs
-    curr_u = na::zero();
+    curr_u = 0.0;
     for _ in 0..nsubdiv {
-        uvs.push(Point2::new(curr_u, 1.0));
+        uvs.push(Vec2::new(curr_u, 1.0));
         curr_u += invsubdiv;
     }
 
@@ -93,39 +92,38 @@ pub fn unit_cylinder(nsubdiv: u32) -> RenderMesh {
      * Adjust normals.
      */
     for n in normals.iter_mut() {
-        n.x *= 2.0;
         n.y = 0.0;
-        n.z *= 2.0;
+        *n = n.normalize();
     }
 
-    normals.push(Vector3::y()); // top cap
-    normals.push(-Vector3::y()); // bottom cap
+    normals.push(-Vec3::Y);
+    normals.push(Vec3::Y);
     let nlen = normals.len() as u32;
 
     let top_start_id = len - 2 * (nsubdiv as usize - 2);
 
     for i in indices[..top_start_id].iter_mut() {
-        if i.x.y >= nsubdiv {
-            i.x.y -= nsubdiv;
+        if i[0][1] >= nsubdiv {
+            i[0][1] -= nsubdiv;
         }
-        if i.y.y >= nsubdiv {
-            i.y.y -= nsubdiv;
+        if i[1][1] >= nsubdiv {
+            i[1][1] -= nsubdiv;
         }
-        if i.z.y >= nsubdiv {
-            i.z.y -= nsubdiv;
+        if i[2][1] >= nsubdiv {
+            i[2][1] -= nsubdiv;
         }
     }
 
     for i in indices[top_start_id..bottom_start_id].iter_mut() {
-        i.x.y = nlen - 2;
-        i.y.y = nlen - 2;
-        i.z.y = nlen - 2;
+        i[0][1] = nlen - 2;
+        i[1][1] = nlen - 2;
+        i[2][1] = nlen - 2;
     }
 
     for i in indices[bottom_start_id..].iter_mut() {
-        i.x.y = nlen - 1;
-        i.y.y = nlen - 1;
-        i.z.y = nlen - 1;
+        i[0][1] = nlen - 1;
+        i[1][1] = nlen - 1;
+        i[2][1] = nlen - 1;
     }
 
     RenderMesh::new(

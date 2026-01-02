@@ -1,6 +1,3 @@
-extern crate kiss3d;
-extern crate nalgebra as na;
-
 /// This example demonstrates how to record a screencast of the 3D scene.
 ///
 /// Requires the `recording` feature to be enabled:
@@ -10,16 +7,15 @@ extern crate nalgebra as na;
 #[kiss3d::main]
 #[cfg(feature = "recording")]
 async fn main() {
-    use kiss3d::light::Light;
-    use kiss3d::window::Window;
-    use na::{UnitQuaternion, Vector3};
+    use kiss3d::prelude::*;
 
     let mut window = Window::new("Kiss3d: recording").await;
-    let mut c = window.add_cube(0.2, 0.2, 0.2);
-
-    c.set_color(1.0, 0.0, 0.0);
-
-    window.set_light(Light::StickToCamera);
+    let mut camera = OrbitCamera3d::default();
+    let mut scene = SceneNode3d::empty();
+    scene
+        .add_light(Light::point(100.0))
+        .set_position(Vec3::new(0.0, 10.0, 10.0));
+    let mut c = scene.add_cube(0.2, 0.2, 0.2).set_color(RED);
 
     // Option 1: Simple recording (every frame)
     // window.begin_recording();
@@ -30,12 +26,12 @@ async fn main() {
 
     println!("Recording started (every 2nd frame)...");
 
-    let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.02);
+    let rot = Quat::from_axis_angle(Vec3::Y, 0.02);
 
     // Record 90 frames (3 seconds at 30fps, or 1.5 seconds with frame_skip=2)
     #[allow(unused_variables)]
     for frame in 0..90 {
-        c.prepend_to_local_rotation(&rot);
+        c.rotate(&rot);
 
         // Demonstrate pause/resume at frame 30-60
         if frame == 30 {
@@ -47,7 +43,7 @@ async fn main() {
             println!("Recording resumed at frame 60...");
         }
 
-        if !window.render().await {
+        if !window.render_3d(&mut scene, &mut camera).await {
             break;
         }
 

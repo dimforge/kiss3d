@@ -1,21 +1,24 @@
 use super::utils;
-use na::{self, Isometry3, Point2, Point3, Translation3, Vector3};
+use glamx::{Pose3, Vec2, Vec3};
+#[cfg(feature = "parry")]
 use parry3d::shape::TriMesh;
-use parry3d::utils::hashmap::HashMap;
+use std::collections::HashMap;
 
 /// Different representations of the index buffer.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum IndexBuffer {
     /// The vertex, normal, and uvs share the same indices.
-    Unified(Vec<Point3<u32>>),
+    Unified(Vec<[u32; 3]>),
     /// The vertex, normal, and uvs have different indices.
-    Split(Vec<Point3<Point3<u32>>>),
+    /// Each element is [[vertex_idx, normal_idx, uv_idx]; 3] for the 3 corners.
+    Split(Vec<[[u32; 3]; 3]>),
 }
 
 impl IndexBuffer {
     /// Returns the unified index buffer data or fails.
     #[inline]
-    pub fn unwrap_unified(self) -> Vec<Point3<u32>> {
+    pub fn unwrap_unified(self) -> Vec<[u32; 3]> {
         match self {
             IndexBuffer::Unified(b) => b,
             _ => panic!("Unable to unwrap to an unified buffer."),
@@ -24,7 +27,7 @@ impl IndexBuffer {
 
     /// Returns the split index buffer data or fails.
     #[inline]
-    pub fn unwrap_split(self) -> Vec<Point3<Point3<u32>>> {
+    pub fn unwrap_split(self) -> Vec<[[u32; 3]; 3]> {
         match self {
             IndexBuffer::Split(b) => b,
             _ => panic!("Unable to unwrap to a split buffer."),
@@ -33,7 +36,7 @@ impl IndexBuffer {
 
     /// Returns the unified index buffer data or fails.
     #[inline]
-    pub fn as_unified(&self) -> &[Point3<u32>] {
+    pub fn as_unified(&self) -> &[[u32; 3]] {
         match self {
             IndexBuffer::Unified(b) => b,
             _ => panic!("Unable to unwrap to an unified buffer."),
@@ -42,7 +45,7 @@ impl IndexBuffer {
 
     /// Returns the split index buffer data or fails.
     #[inline]
-    pub fn as_split(&self) -> &[Point3<Point3<u32>>] {
+    pub fn as_split(&self) -> &[[[u32; 3]; 3]] {
         match self {
             IndexBuffer::Split(b) => b,
             _ => panic!("Unable to unwrap to a split buffer."),
@@ -50,28 +53,26 @@ impl IndexBuffer {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 /// Geometric description of a mesh.
 pub struct RenderMesh {
-    // FIXME: those should *not* be public.
+    // TODO: those should *not* be public.
     /// Coordinates of the mesh vertices.
-    pub coords: Vec<Point3<f32>>,
+    pub coords: Vec<Vec3>,
     /// Coordinates of the mesh normals.
-    pub normals: Option<Vec<Vector3<f32>>>,
+    pub normals: Option<Vec<Vec3>>,
     /// Textures coordinates of the mesh.
-    pub uvs: Option<Vec<Point2<f32>>>,
+    pub uvs: Option<Vec<Vec2>>,
     /// Index buffer of the mesh.
     pub indices: IndexBuffer,
 }
 
+#[cfg(feature = "parry")]
 impl From<TriMesh> for RenderMesh {
     fn from(trimesh: TriMesh) -> RenderMesh {
-        let vertices = trimesh.vertices().to_vec();
-        let indices: Vec<Point3<u32>> = trimesh
-            .indices()
-            .iter()
-            .map(|tri| Point3::new(tri[0], tri[1], tri[2]))
-            .collect();
+        let vertices: Vec<Vec3> = trimesh.vertices().to_vec();
+        let indices: Vec<[u32; 3]> = trimesh.indices().to_vec();
 
         RenderMesh::new(
             vertices,
@@ -87,16 +88,16 @@ impl RenderMesh {
     ///
     /// If no `indices` is provided, trivial, sequential indices are generated.
     pub fn new(
-        coords: Vec<Point3<f32>>,
-        normals: Option<Vec<Vector3<f32>>>,
-        uvs: Option<Vec<Point2<f32>>>,
+        coords: Vec<Vec3>,
+        normals: Option<Vec<Vec3>>,
+        uvs: Option<Vec<Vec2>>,
         indices: Option<IndexBuffer>,
     ) -> RenderMesh {
         // generate trivial indices
         let idx = indices.unwrap_or_else(|| {
             IndexBuffer::Unified(
                 (0..coords.len() / 3)
-                    .map(|i| Point3::new(i as u32 * 3, i as u32 * 3 + 1, i as u32 * 3 + 2))
+                    .map(|i| [i as u32 * 3, i as u32 * 3 + 1, i as u32 * 3 + 2])
                     .collect(),
             )
         });
@@ -123,22 +124,22 @@ impl RenderMesh {
 
     /// Translates each vertex of this mesh.
     #[inline]
-    pub fn translate_by(&mut self, t: &Translation3<f32>) {
+    pub fn translate_by(&mut self, t: Vec3) {
         for c in self.coords.iter_mut() {
-            *c = t * *c;
+            *c += t;
         }
     }
 
     /// Transforms each vertex and rotates each normal of this mesh.
     #[inline]
-    pub fn transform_by(&mut self, t: &Isometry3<f32>) {
+    pub fn transform_by(&mut self, t: Pose3) {
         for c in self.coords.iter_mut() {
             *c = t * *c;
         }
 
         for n in self.normals.iter_mut() {
             for n in n.iter_mut() {
-                *n = t * *n;
+                *n = t.rotation * *n;
             }
         }
     }
@@ -193,10 +194,8 @@ impl RenderMesh {
                 // XXX: too bad we have to reconstruct the index buffer here.
                 // The utils::recompute_normals function should be generic wrt. the index buffer
                 // type (it could use an iterator instead).
-                let coord_idx: Vec<Point3<u32>> = idx
-                    .iter()
-                    .map(|t| Point3::new(t.x.x, t.y.x, t.z.x))
-                    .collect();
+                let coord_idx: Vec<[u32; 3]> =
+                    idx.iter().map(|t| [t[0][0], t[1][0], t[2][0]]).collect();
 
                 utils::compute_normals(&self.coords[..], &coord_idx[..], &mut new_normals);
             }
@@ -221,26 +220,36 @@ impl RenderMesh {
         match self.indices {
             IndexBuffer::Unified(ref mut idx) => {
                 for i in idx {
-                    i.coords.swap((1, 0), (2, 0))
+                    i.swap(1, 2);
                 }
             }
             IndexBuffer::Split(ref mut idx) => {
                 for i in idx {
-                    i.coords.swap((1, 0), (2, 0))
+                    i.swap(1, 2);
                 }
             }
         }
     }
 
     /// Scales each vertex of this mesh.
+    ///
+    /// For non-uniform scaling, normals are transformed by the inverse of the scale factors
+    /// and then renormalized to remain perpendicular to the scaled surface.
     #[inline]
-    pub fn scale_by(&mut self, s: &Vector3<f32>) {
+    pub fn scale_by(&mut self, s: Vec3) {
         for c in self.coords.iter_mut() {
-            for i in 0..3 {
-                c[i] = (*c)[i] * s[i];
+            *c *= s;
+        }
+
+        // Transform normals by inverse transpose of scale matrix.
+        // For diagonal scale S = diag(sx, sy, sz), inverse transpose is diag(1/sx, 1/sy, 1/sz).
+        if let Some(ref mut normals) = self.normals {
+            let inv_scale = Vec3::new(1.0 / s.x, 1.0 / s.y, 1.0 / s.z);
+            for n in normals.iter_mut() {
+                *n *= inv_scale;
+                *n = n.normalize();
             }
         }
-        // FIXME: do something for the normals?
     }
 }
 
@@ -262,11 +271,11 @@ impl RenderMesh {
     pub fn unify_index_buffer(&mut self) {
         let new_indices = match self.indices {
             IndexBuffer::Split(ref ids) => {
-                let mut vt2id: HashMap<Point3<u32>, u32> = HashMap::default();
+                let mut vt2id: HashMap<[u32; 3], u32> = HashMap::default();
                 let mut resi: Vec<u32> = Vec::new();
-                let mut resc: Vec<Point3<f32>> = Vec::new();
-                let mut resn: Option<Vec<Vector3<f32>>> = self.normals.as_ref().map(|_| Vec::new());
-                let mut resu: Option<Vec<Point2<f32>>> = self.uvs.as_ref().map(|_| Vec::new());
+                let mut resc: Vec<Vec3> = Vec::new();
+                let mut resn: Option<Vec<Vec3>> = self.normals.as_ref().map(|_| Vec::new());
+                let mut resu: Option<Vec<Vec2>> = self.uvs.as_ref().map(|_| Vec::new());
 
                 for triangle in ids.iter() {
                     for point in triangle.iter() {
@@ -278,14 +287,14 @@ impl RenderMesh {
                             None => {
                                 let idx = resc.len() as u32;
 
-                                resc.push(self.coords[point.x as usize]);
+                                resc.push(self.coords[point[0] as usize]);
 
                                 let _ = resn.as_mut().map(|l| {
-                                    l.push(self.normals.as_ref().unwrap()[point.y as usize])
+                                    l.push(self.normals.as_ref().unwrap()[point[1] as usize])
                                 });
                                 let _ = resu
                                     .as_mut()
-                                    .map(|l| l.push(self.uvs.as_ref().unwrap()[point.z as usize]));
+                                    .map(|l| l.push(self.uvs.as_ref().unwrap()[point[2] as usize]));
 
                                 resi.push(idx);
 
@@ -305,7 +314,7 @@ impl RenderMesh {
 
                 assert!(resi.len().is_multiple_of(3));
                 for f in resi[..].chunks(3) {
-                    batched_indices.push(Point3::new(f[0], f[1], f[2]));
+                    batched_indices.push([f[0], f[1], f[2]]);
                 }
 
                 Some(IndexBuffer::Unified(batched_indices))
@@ -321,23 +330,23 @@ impl RenderMesh {
     /// are equal.
     pub fn replicate_vertices(&mut self) {
         let mut resi: Vec<u32> = Vec::new();
-        let mut resc: Vec<Point3<f32>> = Vec::new();
-        let mut resn: Option<Vec<Vector3<f32>>> = self.normals.as_ref().map(|_| Vec::new());
-        let mut resu: Option<Vec<Point2<f32>>> = self.uvs.as_ref().map(|_| Vec::new());
+        let mut resc: Vec<Vec3> = Vec::new();
+        let mut resn: Option<Vec<Vec3>> = self.normals.as_ref().map(|_| Vec::new());
+        let mut resu: Option<Vec<Vec2>> = self.uvs.as_ref().map(|_| Vec::new());
 
         match self.indices {
             IndexBuffer::Split(ref ids) => {
                 for triangle in ids.iter() {
                     for point in triangle.iter() {
                         let idx = resc.len() as u32;
-                        resc.push(self.coords[point.x as usize]);
+                        resc.push(self.coords[point[0] as usize]);
 
                         let _ = resn
                             .as_mut()
-                            .map(|l| l.push(self.normals.as_ref().unwrap()[point.y as usize]));
+                            .map(|l| l.push(self.normals.as_ref().unwrap()[point[1] as usize]));
                         let _ = resu
                             .as_mut()
-                            .map(|l| l.push(self.uvs.as_ref().unwrap()[point.z as usize]));
+                            .map(|l| l.push(self.uvs.as_ref().unwrap()[point[2] as usize]));
 
                         resi.push(idx);
                     }
@@ -370,7 +379,7 @@ impl RenderMesh {
 
         assert!(resi.len().is_multiple_of(3));
         for f in resi[..].chunks(3) {
-            batched_indices.push(Point3::new(f[0], f[1], f[2]));
+            batched_indices.push([f[0], f[1], f[2]]);
         }
 
         self.indices = IndexBuffer::Unified(batched_indices)

@@ -10,24 +10,27 @@ Kiss3d is a "Keep It Simple, Stupid" 3D graphics engine for Rust. It's designed 
 
 ## Dependencies
 
-- **nalgebra 0.34**: Used for all math operations (vectors, matrices, transformations)
-- **parry3d 0.25**: Physics/geometry library (successor to ncollide3d)
+- **glam 0.29**: Used for all public math operations (vectors, matrices, quaternions)
+- **nalgebra 0.34** (optional, with `parry` feature): For parry3d interop
+- **parry3d 0.25** (optional, with `parry` feature): Physics/geometry library (successor to ncollide3d)
 - **glow 0.16**: OpenGL bindings
 - **glutin 0.32** (native only): Window creation and OpenGL context management
 - **egui 0.32** (optional feature): Immediate mode GUI integration
 - **wasm-bindgen** (WASM only): Browser integration
 
-If users have nalgebra in their project, they must use version 0.34 to match kiss3d's version.
+If users have glam in their project, they must use version 0.29 to match kiss3d's version.
 
 ## Feature Flags
 
 - **egui**: Optional immediate mode GUI integration (enables `egui` and `egui_glow` dependencies)
-- **vertex_index_u32**: Use 32-bit vertex indices instead of 16-bit (useful for large meshes)
+- **parry**: Optional parry3d integration for physics/geometry (enables `nalgebra` and `parry3d` dependencies). Required for `add_trimesh()` methods and `From<TriMesh>` conversions.
 
 Enable features in Cargo.toml:
 ```toml
 [dependencies]
-kiss3d = { version = "0.37", features = ["egui"] }
+kiss3d = { version = "0.38", features = ["egui"] }
+# Or with parry support:
+kiss3d = { version = "0.38", features = ["parry"] }
 ```
 
 ## Build and Test Commands
@@ -64,8 +67,11 @@ cargo test -- --nocapture
 ```bash
 # Run a specific example (native)
 cargo run --example cube
-cargo run --example procedural
 cargo run --example custom_material
+
+# Run example with parry feature (for TriMesh support)
+cargo run --example procedural --features parry
+cargo run --example decomp --features parry
 
 # Run example with egui feature
 cargo run --example ui --features egui
@@ -82,7 +88,8 @@ cargo run --example cube --target wasm32-unknown-unknown
 ```
 
 There are 36+ examples in the `examples/` directory demonstrating various features including:
-- Basic shapes: `cube`, `primitives`, `procedural`
+- Basic shapes: `cube`, `primitives`
+- Geometry with parry: `procedural`, `decomp` (require `parry` feature)
 - Interaction: `event`, `mouse_events`, `camera`
 - Advanced rendering: `custom_material`, `texturing`, `wireframe`, `post_processing`
 - Scene management: `group`, `add_remove`, `instancing3d`
@@ -114,12 +121,16 @@ cargo doc --open
 
 **scene** (`src/scene/`)
 - `SceneNode`: Hierarchical scene graph nodes for 3D objects. Each node can have:
-  - Local and world transforms (Isometry3) and scales
+  - Local and world transforms (Pose3) and scales
   - Children nodes (forming a hierarchy)
   - An optional `Object` to render
   - Parent references (using Weak pointers to avoid cycles)
 - `PlanarSceneNode`: 2D scene graph nodes for overlay rendering
 - `Object`: Wraps a `GpuMesh` and `Material` for rendering
+
+**transform** (`src/transform.rs`)
+- `Pose3` and `Pose2`: Rigid body transform types from glamx (rotation + translation)
+- Helper functions for working with transforms
 
 **resource** (`src/resource/`)
 - `GpuMesh`: GPU-side mesh data with vertices, indices, normals, and UVs. All geometry data is stored in GPU buffers via `GPUVec`.
@@ -138,8 +149,8 @@ cargo doc --open
 
 **camera** (`src/camera/`)
 - `Camera` trait: Defines camera interface
-- `ArcBall`: Default orbital camera (scroll to zoom, click+drag to rotate/pan)
-- `FirstPerson`: FPS-style camera
+- `OrbitCamera3d`: Default orbital camera (scroll to zoom, click+drag to rotate/pan)
+- `FirstPersonCamera3d`: FPS-style camera
 - Custom cameras can be implemented via the `Camera` trait
 
 **renderer** (`src/renderer/`)
@@ -236,6 +247,8 @@ The scene graph uses `Rc<RefCell<SceneNodeData>>` internally:
 
 ### Adding Geometry
 ```rust
+use glamx::Vec3;
+
 // High-level API (recommended)
 let mut cube = window.add_cube(1.0, 1.0, 1.0);
 let mut sphere = window.add_sphere(0.5);
@@ -246,21 +259,23 @@ let mut node = scene_node.add_render_mesh(mesh);
 
 // Custom mesh from TriMesh
 let trimesh = parry3d::shape::TriMesh::new(...);
-let mut node = scene_node.add_trimesh(trimesh, Vector3::from_element(1.0));
+let mut node = scene_node.add_trimesh(trimesh, Vec3::splat(1.0));
 ```
 
 ### Transforming Objects
 ```rust
+use glamx::{Quat, Vec3};
+
 // Set position
-node.set_local_translation(Translation3::new(1.0, 2.0, 3.0));
+node.set_position(Vec3::new(1.0, 2.0, 3.0));
 
 // Set rotation
-let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.1);
-node.set_local_rotation(rot);
+let rot = Quat::from_axis_angle(Vec3::Y, 0.1);
+node.set_rotation(rot);
 
 // Incremental transforms
-node.append_translation(&Translation3::new(0.1, 0.0, 0.0));
-node.prepend_to_local_rotation(&rot);
+node.translate(Vec3::new(0.1, 0.0, 0.0));
+node.prepend_rotation(&rot);
 
 // Set scale
 node.set_local_scale(2.0, 1.0, 2.0);
@@ -283,7 +298,21 @@ for event in window.events().iter() {
 
 ## Version History Context
 
-### v0.37.0 (Current)
+### v0.38.0 (Current)
+- **Major**: Migrated public API from `nalgebra` to `glam` for math operations
+- Uses `Pose3` and `Pose2` types from glamx (replacing nalgebra's Isometry types)
+- nalgebra is now internal-only for parry3d interop
+- All examples updated to use glam types
+
+Key migration points from v0.37.0:
+- Replace `nalgebra` imports with `glam` (`Vec3`, `Vec2`, `Mat4`, `Quat`, etc.)
+- `Point3<f32>` → `Vec3` (glam uses vectors for both points and directions)
+- `UnitQuaternion<f32>` → `Quat`
+- `Translation3<f32>` → `Vec3`
+- `Vector3::y_axis()` → `Vec3::Y`
+- `UnitQuaternion::from_axis_angle(&Vector3::y_axis(), angle)` → `Quat::from_axis_angle(Vec3::Y, angle)`
+
+### v0.37.0
 - Latest release with all v0.36.0 features stabilized
 - Egui integration improvements
 - Bug fixes and stability improvements
@@ -306,7 +335,8 @@ Key migration points for users:
 
 ## Code Style Notes
 
-- Use `na::` for nalgebra imports (aliased as `na`)
+- Use `glam` types for all public APIs (`Vec3`, `Vec2`, `Mat4`, `Quat`, etc.)
+- nalgebra is used internally only for parry3d interop
 - Heavy use of `Rc<RefCell<T>>` for shared mutable state
 - Platform-specific code uses `#[cfg(target_arch = "wasm32")]` and `#[cfg(not(target_arch = "wasm32"))]`
 - Allowed clippy lints: `module_inception`, `too_many_arguments`, `type_complexity`

@@ -183,6 +183,7 @@ impl EguiRenderer {
         }
 
         self.textures_delta.clear();
+        self.shapes.clear();
     }
 }
 

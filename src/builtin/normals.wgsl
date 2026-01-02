@@ -42,17 +42,9 @@ fn vs_main(vertex: VertexInput) -> VertexOutput {
     return out;
 }
 
-// Convert linear RGB to sRGB for display.
-fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
-    let cutoff = linear < vec3<f32>(0.0031308);
-    let lower = linear * 12.92;
-    let higher = pow(linear, vec3<f32>(1.0 / 2.4)) * 1.055 - vec3<f32>(0.055);
-    return select(higher, lower, cutoff);
-}
-
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Map normal from [-1, 1] to [0, 1] for visualization
     let color = (in.ls_normal + vec3<f32>(1.0)) / 2.0;
-    return vec4<f32>(linear_to_srgb(color), 1.0);
+    return vec4<f32>(color, 1.0);
 }

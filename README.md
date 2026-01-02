@@ -1,12 +1,18 @@
-# Kiss3d
-
 <p align="center">
-  <img src="assets/kiss3d-logo.png" alt="crates.io" width="300px">
+  <img src="assets/kiss3d-logo.png" alt="crates.io" width="500px">
 </p>
 
-[![Crates.io](https://img.shields.io/crates/v/kiss3d.svg)](https://crates.io/crates/kiss3d)
-[![Docs](https://docs.rs/kiss3d/badge.svg)](https://docs.rs/kiss3d)
-[![License](https://img.shields.io/crates/l/kiss3d)](https://github.com/sebcrozet/kiss3d)
+<p align="center">
+    <a href="https://discord.gg/vt9DJSW">
+        <img src="https://img.shields.io/discord/507548572338880513.svg?logo=discord&colorB=7289DA">
+    </a>
+    <a href="https://github.com/sebcrozet/kiss3d/actions">
+        <img src="https://github.com/sebcrozet/kiss3d/workflows/CI%20build/badge.svg" alt="Build status">
+    </a>
+    <a href="https://crates.io/crates/kiss3d">
+         <img src="https://img.shields.io/crates/v/kiss3d.svg?style=flat-square" alt="crates.io">
+    </a>
+</p>
 
 Keep It Simple, Stupid 3d graphics engine.
 
@@ -49,14 +55,14 @@ async fn main() {
   let mut window = Window::new("Kiss3d: cube").await;
   let mut c = window.add_cube(1.0, 1.0, 1.0);
 
-  c.set_color(1.0, 0.0, 0.0);
+  c.set_color(RED);
 
-  window.set_light(Light::StickToCamera);
+  window.set_light(Light::stick_to_camera());
 
   let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
 
   while window.render().await {
-    c.prepend_to_local_rotation(&rot);
+    c.prepend_rotation(&rot);
   }
 }
 

@@ -1,8 +1,7 @@
 use super::utils;
 use super::RenderPolyline;
 use super::{IndexBuffer, RenderMesh};
-use na;
-use na::{Point2, Point3, Vector3};
+use glamx::{Vec2, Vec3};
 
 /// Generates a UV sphere with the specified diameter.
 ///
@@ -64,7 +63,7 @@ pub fn unit_sphere(ntheta_subdiv: u32, nphi_subdiv: u32, generate_uvs: bool) -> 
     }
 }
 
-// FIXME: f32{theta,phi}_subdiv are not the right names.
+// TODO: f32{theta,phi}_subdiv are not the right names.
 fn unit_sphere_without_uvs(ntheta_subdiv: u32, nphi_subdiv: u32) -> RenderMesh {
     let pi = std::f32::consts::PI;
     let two_pi = std::f32::consts::TAU;
@@ -76,7 +75,7 @@ fn unit_sphere_without_uvs(ntheta_subdiv: u32, nphi_subdiv: u32) -> RenderMesh {
     let mut curr_phi = -pi_two + dphi;
 
     // coords.
-    coords.push(Point3::new(na::zero(), -1.0, na::zero()));
+    coords.push(Vec3::new(0.0, -1.0, 0.0));
 
     for _ in 0..nphi_subdiv - 1 {
         utils::push_circle(
@@ -89,10 +88,10 @@ fn unit_sphere_without_uvs(ntheta_subdiv: u32, nphi_subdiv: u32) -> RenderMesh {
         curr_phi += dphi;
     }
 
-    coords.push(Point3::new(na::zero(), 1.0, na::zero()));
+    coords.push(Vec3::new(0.0, 1.0, 0.0));
 
     // the normals are the same as the coords.
-    let normals: Vec<Vector3<f32>> = coords.iter().map(|p| p.coords).collect();
+    let normals: Vec<Vec3> = coords.clone();
 
     // index buffer
     let mut idx = Vec::new();
@@ -144,7 +143,7 @@ fn unit_sphere_with_uvs(ntheta_subdiv: u32, nphi_subdiv: u32) -> RenderMesh {
     }
 
     // the normals are the same as the coords
-    let normals: Vec<Vector3<f32>> = coords.iter().map(|p| p.coords).collect();
+    let normals: Vec<Vec3> = coords.clone();
 
     // index buffer
     let mut idx = Vec::new();
@@ -162,7 +161,7 @@ fn unit_sphere_with_uvs(ntheta_subdiv: u32, nphi_subdiv: u32) -> RenderMesh {
         let mut curr_uvtheta = 0.0;
 
         for _ in 0..ntheta_subdiv + 1 {
-            uvs.push(Point2::new(curr_uvtheta, curr_uvphi));
+            uvs.push(Vec2::new(curr_uvtheta, curr_uvphi));
             curr_uvtheta += duvtheta;
         }
 
@@ -183,7 +182,7 @@ fn unit_sphere_with_uvs(ntheta_subdiv: u32, nphi_subdiv: u32) -> RenderMesh {
 
 /// Creates a hemisphere with unit diameter.
 ///
-/// Generates the upper half of a unit sphere (y ≥ 0), with diameter 1.0 (radius 0.5).
+/// Generates the upper half of a unit sphere (y >= 0), with diameter 1.0 (radius 0.5).
 /// The base of the hemisphere lies on the XZ plane.
 ///
 /// # Arguments
@@ -219,7 +218,7 @@ pub fn unit_hemisphere(ntheta_subdiv: u32, nphi_subdiv: u32) -> RenderMesh {
         curr_phi += dphi;
     }
 
-    coords.push(Point3::new(na::zero(), 1.0, na::zero()));
+    coords.push(Vec3::new(0.0, 1.0, 0.0));
 
     let mut idx = Vec::new();
 
@@ -240,8 +239,8 @@ pub fn unit_hemisphere(ntheta_subdiv: u32, nphi_subdiv: u32) -> RenderMesh {
     );
 
     // Result
-    let normals: Vec<Vector3<f32>> = coords.iter().map(|p| p.coords).collect();
-    // FIXME: uvs
+    let normals: Vec<Vec3> = coords.clone();
+    // TODO: uvs
     let mut out = RenderMesh::new(coords, Some(normals), None, Some(IndexBuffer::Unified(idx)));
 
     // set the radius to 0.5
@@ -276,7 +275,7 @@ pub fn circle(diameter: f32, nsubdivs: u32) -> RenderPolyline {
 
     utils::push_xy_arc(diameter / 2.0, nsubdivs, dtheta, &mut pts);
 
-    // FIXME: normals
+    // TODO: normals
 
     RenderPolyline::new(pts, None)
 }

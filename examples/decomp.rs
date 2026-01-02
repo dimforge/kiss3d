@@ -1,16 +1,8 @@
-extern crate instant;
-extern crate kiss3d;
-extern crate nalgebra as na;
-extern crate rand;
-
-use instant::Instant;
-use kiss3d::light::Light;
-use kiss3d::loader::obj;
-use kiss3d::window::Window;
-use na::Vector3;
-use parry3d::shape::TriMesh;
-use parry3d::transformation;
-use parry3d::transformation::vhacd::VHACDParameters;
+use kiss3d::prelude::*;
+use web_time::Instant;
+use kiss3d::parry3d::shape::TriMesh;
+use kiss3d::parry3d::transformation;
+use kiss3d::parry3d::transformation::vhacd::VHACDParameters;
 use rand::random;
 use std::env;
 use std::path::Path;
@@ -42,12 +34,17 @@ async fn main() {
     let scale: f32 = FromStr::from_str(&args.next().unwrap()[..]).unwrap();
     let concavity: f32 = FromStr::from_str(&args.next().unwrap()[..]).unwrap();
 
-    let scale = Vector3::from_element(scale);
+    let scale = Vec3::splat(scale);
 
     /*
      * Create the window.
      */
     let mut window = Window::new("Kiss3d: convex decomposition").await;
+    let mut camera = OrbitCamera3d::new(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO);
+    let mut scene = SceneNode3d::empty();
+    scene
+        .add_light(Light::point(100.0))
+        .set_position(Vec3::new(0.0, 10.0, 10.0));
 
     /*
      * Convex decomposition.
@@ -56,8 +53,9 @@ async fn main() {
     let mtl_path = Path::new("none");
     let teapot = obj::parse_file(obj_path, mtl_path, "none").unwrap();
 
-    let mut m = window.add_obj(obj_path, mtl_path, scale);
-    m.set_surface_rendering_activation(false);
+    scene
+        .add_obj(obj_path, mtl_path, scale)
+        .set_surface_rendering_activation(false);
 
     let mut total_time = 0.0f64;
     for &(_, ref mesh, _) in teapot.iter() {
@@ -68,27 +66,26 @@ async fn main() {
                     .indices
                     .as_split()
                     .iter()
-                    .map(|idx| [idx.x.x, idx.y.x, idx.z.x])
+                    .map(|idx| [idx[0][0], idx[1][0], idx[2][0]])
                     .collect();
+                let coords = trimesh.coords.clone();
                 let begin = Instant::now();
                 let params = VHACDParameters {
                     concavity,
                     ..VHACDParameters::default()
                 };
-                let decomp =
-                    transformation::vhacd::VHACD::decompose(&params, &trimesh.coords, &idx, true);
+                let decomp = transformation::vhacd::VHACD::decompose(&params, &coords, &idx, true);
                 let elapsed = begin.elapsed();
                 total_time =
                     elapsed.as_secs() as f64 + elapsed.subsec_nanos() as f64 / 1000000000.0;
 
-                for (vtx, idx) in decomp.compute_exact_convex_hulls(&trimesh.coords, &idx) {
+                for (vtx, idx) in decomp.compute_exact_convex_hulls(&coords, &idx) {
                     let r = random();
                     let g = random();
                     let b = random();
 
                     if let Ok(trimesh) = TriMesh::new(vtx, idx) {
-                        let mut m = window.add_trimesh(trimesh, scale);
-                        m.set_color(r, g, b);
+                        scene.add_trimesh(trimesh, scale, true).set_color(Color::new(r, g, b, 1.0));
                     }
                 }
             }
@@ -103,7 +100,5 @@ async fn main() {
      * Rendering.
      *
      */
-    window.set_light(Light::StickToCamera);
-
-    while window.render().await {}
+    while window.render_3d(&mut scene, &mut camera).await {}
 }

@@ -75,9 +75,9 @@ pub fn capsule(
     let base_top_coords = bottom_coords.len() as u32;
 
     for idx in top_indices.iter_mut() {
-        idx.x += base_top_coords;
-        idx.y += base_top_coords;
-        idx.z += base_top_coords;
+        idx[0] += base_top_coords;
+        idx[1] += base_top_coords;
+        idx[2] += base_top_coords;
     }
 
     // merge all buffers
@@ -88,7 +88,7 @@ pub fn capsule(
     // attach the two caps
     utils::push_ring_indices(0, base_top_coords, ntheta_subdiv, &mut bottom_indices);
 
-    // FIXME: uvs
+    // TODO: uvs
     RenderMesh::new(
         bottom_coords,
         Some(bottom_normals),

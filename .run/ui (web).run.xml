@@ -1,5 +1,6 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="ui (web)" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+    <option name="buildProfileId" value="dev" />
     <option name="command" value="run --package kiss3d --example ui --target wasm32-unknown-unknown --features egui" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <envs />

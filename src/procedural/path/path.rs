@@ -1,15 +1,15 @@
-use na::{Point3, Vector3};
+use glamx::Vec3;
 
 use crate::procedural::RenderMesh;
 
 /// A sample point and its associated tangent.
 pub enum PathSample {
     /// A point that starts a new path.
-    StartPoint(Point3<f32>, Vector3<f32>),
+    StartPoint(Vec3, Vec3),
     /// A point that is inside of the path currently generated.
-    InnerPoint(Point3<f32>, Vector3<f32>),
+    InnerPoint(Vec3, Vec3),
     /// A point that ends the path currently generated.
-    EndPoint(Point3<f32>, Vector3<f32>),
+    EndPoint(Vec3, Vec3),
     /// Used when the sampler does not have any other points to generate.
     EndOfSample,
 }

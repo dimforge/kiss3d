@@ -1,37 +1,32 @@
-extern crate kiss3d;
-extern crate nalgebra as na;
-
-use kiss3d::light::Light;
-use kiss3d::resource::GpuMesh;
-use kiss3d::window::Window;
-use na::{Point3, UnitQuaternion, Vector3};
-use std::cell::RefCell;
-use std::rc::Rc;
+use kiss3d::prelude::*;
 
 #[kiss3d::main]
 async fn main() {
     let mut window = Window::new("Kiss3d: custom_mesh").await;
+    let mut camera = OrbitCamera3d::default();
+    let mut scene = SceneNode3d::empty();
+    scene
+        .add_light(Light::point(100.0))
+        .set_position(Vec3::new(0.0, 10.0, 10.0));
 
-    let a = Point3::new(-1.0, -1.0, 0.0);
-    let b = Point3::new(1.0, -1.0, 0.0);
-    let c = Point3::new(0.0, 1.0, 0.0);
+    let a = Vec3::new(-1.0, -1.0, 0.0);
+    let b = Vec3::new(1.0, -1.0, 0.0);
+    let c = Vec3::new(0.0, 1.0, 0.0);
 
     let vertices = vec![a, b, c];
-    let indices = vec![Point3::new(0, 1, 2)];
+    let indices = vec![[0, 1, 2]];
 
-    let mesh = Rc::new(RefCell::new(GpuMesh::new(
+    let mesh = Rc::new(RefCell::new(GpuMesh3d::new(
         vertices, indices, None, None, false,
     )));
-    let mut c = window.add_mesh(mesh, Vector3::new(1.0, 1.0, 1.0));
+    let mut c = scene
+        .add_mesh(mesh, Vec3::new(1.0, 1.0, 1.0))
+        .set_color(RED)
+        .enable_backface_culling(false);
 
-    c.set_color(1.0, 0.0, 0.0);
-    c.enable_backface_culling(false);
+    let rot = Quat::from_axis_angle(Vec3::Y, 0.014);
 
-    window.set_light(Light::StickToCamera);
-
-    let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
-
-    while window.render().await {
-        c.prepend_to_local_rotation(&rot);
+    while window.render_3d(&mut scene, &mut camera).await {
+        c.rotate(rot);
     }
 }

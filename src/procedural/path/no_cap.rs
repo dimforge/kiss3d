@@ -1,5 +1,5 @@
 use crate::procedural::path::PolylineCompatibleCap;
-use na::{Point3, Vector3};
+use glamx::Vec3;
 
 /// A cap that renders nothing.
 pub struct NoCap;
@@ -22,24 +22,24 @@ impl PolylineCompatibleCap for NoCap {
     fn gen_start_cap(
         &self,
         _: u32,
-        _: &[Point3<f32>],
-        _: &Point3<f32>,
-        _: &Vector3<f32>,
+        _: &[Vec3],
+        _: Vec3,
+        _: Vec3,
         _: bool,
-        _: &mut Vec<Point3<f32>>,
-        _: &mut Vec<Point3<u32>>,
+        _: &mut Vec<Vec3>,
+        _: &mut Vec<[u32; 3]>,
     ) {
     }
 
     fn gen_end_cap(
         &self,
         _: u32,
-        _: &[Point3<f32>],
-        _: &Point3<f32>,
-        _: &Vector3<f32>,
+        _: &[Vec3],
+        _: Vec3,
+        _: Vec3,
         _: bool,
-        _: &mut Vec<Point3<f32>>,
-        _: &mut Vec<Point3<u32>>,
+        _: &mut Vec<Vec3>,
+        _: &mut Vec<[u32; 3]>,
     ) {
     }
 }
