@@ -1,6 +1,6 @@
-<p align="center">
-  <img src="assets/kiss3d-logo.png" alt="crates.io" width="500px">
-</p>
+<a align="center" href="https://kiss3d.rs">
+  <a href="https://kiss3d.rs"><img src="assets/kiss3d-logo.png" alt="crates.io" width="500px"></a>
+</a>
 
 <p align="center">
     <a href="https://discord.gg/vt9DJSW">
@@ -14,7 +14,7 @@
     </a>
 </p>
 
-Keep It Simple, Stupid 3d graphics engine.
+Keep It Simple, Stupid 3D and 2D graphics engine.
 
 This library is born from the frustration that today’s 3D
 graphics library are either:
@@ -37,35 +37,32 @@ with as little friction as possible.
 * First-person camera available as well, and user-defined cameras are possible.
 * Render boxes, spheres, cones, cylinders, quads and lines simply
 * Change an object's color or texture.
-* Change an object's transform (we use [nalgebra](http://nalgebra.org) to do that).
+* Change an object's transform.
 * Create basic post-processing effects.
 
 As an example, creating a scene with a red, rotating cube with a light attached
 to the camera is as simple as:
 
 ```rust
-extern crate kiss3d;
-
-use kiss3d::light::Light;
-use kiss3d::window::Window;
-use kiss3d::na::{UnitQuaternion, Vector3};
+use kiss3d::prelude::*;
 
 #[kiss3d::main]
 async fn main() {
   let mut window = Window::new("Kiss3d: cube").await;
-  let mut c = window.add_cube(1.0, 1.0, 1.0);
+  let mut camera = OrbitCamera3d::default();
+  let mut scene = SceneNode3d::empty();
+  scene
+          .add_light(Light::point(100.0))
+          .set_position(Vec3::new(0.0, 2.0, -2.0));
 
-  c.set_color(RED);
+  let mut c = scene.add_cube(1.0, 1.0, 1.0).set_color(RED);
 
-  window.set_light(Light::stick_to_camera());
+  let rot = Quat::from_axis_angle(Vec3::Y, 0.014);
 
-  let rot = UnitQuaternion::from_axis_angle(&Vector3::y_axis(), 0.014);
-
-  while window.render().await {
-    c.prepend_rotation(&rot);
+  while window.render_3d(&mut scene, &mut camera).await {
+    c.rotate(rot);
   }
 }
-
 ```
 
 This code works on **both native platforms and WASM** without any changes! The `#[kiss3d::main]`
@@ -95,8 +92,6 @@ Simply add the following to your `Cargo.toml` file:
 [dependencies]
 kiss3d = "0.37"
 ```
-Note: If your project already uses nalgebra, you'll need the same version used by `kiss3d`, or you may run into compatibility issues.
-
 ### Optional Features
 
 #### Recording
@@ -114,28 +109,6 @@ Kiss3d supports recording your 3D scene to MP4 video files. This feature require
 kiss3d = { version = "0.37", features = ["recording"] }
 ```
 
-**Example usage:**
-```rust
-use kiss3d::window::{Window, RecordingConfig};
-
-#[kiss3d::main]
-async fn main() {
-    let mut window = Window::new("Recording Example").await;
-
-    // Start recording (optionally skip frames to reduce file size)
-    let config = RecordingConfig::new().with_frame_skip(2);
-    window.begin_recording_with_config(config);
-
-    // Render your scene
-    for _ in 0..120 {
-        window.render().await;
-    }
-
-    // Save to MP4 (30 fps)
-    window.end_recording("output.mp4", 30).unwrap();
-}
-```
-
 #### Egui Integration
 
 For immediate mode GUI support, enable the `egui` feature:
@@ -143,12 +116,3 @@ For immediate mode GUI support, enable the `egui` feature:
 [dependencies]
 kiss3d = { version = "0.37", features = ["egui"] }
 ```
-
-
-## Contributions
-I’d love to see people improving this library for their own needs. However, keep in mind that
-**kiss3d** is KISS. One-liner features (from the user point of view) are preferred.
-
-## Acknowledgements
-
-Thanks to all the Rustaceans for their help, and their OpenGL bindings.

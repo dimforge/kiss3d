@@ -1,0 +1,15 @@
+<svg width="40" height="40" viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <!-- 3D Cube for kiss3d -->
+  <!-- Front face -->
+  <path d="M8 14L20 8L32 14L32 28L20 34L8 28Z" fill="#FF7B29" stroke="#E85D04" stroke-width="1.5"/>
+  <!-- Top face -->
+  <path d="M8 14L20 8L32 14L20 20Z" fill="#FFAA70"/>
+  <!-- Right face -->
+  <path d="M20 20L32 14L32 28L20 34Z" fill="#CC5500"/>
+  <!-- Left face -->
+  <path d="M8 14L20 20L20 34L8 28Z" fill="#FF7B29"/>
+  <!-- Inner edges -->
+  <path d="M20 20L20 34" stroke="#E85D04" stroke-width="1" opacity="0.5"/>
+  <path d="M8 14L20 20" stroke="#E85D04" stroke-width="1" opacity="0.3"/>
+  <path d="M32 14L20 20" stroke="#E85D04" stroke-width="1" opacity="0.3"/>
+</svg>

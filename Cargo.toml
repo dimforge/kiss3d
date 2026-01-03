@@ -37,8 +37,8 @@ serde = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde"]
 [dependencies]
 bitflags     = "2"
 bytemuck     = { version = "1", features = ["derive"] }
-egui         = { version = "0.32", optional = true, default-features = true }
-egui-wgpu    = { version = "0.32", optional = true }
+egui         = { version = "0.33", optional = true, default-features = true }
+egui-wgpu    = { version = "0.33", optional = true }
 either       = "1"
 image        = "0.25"
 web-time     = "1"
@@ -84,7 +84,6 @@ web-sys = { version = "0.3", features = [
 [dev-dependencies]
 env_logger = "0.11"
 parry2d    = "0.25"
-parry3d    = "0.25"
 rand       = "0.9"
 
 [[example]]
@@ -96,6 +95,6 @@ name = "procedural"
 required-features = ["parry"]
 
 [patch.crates-io]
-glamx = { path = "../../glamx" }
-parry3d = { path = "../../parry/crates/parry3d" }
-parry2d = { path = "../../parry/crates/parry2d" }
+#glamx = { path = "../../glamx" }
+#parry3d = { path = "../../parry/crates/parry3d" }
+#parry2d = { path = "../../parry/crates/parry2d" }

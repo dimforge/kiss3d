@@ -107,6 +107,8 @@ impl PanZoomCamera2d {
     }
 
     fn handle_scroll(&mut self, off: f32) {
+        #[cfg(target_arch = "wasm32")] // TODO: not sure why it’s weaker on wasm32
+        let off = off * 10.0;
         self.zoom /= self.zoom_step.pow(off / 120.0);
         self.update_restrictions();
         self.update_projviews();

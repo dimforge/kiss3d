@@ -842,9 +842,8 @@ impl SceneNode3d {
 
     /// Creates and adds a new object using the geometry registered as `geometry_name`.
     pub fn add_geom_with_name(&mut self, geometry_name: &str, scale: Vec3) -> Option<SceneNode3d> {
-        Self::geom_with_name(geometry_name, scale).map(|node| {
+        Self::geom_with_name(geometry_name, scale).inspect(|node| {
             self.add_child(node.clone());
-            node
         })
     }
 

@@ -1,0 +1,8 @@
+<svg width="400" height="300" viewBox="0 0 400 300" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <rect width="400" height="300" fill="#1a1a2e"/>
+  <path d="M170 120L200 100L230 120L230 160L200 180L170 160Z" fill="#ff7b29" opacity="0.3"/>
+  <path d="M170 120L200 100L230 120L200 140Z" fill="#ffaa70" opacity="0.4"/>
+  <path d="M200 140L230 120L230 160L200 180Z" fill="#cc5500" opacity="0.3"/>
+  <path d="M170 120L200 140L200 180L170 160Z" fill="#ff7b29" opacity="0.35"/>
+  <text x="200" y="220" text-anchor="middle" fill="#666" font-family="system-ui, sans-serif" font-size="14">Demo</text>
+</svg>

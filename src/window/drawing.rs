@@ -22,7 +22,7 @@ impl Window {
     /// * `color` - RGBA color (each component from 0.0 to 1.0)
     /// * `width` - Line width in pixels
     /// * `perspective` - Indicates if the rendered line size is affected by perspective (gets
-    ///                   smaller as camera gets further)
+    ///   smaller as camera gets further)
     ///
     /// # Example
     /// ```no_run

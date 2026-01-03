@@ -90,6 +90,13 @@ impl Context {
     /// `get()` will panic until `init()` is called again.
     pub fn reset() {
         CONTEXT_SINGLETON.with(|cell| {
+            // Explicitly destroy the device before dropping the context.
+            // This ensures WebGPU resources are released immediately rather than
+            // waiting for garbage collection, which is important for browsers
+            // that limit the number of concurrent WebGPU contexts.
+            if let Some(ctx) = cell.borrow().as_ref() {
+                ctx.device.destroy();
+            }
             *cell.borrow_mut() = None;
         });
     }

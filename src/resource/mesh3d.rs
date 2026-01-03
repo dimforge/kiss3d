@@ -352,3 +352,9 @@ impl GpuMesh3d {
         }
     }
 }
+
+impl From<RenderMesh> for GpuMesh3d {
+    fn from(value: RenderMesh) -> Self {
+        Self::from_render_mesh(value, false)
+    }
+}

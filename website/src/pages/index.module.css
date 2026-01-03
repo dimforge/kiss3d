@@ -1,0 +1,170 @@
+.heroBanner {
+  padding: 4rem 0;
+  text-align: center;
+  position: relative;
+  overflow: hidden;
+  background: #f5f0e6;
+}
+
+.heroLogo {
+  max-width: 400px;
+  height: auto;
+  margin-bottom: 2rem;
+}
+
+.heroBanner :global(.hero__subtitle) {
+  color: #5c4a3d !important;
+  font-size: 1.8rem;
+  font-weight: 500;
+  margin-bottom: 0.5rem;
+  white-space: nowrap;
+  max-width: none;
+}
+
+.heroBanner :global(.button--secondary) {
+  background: var(--ifm-color-primary);
+  border-color: var(--ifm-color-primary);
+  color: #fff;
+}
+
+.heroBanner :global(.button--secondary):hover {
+  background: var(--ifm-color-primary-dark);
+  border-color: var(--ifm-color-primary-dark);
+}
+
+.heroBanner :global(.button--outline) {
+  color: var(--ifm-color-primary-darkest);
+  border-color: var(--ifm-color-primary-darkest);
+}
+
+.heroBanner :global(.button--outline):hover {
+  background: var(--ifm-color-primary-darkest);
+  color: #fff;
+}
+
+@media screen and (max-width: 996px) {
+  .heroBanner {
+    padding: 2rem;
+  }
+
+  .heroLogo {
+    max-width: 280px;
+  }
+}
+
+.buttons {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 2rem;
+}
+
+/* Features Section */
+.features {
+  padding: 4rem 0;
+  background: var(--ifm-background-surface-color);
+}
+
+.featureGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 2rem;
+}
+
+@media screen and (max-width: 996px) {
+  .featureGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+@media screen and (max-width: 576px) {
+  .featureGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.feature {
+  text-align: center;
+  padding: 1.5rem;
+}
+
+.feature h3 {
+  margin: 0.5rem 0;
+}
+
+.feature p {
+  color: var(--ifm-color-emphasis-700);
+  margin: 0;
+}
+
+.featureIcon {
+  font-size: 2.5rem;
+}
+
+/* Code Section */
+.codeSection {
+  padding: 4rem 0;
+}
+
+.codeSection h2 {
+  margin-bottom: 1rem;
+}
+
+.codeSection p {
+  font-size: 1.1rem;
+  line-height: 1.7;
+  color: var(--ifm-color-emphasis-700);
+  margin-bottom: 1rem;
+}
+
+.codeLinks {
+  display: flex;
+  gap: 1rem;
+  flex-wrap: wrap;
+  margin-top: 1.5rem;
+}
+
+@media screen and (max-width: 996px) {
+  .codeSection .row {
+    flex-direction: column-reverse;
+  }
+
+  .codeSection .col {
+    margin-bottom: 2rem;
+  }
+}
+
+/* Install Section */
+.install {
+  padding: 4rem 0;
+  background: var(--ifm-background-surface-color);
+  text-align: center;
+}
+
+.install h2 {
+  margin-bottom: 1.5rem;
+}
+
+.installBox {
+  display: inline-block;
+  background: var(--ifm-code-background);
+  padding: 1rem 2rem;
+  border-radius: 8px;
+  margin-bottom: 1rem;
+}
+
+.installBox code {
+  font-size: 1.2rem;
+  color: var(--ifm-color-primary);
+}
+
+.installNote {
+  color: var(--ifm-color-emphasis-600);
+  font-size: 1rem;
+}
+
+.installNote a {
+  color: var(--ifm-color-primary);
+}

@@ -417,12 +417,13 @@ impl WgpuCanvas {
                             // Prevent default scrolling behavior
                             event.prevent_default();
                             // Scale based on delta mode to match native behavior:
-                            // Native scales LineDelta by 10.0 and PixelDelta by 1.0.
+                            // Browsers report much larger pixel deltas than native platforms,
+                            // so we normalize them to produce similar scroll behavior.
                             // 0 = DOM_DELTA_PIXEL, 1 = DOM_DELTA_LINE, 2 = DOM_DELTA_PAGE
                             let scale = match event.delta_mode() {
-                                0 => 1.0,   // Pixel mode - use as-is (like native PixelDelta)
-                                1 => 10.0,  // Line mode - scale by 10 (like native LineDelta)
-                                _ => 100.0, // Page mode - large jumps
+                                0 => 0.1,  // Pixel mode - scale down (browsers report ~100px per tick)
+                                1 => 1.0,  // Line mode - use as-is (browsers report ~1-3 lines)
+                                _ => 10.0, // Page mode - scale up slightly
                             };
                             let dx = event.delta_x() * scale;
                             let dy = -event.delta_y() * scale; // Invert for natural scrolling

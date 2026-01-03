@@ -368,7 +368,7 @@ impl FirstPersonCamera3d {
     /// Translates this camera by `t`.
     #[inline]
     pub fn translate(&self, t: Vec3) -> FirstPersonCamera3d {
-        let mut res = self.clone();
+        let mut res = *self;
         res.translate_mut(t);
         res
     }

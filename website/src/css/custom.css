@@ -1,0 +1,167 @@
+/**
+ * kiss3d custom styling
+ * Using a vibrant orange/coral theme to evoke 3D graphics warmth
+ */
+
+:root {
+  --ifm-color-primary: #e85d04;
+  --ifm-color-primary-dark: #d15404;
+  --ifm-color-primary-darker: #c54f03;
+  --ifm-color-primary-darkest: #a24103;
+  --ifm-color-primary-light: #f06a12;
+  --ifm-color-primary-lighter: #f17321;
+  --ifm-color-primary-lightest: #f4894a;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(232, 93, 4, 0.1);
+  --ifm-font-family-base: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary: #ff7b29;
+  --ifm-color-primary-dark: #ff6a0f;
+  --ifm-color-primary-darker: #ff6200;
+  --ifm-color-primary-darkest: #cc4e00;
+  --ifm-color-primary-light: #ff8c43;
+  --ifm-color-primary-lighter: #ff9452;
+  --ifm-color-primary-lightest: #ffb07c;
+  --docusaurus-highlighted-code-line-bg: rgba(255, 123, 41, 0.2);
+}
+
+/* Hero section styling */
+.hero--primary {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+  position: relative;
+  overflow: hidden;
+}
+
+.hero--primary::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background:
+    radial-gradient(circle at 20% 80%, rgba(232, 93, 4, 0.15) 0%, transparent 50%),
+    radial-gradient(circle at 80% 20%, rgba(255, 123, 41, 0.1) 0%, transparent 50%);
+  pointer-events: none;
+}
+
+.hero__title {
+  font-size: 3.5rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, #fff 0%, #ff9452 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.hero__subtitle {
+  color: rgba(255, 255, 255, 0.9);
+  font-size: 1.4rem;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+/* Code blocks */
+.prism-code {
+  border-radius: 8px;
+}
+
+/* Feature cards */
+.feature-card {
+  background: var(--ifm-card-background-color);
+  border-radius: 12px;
+  padding: 2rem;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.feature-card:hover {
+  transform: translateY(-4px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+}
+
+/* Button styling */
+.button--primary {
+  background: linear-gradient(135deg, var(--ifm-color-primary) 0%, var(--ifm-color-primary-dark) 100%);
+  border: none;
+}
+
+.button--primary:hover {
+  background: linear-gradient(135deg, var(--ifm-color-primary-light) 0%, var(--ifm-color-primary) 100%);
+}
+
+/* Code example section */
+.code-example {
+  background: var(--ifm-code-background);
+  border-radius: 12px;
+  overflow: hidden;
+  margin: 2rem 0;
+}
+
+/* Smooth scrolling */
+html {
+  scroll-behavior: smooth;
+}
+
+/* Better code highlighting for Rust */
+.token.keyword {
+  color: #ff79c6;
+}
+
+.token.function {
+  color: #50fa7b;
+}
+
+.token.string {
+  color: #f1fa8c;
+}
+
+/* Documentation page improvements */
+.markdown h1:first-child {
+  font-size: 2.5rem;
+}
+
+.markdown h2 {
+  border-bottom: 1px solid var(--ifm-color-emphasis-300);
+  padding-bottom: 0.5rem;
+  margin-top: 2rem;
+}
+
+/* Table styling */
+table {
+  display: table;
+  width: 100%;
+}
+
+table th {
+  background: var(--ifm-color-emphasis-100);
+}
+
+/* Admonition improvements */
+.admonition {
+  border-radius: 8px;
+}
+
+/* Footer links */
+.footer__link-item:hover {
+  color: var(--ifm-color-primary-light);
+}
+
+/* Keep button text visible after visiting */
+.button:visited {
+  color: inherit;
+}
+
+.button--secondary:visited {
+  color: #fff;
+}
+
+.button--outline:visited {
+  color: var(--ifm-color-primary);
+}
+
+.button--primary:visited {
+  color: #fff;
+}
