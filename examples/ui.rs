@@ -32,7 +32,12 @@ async fn main() {
         cube.rotate(rot_current);
 
         // Update cube color
-        cube.set_color(Color::new(cube_color[0], cube_color[1], cube_color[2], opacity));
+        cube.set_color(Color::new(
+            cube_color[0],
+            cube_color[1],
+            cube_color[2],
+            opacity,
+        ));
 
         // Draw UI
         window.draw_ui(|ctx| {

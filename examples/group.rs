@@ -9,12 +9,8 @@ async fn main() {
         .add_light(Light::point(100.0))
         .set_position(Vec3::new(0.0, 10.0, 10.0));
 
-    let mut g1 = scene
-        .add_group()
-        .set_position(Vec3::new(2.0, 0.0, 0.0));
-    let mut g2 = scene
-        .add_group()
-        .set_position(Vec3::new(-2.0, 0.0, 0.0));
+    let mut g1 = scene.add_group().set_position(Vec3::new(2.0, 0.0, 0.0));
+    let mut g2 = scene.add_group().set_position(Vec3::new(-2.0, 0.0, 0.0));
 
     g1.add_cube(1.0, 5.0, 1.0);
     g1.add_cube(5.0, 1.0, 1.0);

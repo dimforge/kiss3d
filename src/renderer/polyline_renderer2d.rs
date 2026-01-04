@@ -3,11 +3,11 @@
 //! Similar to the 3D polyline renderer but for 2D scenes.
 
 use crate::camera::Camera2d;
+use crate::color::Color;
 use crate::context::Context;
 use crate::resource::RenderContext2dEncoder;
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat3, Pose2, Vec2};
-use crate::color::Color;
 
 /// A 2D line segment with endpoints and per-segment material properties.
 #[repr(C)]
@@ -244,7 +244,12 @@ impl PolylineRenderer2d {
         }
 
         let transform = polyline.transform;
-        let color = [polyline.color.r, polyline.color.g, polyline.color.b, polyline.color.a];
+        let color = [
+            polyline.color.r,
+            polyline.color.g,
+            polyline.color.b,
+            polyline.color.a,
+        ];
         let width = polyline.width;
 
         for pair in polyline.vertices.windows(2) {

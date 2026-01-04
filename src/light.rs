@@ -4,8 +4,8 @@
 //! directional lights, or spot lights, and they inherit transforms from their
 //! parent scene nodes.
 
-use glamx::Vec3;
 use crate::color::Color;
+use glamx::Vec3;
 
 /// Maximum number of lights supported in a scene.
 pub const MAX_LIGHTS: usize = 8;

@@ -1,4 +1,5 @@
-use crate::camera::{Camera3d};
+use crate::camera::Camera3d;
+use crate::color::Color;
 use crate::light::{CollectedLight, Light, LightCollection, LightType, MAX_LIGHTS};
 use crate::procedural;
 use crate::procedural::RenderMesh;
@@ -15,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::rc::Weak;
 use std::sync::Arc;
-use crate::color::Color;
 
 /// The data contained by a `SceneNode`.
 pub struct SceneNodeData3d {
@@ -109,11 +109,7 @@ impl SceneNodeData3d {
         }
     }
 
-    fn do_propagate_transforms(
-        &mut self,
-        transform: Pose3,
-        scale: Vec3,
-    ) {
+    fn do_propagate_transforms(&mut self, transform: Pose3, scale: Vec3) {
         if !self.up_to_date {
             self.up_to_date = true;
             self.world_transform = transform * self.local_transform;
@@ -128,10 +124,7 @@ impl SceneNodeData3d {
     }
 
     /// First pass: update transforms and collect all lights from the scene tree.
-    fn do_collect_lights(
-        &mut self,
-        lights: &mut LightCollection,
-    ) {
+    fn do_collect_lights(&mut self, lights: &mut LightCollection) {
         // Collect light if present and enabled
         if let Some(ref light) = self.light {
             if light.enabled && lights.lights.len() < MAX_LIGHTS {
@@ -149,8 +142,6 @@ impl SceneNodeData3d {
                 });
             }
         }
-
-
 
         // Recurse to children
         for c in self.children.iter_mut() {
@@ -202,13 +193,7 @@ impl SceneNodeData3d {
         context: &RenderContext,
     ) {
         if self.visible {
-            self.do_render(
-                pass,
-                camera,
-                lights,
-                render_pass,
-                context,
-            )
+            self.do_render(pass, camera, lights, render_pass, context)
         }
     }
 
@@ -235,13 +220,7 @@ impl SceneNodeData3d {
         for c in self.children.iter_mut() {
             let mut bc = c.data_mut();
             if bc.visible {
-                bc.do_render(
-                    pass,
-                    camera,
-                    lights,
-                    render_pass,
-                    context,
-                )
+                bc.do_render(pass, camera, lights, render_pass, context)
             }
         }
     }
@@ -474,7 +453,12 @@ impl SceneNode3d {
     /// * `h` - the capsule height
     /// * `ntheta_subdiv` - number of subdivisions around the capsule (longitude)
     /// * `nphi_subdiv` - number of subdivisions along each hemisphere (latitude)
-    pub fn capsule_with_subdiv(r: f32, h: f32, ntheta_subdiv: u32, nphi_subdiv: u32) -> SceneNode3d {
+    pub fn capsule_with_subdiv(
+        r: f32,
+        h: f32,
+        ntheta_subdiv: u32,
+        nphi_subdiv: u32,
+    ) -> SceneNode3d {
         Self::render_mesh(
             procedural::capsule(r * 2.0, h, ntheta_subdiv, nphi_subdiv),
             Vec3::ONE,
@@ -539,7 +523,10 @@ impl SceneNode3d {
         }
 
         Self::mesh(
-            Rc::new(RefCell::new(GpuMesh3d::from_render_mesh(render_mesh, false))),
+            Rc::new(RefCell::new(GpuMesh3d::from_render_mesh(
+                render_mesh,
+                false,
+            ))),
             scale,
         )
     }
@@ -584,8 +571,16 @@ impl SceneNode3d {
     /// * `inner_cone_angle` - Inner cone angle in radians (full intensity)
     /// * `outer_cone_angle` - Outer cone angle in radians (fades to zero)
     /// * `attenuation_radius` - Maximum distance the light affects
-    pub fn new_spot_light(inner_cone_angle: f32, outer_cone_angle: f32, attenuation_radius: f32) -> SceneNode3d {
-        Self::new_light(Light::spot(inner_cone_angle, outer_cone_angle, attenuation_radius))
+    pub fn new_spot_light(
+        inner_cone_angle: f32,
+        outer_cone_angle: f32,
+        attenuation_radius: f32,
+    ) -> SceneNode3d {
+        Self::new_light(Light::spot(
+            inner_cone_angle,
+            outer_cone_angle,
+            attenuation_radius,
+        ))
     }
 
     /// Removes this node from its parent in the scene graph.

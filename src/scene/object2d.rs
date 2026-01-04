@@ -4,7 +4,7 @@ use crate::camera::Camera2d;
 use crate::color::Color;
 use crate::resource::vertex_index::VertexIndex;
 use crate::resource::{
-    AllocationType, BufferType, GPUVec, GpuData, Material2d, GpuMesh2d, RenderContext2d, Texture,
+    AllocationType, BufferType, GPUVec, GpuData, GpuMesh2d, Material2d, RenderContext2d, Texture,
     TextureManager,
 };
 use glamx::{Mat2, Pose2, Vec2};

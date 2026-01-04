@@ -543,7 +543,8 @@ fn reformat(
                 BufferType::ElementArray,
                 AllocationType::StaticDraw,
             )));
-            let mesh = GpuMesh3d::new_with_gpu_vectors(resc.clone(), fs, resn.clone(), resu.clone());
+            let mesh =
+                GpuMesh3d::new_with_gpu_vectors(resc.clone(), fs, resn.clone(), resu.clone());
             meshes.push((name, mesh, mtl))
         }
     }

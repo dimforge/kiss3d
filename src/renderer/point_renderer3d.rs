@@ -1,12 +1,12 @@
 //! A batched point renderer.
 
 use crate::camera::Camera3d;
+use crate::color::Color;
 use crate::context::Context;
 use crate::renderer::Renderer3d;
 use crate::resource::RenderContext;
 use bytemuck::{Pod, Zeroable};
 use glamx::Vec3;
-use crate::color::Color;
 
 /// Point data for storage buffer (position + size + color).
 /// Layout must match points.wgsl PointData struct.

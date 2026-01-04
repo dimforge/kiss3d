@@ -26,9 +26,10 @@ async fn main() {
         .add_cylinder(0.5, 1.0)
         .set_color(Color::new(random(), random(), random(), 1.0))
         .set_position(Vec3::new(-4.0, 0.0, 0.0));
-    let mut a = scene
-        .add_capsule(0.5, 1.0)
-        .set_color(Color::new(random(), random(), random(), 1.0));
+    let mut a =
+        scene
+            .add_capsule(0.5, 1.0)
+            .set_color(Color::new(random(), random(), random(), 1.0));
 
     let rot = Quat::from_axis_angle(Vec3::Y, 0.014);
 

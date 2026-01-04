@@ -2,7 +2,9 @@ use crate::camera::Camera3d;
 use crate::context::Context;
 use crate::light::{LightCollection, LightType, MAX_LIGHTS};
 use crate::resource::vertex_index::VERTEX_INDEX_FORMAT;
-use crate::resource::{DynamicUniformBuffer, GpuData, GpuMesh3d, Material3d, RenderContext, Texture};
+use crate::resource::{
+    DynamicUniformBuffer, GpuData, GpuMesh3d, Material3d, RenderContext, Texture,
+};
 use crate::scene::{InstancesBuffer3d, ObjectData3d};
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat3, Pose3, Vec3};
@@ -514,7 +516,8 @@ impl ObjectMaterial {
 
         // Create default PBR textures
         let default_normal_map = crate::resource::Texture::new_default_normal_map();
-        let default_metallic_roughness_map = crate::resource::Texture::new_default_metallic_roughness_map();
+        let default_metallic_roughness_map =
+            crate::resource::Texture::new_default_metallic_roughness_map();
         let default_ao_map = crate::resource::Texture::new_default_ao_map();
         let default_emissive_map = crate::resource::Texture::new_default_emissive_map();
 
@@ -1397,7 +1400,9 @@ impl Material3d for ObjectMaterial {
             for (i, collected_light) in lights.lights.iter().take(MAX_LIGHTS).enumerate() {
                 let (light_type, inner_cone_cos, outer_cone_cos, attenuation_radius) =
                     match &collected_light.light_type {
-                        LightType::Point { attenuation_radius } => (0u32, 1.0, 0.0, *attenuation_radius),
+                        LightType::Point { attenuation_radius } => {
+                            (0u32, 1.0, 0.0, *attenuation_radius)
+                        }
                         LightType::Directional(_) => (1u32, 1.0, 0.0, 0.0),
                         LightType::Spot {
                             inner_cone_angle,
@@ -1506,10 +1511,22 @@ impl Material3d for ObjectMaterial {
             roughness: data.roughness(),
             _pad0: [0.0; 2],
             emissive: [emissive.r, emissive.g, emissive.b, emissive.a],
-            has_normal_map: if data.normal_map().is_some() { 1.0 } else { 0.0 },
-            has_metallic_roughness_map: if data.metallic_roughness_map().is_some() { 1.0 } else { 0.0 },
+            has_normal_map: if data.normal_map().is_some() {
+                1.0
+            } else {
+                0.0
+            },
+            has_metallic_roughness_map: if data.metallic_roughness_map().is_some() {
+                1.0
+            } else {
+                0.0
+            },
             has_ao_map: if data.ao_map().is_some() { 1.0 } else { 0.0 },
-            has_emissive_map: if data.emissive_map().is_some() { 1.0 } else { 0.0 },
+            has_emissive_map: if data.emissive_map().is_some() {
+                1.0
+            } else {
+                0.0
+            },
         };
 
         // Push to dynamic buffer and store offset in gpu_data
@@ -1563,7 +1580,12 @@ impl Material3d for ObjectMaterial {
                 transform: formatted_transform.to_cols_array_2d(),
                 scale: scale.into(),
                 num_vertices: cached_num_vertices,
-                default_color: [points_color.r, points_color.g, points_color.b, points_color.a],
+                default_color: [
+                    points_color.r,
+                    points_color.g,
+                    points_color.b,
+                    points_color.a,
+                ],
                 default_size: data.points_size(),
                 use_perspective: if data.points_use_perspective() { 1 } else { 0 },
                 _padding: [0.0; 2],
@@ -1694,7 +1716,9 @@ impl Material3d for ObjectMaterial {
 
         // Cache PBR texture bind group, invalidate if any PBR texture changed
         let normal_map = data.normal_map().unwrap_or(&self.default_normal_map);
-        let metallic_roughness_map = data.metallic_roughness_map().unwrap_or(&self.default_metallic_roughness_map);
+        let metallic_roughness_map = data
+            .metallic_roughness_map()
+            .unwrap_or(&self.default_metallic_roughness_map);
         let ao_map = data.ao_map().unwrap_or(&self.default_ao_map);
         let emissive_map = data.emissive_map().unwrap_or(&self.default_emissive_map);
 

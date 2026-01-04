@@ -24,10 +24,7 @@ async fn main() {
                     println!("mouse press event on {:?} with {:?}", button, modif);
                     let world_pos = camera.unproject(cursor_pos, window_size);
                     click_positions.push(world_pos);
-                    println!(
-                        "placed cross at {:?} (screen: {:?})",
-                        world_pos, cursor_pos
-                    );
+                    println!("placed cross at {:?} (screen: {:?})", world_pos, cursor_pos);
                 }
                 WindowEvent::CursorPos(x, y, _modif) => {
                     cursor_pos = Vec2::new(x as f32, y as f32);

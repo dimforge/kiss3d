@@ -200,7 +200,7 @@ fn draw_polyline(window: &mut Window, polyline: &[Vec2], points: &[Vec2]) {
             Vec3::new(pt[1].x, pt[1].y, 0.0),
             GREEN,
             10.0,
-            false
+            false,
         );
     }
 
@@ -210,7 +210,7 @@ fn draw_polyline(window: &mut Window, polyline: &[Vec2], points: &[Vec2]) {
         Vec3::new(polyline[last].x, polyline[last].y, 0.0),
         GREEN,
         6.0,
-        false
+        false,
     );
 
     for pt in points.iter() {

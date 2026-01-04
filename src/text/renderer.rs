@@ -2,6 +2,7 @@
 // available under the BSD-3 licence.
 // It has been modified to work with wgpu, nalgebra, and rusttype
 
+use crate::color::Color;
 use crate::context::Context;
 use crate::resource::RenderContext2dEncoder;
 use crate::text::Font;
@@ -10,7 +11,6 @@ use glamx::Vec2;
 use rusttype;
 use rusttype::gpu_cache::Cache;
 use std::sync::Arc;
-use crate::color::Color;
 
 /// Vertex data for a text quad.
 #[repr(C)]
@@ -264,14 +264,7 @@ impl TextRenderer {
     /// Adds a piece of text to be drawn during the next frame. The text is not persistent between
     /// frames. This method must be called for each text to draw, and at each update loop
     /// iteration.
-    pub fn draw_text(
-        &mut self,
-        text: &str,
-        pos: Vec2,
-        scale: f32,
-        font: &Arc<Font>,
-        color: Color,
-    ) {
+    pub fn draw_text(&mut self, text: &str, pos: Vec2, scale: f32, font: &Arc<Font>, color: Color) {
         self.text.push_str(text);
         self.contexts.push(TextRenderContext {
             len: text.len(),

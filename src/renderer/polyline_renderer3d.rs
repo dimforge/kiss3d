@@ -4,12 +4,12 @@
 //! which uses instanced rendering to draw thick lines efficiently.
 
 use crate::camera::Camera3d;
+use crate::color::Color;
 use crate::context::Context;
 use crate::renderer::Renderer3d;
 use crate::resource::RenderContext;
 use bytemuck::{Pod, Zeroable};
 use glamx::{Pose3, Vec3};
-use crate::color::Color;
 
 /// A line segment with two endpoints and per-segment material properties.
 /// This allows rendering all segments in a single draw call.
@@ -284,7 +284,12 @@ impl PolylineRenderer3d {
         }
 
         let transform = polyline.transform;
-        let color = [polyline.color.r, polyline.color.g, polyline.color.b, polyline.color.a];
+        let color = [
+            polyline.color.r,
+            polyline.color.g,
+            polyline.color.b,
+            polyline.color.a,
+        ];
         let width = polyline.width;
         let depth_bias = polyline.depth_bias;
         let perspective = if polyline.perspective { 1 } else { 0 };
@@ -305,14 +310,7 @@ impl PolylineRenderer3d {
     }
 
     /// Draws a simple line segment with the given width.
-    pub fn draw_line(
-        &mut self,
-        a: Vec3,
-        b: Vec3,
-        color: Color,
-        width: f32,
-        perspective: bool,
-    ) {
+    pub fn draw_line(&mut self, a: Vec3, b: Vec3, color: Color, width: f32, perspective: bool) {
         self.segments.push(LineSegment {
             point_a: a.into(),
             width,

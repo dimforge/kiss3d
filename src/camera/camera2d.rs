@@ -9,8 +9,8 @@ use glamx::{Mat3, Vec2};
 ///
 /// # Implementations
 /// kiss3d provides built-in 2D camera types:
-/// - [`FixedView2d`](crate::camera2d::FixedView2d) - Static 2D camera
-/// - [`PanZoomCamera2d`](crate::camera2d::PanZoomCamera2d) - Side-scrolling camera
+/// - [`FixedView2d`](crate::camera::FixedView2d) - Static 2D camera
+/// - [`PanZoomCamera2d`](crate::camera::PanZoomCamera2d) - Side-scrolling camera
 pub trait Camera2d {
     /// Handles window events to update camera state.
     ///

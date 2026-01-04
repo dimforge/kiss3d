@@ -2,7 +2,7 @@ use crate::camera::Camera2d;
 use crate::context::Context;
 use crate::resource::vertex_index::VERTEX_INDEX_FORMAT;
 use crate::resource::{
-    DynamicUniformBuffer, GpuData, Material2d, GpuMesh2d, RenderContext2d, Texture,
+    DynamicUniformBuffer, GpuData, GpuMesh2d, Material2d, RenderContext2d, Texture,
 };
 use crate::scene::{InstancesBuffer2d, ObjectData2d};
 use bytemuck::{Pod, Zeroable};

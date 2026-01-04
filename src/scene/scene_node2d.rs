@@ -1,8 +1,10 @@
 use crate::camera::Camera2d;
+use crate::color::Color;
 use crate::prelude::InstanceData2d;
 use crate::resource::vertex_index::VertexIndex;
 use crate::resource::{
-    Material2d, MaterialManager2d, GpuMesh2d, MeshManager2d, RenderContext2d, Texture, TextureManager,
+    GpuMesh2d, Material2d, MaterialManager2d, MeshManager2d, RenderContext2d, Texture,
+    TextureManager,
 };
 use crate::scene::Object2d;
 use glamx::{Pose2, Rot2, Vec2};
@@ -11,7 +13,6 @@ use std::f32;
 use std::path::Path;
 use std::rc::{Rc, Weak};
 use std::sync::Arc;
-use crate::color::Color;
 
 // XXX: once something like `fn foo(self: Rc<RefCell<SceneNode2d>>)` is allowed, this extra struct
 // will not be needed any more.

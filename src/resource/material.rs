@@ -1,10 +1,10 @@
 //! Trait implemented by materials.
 
-use crate::camera::Camera3d;
 use crate::camera::Camera2d;
+use crate::camera::Camera3d;
 use crate::light::LightCollection;
-use crate::resource::{GpuMesh3d, GpuMesh2d};
-use crate::scene::{InstancesBuffer3d, InstancesBuffer2d, ObjectData3d, ObjectData2d};
+use crate::resource::{GpuMesh2d, GpuMesh3d};
+use crate::scene::{InstancesBuffer2d, InstancesBuffer3d, ObjectData2d, ObjectData3d};
 use glamx::{Pose2, Pose3, Vec2, Vec3};
 use std::any::Any;
 

@@ -1,11 +1,11 @@
 //! A batched 2D point renderer.
 
 use crate::camera::Camera2d;
+use crate::color::Color;
 use crate::context::Context;
 use crate::resource::RenderContext2dEncoder;
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat3, Vec2};
-use crate::color::Color;
 
 /// Point data for storage buffer (position + size + color).
 /// Layout must match planar_points.wgsl PointData struct.

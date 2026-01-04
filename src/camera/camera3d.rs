@@ -12,7 +12,7 @@ use glamx::{Mat4, Pose3, Vec2, Vec3, Vec4, Vec4Swizzles};
 /// kiss3d provides several built-in camera types:
 /// - [`OrbitCamera3d`](crate::camera::OrbitCamera3d) - Orbital camera (default)
 /// - [`FirstPersonCamera3d`](crate::camera::FirstPersonCamera3d) - FPS-style camera
-/// - [`FixedView`](crate::camera::FixedView) - Static camera with fixed view
+/// - [`FixedView3d`](crate::camera::FixedView3d) - Static camera with fixed view
 ///
 /// # Custom Cameras
 /// You can implement this trait to create custom camera behaviors.

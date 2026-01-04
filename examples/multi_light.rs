@@ -45,7 +45,6 @@ async fn main() {
         .add_light(Light::point(20.0).with_color(BLUE).with_intensity(5.0))
         .set_position(Vec3::new(3.0, 2.0, 0.0));
 
-
     let rot = Quat::from_axis_angle(Vec3::Y, 0.01);
     let mut time = 0.0f32;
 
@@ -54,15 +53,7 @@ async fn main() {
 
         // Animate the lights in a circular pattern
         time -= 0.02;
-        red_light.set_position(Vec3::new(
-            -3.0 * time.cos(),
-            3.0 * time.sin(),
-            2.0,
-        ));
-        blue_light.set_position(Vec3::new(
-            2.0,
-            3.0 * time.sin(),
-            -3.0 * time.cos(),
-        ));
+        red_light.set_position(Vec3::new(-3.0 * time.cos(), 3.0 * time.sin(), 2.0));
+        blue_light.set_position(Vec3::new(2.0, 3.0 * time.sin(), -3.0 * time.cos()));
     }
 }

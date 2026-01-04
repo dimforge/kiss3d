@@ -1,7 +1,7 @@
 //! Event handling functionality.
 
-use crate::camera::Camera3d;
 use crate::camera::Camera2d;
+use crate::camera::Camera3d;
 use crate::event::{Action, EventManager, Key, MouseButton, WindowEvent};
 
 use super::Window;
@@ -73,7 +73,11 @@ impl Window {
     }
 
     #[inline]
-    pub(crate) fn handle_events(&mut self, camera: &mut dyn Camera3d, camera_2d: &mut dyn Camera2d) {
+    pub(crate) fn handle_events(
+        &mut self,
+        camera: &mut dyn Camera3d,
+        camera_2d: &mut dyn Camera2d,
+    ) {
         let unhandled_events = self.unhandled_events.clone(); // TODO: could we avoid the clone?
         let events = self.events.clone(); // TODO: could we avoid the clone?
 

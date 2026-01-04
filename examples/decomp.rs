@@ -1,12 +1,12 @@
-use kiss3d::prelude::*;
-use web_time::Instant;
 use kiss3d::parry3d::shape::TriMesh;
 use kiss3d::parry3d::transformation;
 use kiss3d::parry3d::transformation::vhacd::VHACDParameters;
+use kiss3d::prelude::*;
 use rand::random;
 use std::env;
 use std::path::Path;
 use std::str::FromStr;
+use web_time::Instant;
 
 fn usage(exe_name: &str) {
     println!("Usage: {} obj_file scale clusters concavity", exe_name);
@@ -85,7 +85,9 @@ async fn main() {
                     let b = random();
 
                     if let Ok(trimesh) = TriMesh::new(vtx, idx) {
-                        scene.add_trimesh(trimesh, scale, true).set_color(Color::new(r, g, b, 1.0));
+                        scene
+                            .add_trimesh(trimesh, scale, true)
+                            .set_color(Color::new(r, g, b, 1.0));
                     }
                 }
             }

@@ -8,9 +8,7 @@ async fn main() {
     scene
         .add_light(Light::point(100.0))
         .set_position(Vec3::new(0.0, 10.0, 10.0));
-    let mut cube = scene
-        .add_cube(1.0, 1.0, 1.0)
-        .set_color(RED);
+    let mut cube = scene.add_cube(1.0, 1.0, 1.0).set_color(RED);
 
     let eye = Vec3::new(1.0f32, 2.0, 10.0);
     let at = Vec3::ZERO;

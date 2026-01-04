@@ -6,16 +6,18 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
-use glamx::UVec2;
-use image::{GenericImage, Pixel};
 use crate::color::{Color, BLACK};
 use crate::context::Context;
 use crate::event::WindowEvent;
-use crate::renderer::{PointRenderer3d, PolylineRenderer3d, PointRenderer2d, PolylineRenderer2d};
-use crate::resource::{FramebufferManager, MaterialManager2d, MeshManager2d, RenderTarget, Texture, TextureManager};
+use crate::renderer::{PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d};
+use crate::resource::{
+    FramebufferManager, MaterialManager2d, MeshManager2d, RenderTarget, Texture, TextureManager,
+};
 use crate::text::TextRenderer;
 use crate::window::canvas::CanvasSetup;
 use crate::window::Canvas;
+use glamx::UVec2;
+use image::{GenericImage, Pixel};
 
 #[cfg(feature = "egui")]
 pub(super) use super::egui_integration::EguiContext;
@@ -231,12 +233,7 @@ impl Window {
         self.canvas.scale_factor()
     }
 
-    /// Sets the light mode for the scene.
-    ///
-    /// Currently, only one light is supported. The light affects how 3D objects are rendered.
-    ///
-    /// # Arguments
-    /// * `light` - The light configuration (see [`Light`])
+    /// Sets the ambient light intensity for the scene.
     ///
     /// # Example
     /// ```no_run

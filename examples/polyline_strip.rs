@@ -17,7 +17,9 @@ async fn main() {
     window.set_background_color(Color::new(0.2, 0.2, 0.25, 1.0));
 
     // Add a cube to show the polyline around
-    let mut cube = scene.add_cube(1.0, 1.0, 1.0).set_color(Color::new(0.5, 0.55, 1.0, 1.0));
+    let mut cube = scene
+        .add_cube(1.0, 1.0, 1.0)
+        .set_color(Color::new(0.5, 0.55, 1.0, 1.0));
 
     // Create base polyline once (vertices in local space)
     let mut polyline = Polyline3d::new(vec![

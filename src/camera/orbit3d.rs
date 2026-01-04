@@ -1,9 +1,9 @@
+use crate::camera::first_person3d::CoordSystemRh;
 use crate::camera::Camera3d;
 use crate::event::{Action, Key, Modifiers, MouseButton, WindowEvent};
 use crate::window::Canvas;
 use glamx::{Mat4, Pose3, Vec2, Vec3};
 use std::f32;
-use crate::camera::first_person3d::CoordSystemRh;
 
 /// Arc-ball camera mode.
 ///
@@ -553,4 +553,3 @@ impl Camera3d for OrbitCamera3d {
 
     fn update(&mut self, _: &Canvas) {}
 }
-

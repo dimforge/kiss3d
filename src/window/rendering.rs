@@ -10,10 +10,10 @@ use crate::post_processing::{PostProcessingContext, PostProcessingEffect};
 use crate::prelude::FixedView2d;
 use crate::renderer::Renderer3d;
 use crate::resource::{
-    MaterialManager3d, MaterialManager2d, RenderContext, RenderContext2d, RenderContext2dEncoder,
+    MaterialManager2d, MaterialManager3d, RenderContext, RenderContext2d, RenderContext2dEncoder,
     RenderTarget,
 };
-use crate::scene::{SceneNode3d, SceneNode2d};
+use crate::scene::{SceneNode2d, SceneNode3d};
 
 use super::Window;
 
@@ -183,9 +183,7 @@ impl Window {
 
             // Phase 1: Prepare - collect uniforms in CPU memory and gather lights from scene
             if let Some(scene) = scene.as_deref_mut() {
-                scene
-                    .data_mut()
-                    .prepare(pass, camera, &mut lights, w, h);
+                scene.data_mut().prepare(pass, camera, &mut lights, w, h);
             }
 
             // Phase 2: Flush - upload all batched uniforms to GPU
@@ -224,7 +222,14 @@ impl Window {
                 });
 
                 if let Some(scene) = scene.as_deref_mut() {
-                    self.render_scene(scene, camera, &lights, pass, &mut wgpu_render_pass, &render_context);
+                    self.render_scene(
+                        scene,
+                        camera,
+                        &lights,
+                        pass,
+                        &mut wgpu_render_pass,
+                        &render_context,
+                    );
                 }
 
                 // Custom renderer still needs the old interface - drop render pass first

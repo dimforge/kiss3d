@@ -10,9 +10,10 @@ async fn main() {
         .add_light(Light::point(100.0))
         .set_position(Vec3::new(0.0, 10.0, 10.0));
 
-    let mut c = scene
-        .add_quad(5.0, 4.0, 100, 100)
-        .set_color(Color::new(random(), random(), random(), 1.0));
+    let mut c =
+        scene
+            .add_quad(5.0, 4.0, 100, 100)
+            .set_color(Color::new(random(), random(), random(), 1.0));
 
     let mut time = 0.016f32;
 

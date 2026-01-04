@@ -39,7 +39,8 @@ impl Window {
     /// ```
     #[inline]
     pub fn draw_line(&mut self, a: Vec3, b: Vec3, color: Color, width: f32, perspective: bool) {
-        self.polyline_renderer.draw_line(a, b, color, width, perspective);
+        self.polyline_renderer
+            .draw_line(a, b, color, width, perspective);
     }
 
     /// Draws a 2D line for the current frame.
@@ -161,14 +162,7 @@ impl Window {
     /// * `font` - A reference to the font to use
     /// * `color` - RGBA color (each component from 0.0 to 1.0)
     #[inline]
-    pub fn draw_text(
-        &mut self,
-        text: &str,
-        pos: Vec2,
-        scale: f32,
-        font: &Arc<Font>,
-        color: Color,
-    ) {
+    pub fn draw_text(&mut self, text: &str, pos: Vec2, scale: f32, font: &Arc<Font>, color: Color) {
         self.text_renderer.draw_text(text, pos, scale, font, color);
     }
 }
