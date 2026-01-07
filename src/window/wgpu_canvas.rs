@@ -23,6 +23,7 @@ use winit::window::{Icon, Window, WindowAttributes};
 
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
+use wgpu::ExperimentalFeatures;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
@@ -252,6 +253,7 @@ impl WgpuCanvas {
                     required_limits: limits,
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
+                    experimental_features: ExperimentalFeatures::default(),
                 })
                 .await
                 .expect("Failed to create device");
@@ -1069,7 +1071,7 @@ impl WgpuCanvas {
         });
 
         // Wait for the GPU to finish
-        let _ = ctxt.device.poll(wgpu::PollType::Wait);
+        let _ = ctxt.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().unwrap().unwrap();
 
         // Read the data

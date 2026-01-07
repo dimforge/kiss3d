@@ -51,7 +51,7 @@ parry3d      = { version = "0.25", optional = true }
 rgb          = "0.8"
 rusttype     = { version = "0.9", features = ["gpu_cache"] }
 serde        = { version = "1", features = ["derive"], optional = true }
-wgpu         = "25"
+wgpu         = "27"
 winit        = "0.30"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
