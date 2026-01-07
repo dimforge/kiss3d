@@ -1,3 +1,7 @@
+# v0.39.1
+
+Update website links in documentations.
+
 # v0.39.0
 
 Major API overhaul: scene separation from window, glam math library, simplified transform API, and 2D/3D naming conventions.

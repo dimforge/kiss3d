@@ -1,7 +1,7 @@
 [package]
 authors = ["Sébastien Crozet <developer@crozet.re>"]
 name    = "kiss3d"
-version = "0.39.0"
+version = "0.39.1"
 
 autoexamples = true
 description  = "Keep it simple, stupid, 2D and 3D graphics engine for Rust."
@@ -95,6 +95,6 @@ name = "procedural"
 required-features = ["parry"]
 
 [patch.crates-io]
-glamx = { path = "../../glamx" }
+#glamx = { path = "../../glamx" }
 #parry3d = { path = "../../parry/crates/parry3d" }
 #parry2d = { path = "../../parry/crates/parry2d" }
