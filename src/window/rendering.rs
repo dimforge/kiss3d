@@ -156,7 +156,7 @@ impl Window {
                         }),
                         store: wgpu::StoreOp::Store,
                     },
-                    depth_slice: None
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: &depth_view,
@@ -209,7 +209,7 @@ impl Window {
                             load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
                         },
-                        depth_slice: None
+                        depth_slice: None,
                     })],
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &depth_view,
@@ -249,7 +249,7 @@ impl Window {
                                     load: wgpu::LoadOp::Load,
                                     store: wgpu::StoreOp::Store,
                                 },
-                                depth_slice: None
+                                depth_slice: None,
                             })],
                             depth_stencil_attachment: Some(
                                 wgpu::RenderPassDepthStencilAttachment {
@@ -262,7 +262,7 @@ impl Window {
                                 },
                             ),
                             timestamp_writes: None,
-                            occlusion_query_set: None
+                            occlusion_query_set: None,
                         });
                     renderer.render(pass, camera, &mut custom_render_pass, &render_context);
                 }
@@ -302,7 +302,7 @@ impl Window {
                             load: wgpu::LoadOp::Load,
                             store: wgpu::StoreOp::Store,
                         },
-                        depth_slice: None
+                        depth_slice: None,
                     })],
                     depth_stencil_attachment: None,
                     timestamp_writes: None,

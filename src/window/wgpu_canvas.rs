@@ -23,11 +23,11 @@ use winit::window::{Icon, Window, WindowAttributes};
 
 #[cfg(target_arch = "wasm32")]
 use std::rc::Rc;
-use wgpu::ExperimentalFeatures;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+use wgpu::ExperimentalFeatures;
 
 // Thread-local EventLoop singleton for native platforms.
 // winit only allows one EventLoop per program, so we store it in thread-local

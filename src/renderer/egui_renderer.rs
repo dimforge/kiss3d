@@ -63,7 +63,7 @@ impl EguiRenderer {
                 msaa_samples: 1,
                 dithering: true,
                 ..Default::default()
-            }
+            },
         );
 
         // Apply textures from the dummy pass (font textures, etc.)
@@ -161,7 +161,7 @@ impl EguiRenderer {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
-                    depth_slice: None
+                    depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
