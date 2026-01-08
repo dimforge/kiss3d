@@ -27,6 +27,7 @@ use std::rc::Rc;
 use wasm_bindgen::prelude::*;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsCast;
+use wgpu::ExperimentalFeatures;
 
 // Thread-local EventLoop singleton for native platforms.
 // winit only allows one EventLoop per program, so we store it in thread-local
@@ -252,6 +253,7 @@ impl WgpuCanvas {
                     required_limits: limits,
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
+                    experimental_features: ExperimentalFeatures::default(),
                 })
                 .await
                 .expect("Failed to create device");
@@ -1069,7 +1071,7 @@ impl WgpuCanvas {
         });
 
         // Wait for the GPU to finish
-        let _ = ctxt.device.poll(wgpu::PollType::Wait);
+        let _ = ctxt.device.poll(wgpu::PollType::wait_indefinitely());
         rx.recv().unwrap().unwrap();
 
         // Read the data

@@ -2,6 +2,7 @@
 
 use crate::context::Context;
 use egui::{Context as EguiContext, RawInput};
+use egui_wgpu::RendererOptions;
 
 /// Structure which manages the egui UI rendering.
 pub struct EguiRenderer {
@@ -50,18 +51,25 @@ impl EguiRenderer {
         // Run a dummy frame to initialize fonts with correct DPI
         let dummy_input = RawInput::default();
         egui_ctx.begin_pass(dummy_input);
-        let _ = egui_ctx.end_pass();
+        let dummy_output = egui_ctx.end_pass();
 
         let ctxt = Context::get();
 
         // Create the egui-wgpu renderer
-        let renderer = egui_wgpu::Renderer::new(
+        let mut renderer = egui_wgpu::Renderer::new(
             &ctxt.device,
             ctxt.surface_format,
-            Some(Context::depth_format()),
-            1,    // sample count
-            true, // dithering
+            RendererOptions {
+                msaa_samples: 1,
+                dithering: true,
+                ..Default::default()
+            },
         );
+
+        // Apply textures from the dummy pass (font textures, etc.)
+        for (id, image_delta) in &dummy_output.textures_delta.set {
+            renderer.update_texture(&ctxt.device, &ctxt.queue, *id, image_delta);
+        }
 
         EguiRenderer {
             egui_ctx,
@@ -107,7 +115,7 @@ impl EguiRenderer {
     pub fn render(
         &mut self,
         color_view: &wgpu::TextureView,
-        depth_view: &wgpu::TextureView,
+        _depth_view: &wgpu::TextureView,
         width: u32,
         height: u32,
         scale_factor: f32,
@@ -143,6 +151,7 @@ impl EguiRenderer {
 
         // Render
         {
+            // egui doesn't need depth testing - it renders 2D overlays
             let render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui_render_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -152,15 +161,9 @@ impl EguiRenderer {
                         load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
+                    depth_slice: None,
                 })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
+                depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });

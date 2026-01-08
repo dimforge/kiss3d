@@ -7,7 +7,7 @@ pub enum RenderTarget {
     /// The screen (main surface).
     Screen,
     /// An off-screen buffer.
-    Offscreen(OffscreenBuffers),
+    Offscreen(Box<OffscreenBuffers>),
 }
 
 /// wgpu resources for an off-screen render target.
@@ -78,7 +78,7 @@ impl RenderTarget {
             RenderTarget::Offscreen(o) => {
                 if o.width != width || o.height != height {
                     // Recreate textures with new size
-                    *o = OffscreenBuffers::new(width, height, surface_format, true);
+                    **o = OffscreenBuffers::new(width, height, surface_format, true);
                 }
             }
         }
@@ -193,12 +193,12 @@ impl FramebufferManager {
         height: u32,
         create_depth_texture: bool,
     ) -> RenderTarget {
-        RenderTarget::Offscreen(OffscreenBuffers::new(
+        RenderTarget::Offscreen(Box::new(OffscreenBuffers::new(
             width,
             height,
             self.surface_format,
             create_depth_texture,
-        ))
+        )))
     }
 
     /// Returns the render target associated with the screen.
