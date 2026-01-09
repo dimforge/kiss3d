@@ -1,17 +1,18 @@
-<a align="center" href="https://kiss3d.rs">
-  <a href="https://kiss3d.rs"><img src="assets/kiss3d-logo.png" alt="crates.io" width="500px"></a>
-</a>
 
 <p align="center">
-    <a href="https://discord.gg/vt9DJSW">
-        <img src="https://img.shields.io/discord/507548572338880513.svg?logo=discord&colorB=7289DA">
-    </a>
-    <a href="https://github.com/dimforge/kiss3d/actions">
-        <img src="https://github.com/dimforge/kiss3d/workflows/CI%20build/badge.svg" alt="Build status">
-    </a>
-    <a href="https://crates.io/crates/kiss3d">
-         <img src="https://img.shields.io/crates/v/kiss3d.svg?style=flat-square" alt="crates.io">
-    </a>
+  <a align="center" href="https://kiss3d.rs">
+    <a href="https://kiss3d.rs"><img src="assets/kiss3d-logo.png" alt="crates.io" width="500px"></a>
+  </a>
+  <br/>
+  <a href="https://discord.gg/vt9DJSW">
+      <img src="https://img.shields.io/discord/507548572338880513.svg?logo=discord&colorB=7289DA">
+  </a>
+  <a href="https://github.com/dimforge/kiss3d/actions">
+      <img src="https://github.com/dimforge/kiss3d/workflows/CI%20build/badge.svg" alt="Build status">
+  </a>
+  <a href="https://crates.io/crates/kiss3d">
+       <img src="https://img.shields.io/crates/v/kiss3d.svg?style=flat-square" alt="crates.io">
+  </a>
 </p>
 
 Keep It Simple, Stupid 3D and 2D graphics engine.
@@ -106,7 +107,7 @@ Kiss3d supports recording your 3D scene to MP4 video files. This feature require
 **Enable the feature in your Cargo.toml:**
 ```toml
 [dependencies]
-kiss3d = { version = "0.37", features = ["recording"] }
+kiss3d = { version = "0.40", features = ["recording"] }
 ```
 
 #### Egui Integration
@@ -114,5 +115,5 @@ kiss3d = { version = "0.37", features = ["recording"] }
 For immediate mode GUI support, enable the `egui` feature:
 ```toml
 [dependencies]
-kiss3d = { version = "0.37", features = ["egui"] }
+kiss3d = { version = "0.40", features = ["egui"] }
 ```

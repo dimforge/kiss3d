@@ -47,7 +47,7 @@ log          = "0.4"
 glamx         = { version = "0.1", features = ["bytemuck"] }
 ffmpeg-the-third = { version = "4", optional = true }
 num-traits   = "0.2"
-parry3d      = { version = "0.25", optional = true }
+parry3d      = { version = "0.26", optional = true }
 rgb          = "0.8"
 rusttype     = { version = "0.9", features = ["gpu_cache"] }
 serde        = { version = "1", features = ["derive"], optional = true }
@@ -83,7 +83,7 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 env_logger = "0.11"
-parry2d    = "0.25"
+parry2d    = "0.26"
 rand       = "0.9"
 
 [[example]]
@@ -95,6 +95,6 @@ name = "procedural"
 required-features = ["parry"]
 
 [patch.crates-io]
-#glamx = { path = "../../glamx" }
-#parry3d = { path = "../../parry/crates/parry3d" }
-#parry2d = { path = "../../parry/crates/parry2d" }
+#glamx = { path = "../glamx" }
+#parry3d = { path = "../parry/crates/parry3d" }
+#parry2d = { path = "../parry/crates/parry2d" }
