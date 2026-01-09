@@ -14,11 +14,11 @@ async fn main() {
 
     g1.add_cube(1.0, 5.0, 1.0);
     g1.add_cube(5.0, 1.0, 1.0);
-    g1.set_color(RED);
+    g1.set_color_recursive(RED);
 
     g2.add_cube(1.0, 5.0, 1.0);
     g2.add_cube(1.0, 1.0, 5.0);
-    g2.set_color(GREEN);
+    g2.set_color_recursive(GREEN);
 
     let rot1 = Quat::from_axis_angle(Vec3::Y, 0.014);
     let rot2 = Quat::from_axis_angle(Vec3::X, 0.014);

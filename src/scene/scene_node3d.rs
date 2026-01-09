@@ -936,41 +936,62 @@ impl SceneNode3d {
         result.unwrap()
     }
 
-    /// Applies a closure to each object contained by this node and its children.
+    /// Applies a closure to each object contained by this node and its descendants.
     #[inline]
-    pub fn apply_to_scene_nodes_mut<F: FnMut(&mut SceneNode3d)>(&mut self, f: &mut F) {
+    pub fn apply_to_scene_nodes_mut_recursive<F: FnMut(&mut SceneNode3d)>(&mut self, f: &mut F) {
         f(self);
 
         for c in self.data_mut().children.iter_mut() {
-            c.apply_to_scene_nodes_mut(f)
+            c.apply_to_scene_nodes_mut_recursive(f)
         }
     }
 
-    /// Applies a closure to each object contained by this node and its children.
+    /// Applies a closure to each object contained by this node and its descendants.
     #[inline]
-    pub fn apply_to_scene_nodes<F: FnMut(&SceneNode3d)>(&self, f: &mut F) {
+    pub fn apply_to_scene_nodes_recursive<F: FnMut(&SceneNode3d)>(&self, f: &mut F) {
         f(self);
 
         for c in self.data().children.iter() {
-            c.apply_to_scene_nodes(f)
+            c.apply_to_scene_nodes_recursive(f)
         }
     }
 
     // TODO: for all those set_stuff, would it be more per formant to add a special case for when
     // we are on a leaf? (to avoid the call to a closure required by the apply_to_*).
-    /// Sets the material for all objects in this node and its children.
+    /// Sets the material for this node's object only.
     ///
     /// The material defines how the object is shaded (shader program and uniforms).
     ///
     /// # Arguments
     /// * `material` - The material to apply
+    ///
+    /// # See also
+    /// * [`Self::set_material_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_material(&mut self, material: Rc<RefCell<Box<dyn Material3d + 'static>>>) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_material(material.clone()));
+        self.apply_to_object_mut(&mut |o| o.set_material(material.clone()));
         self.clone()
     }
 
-    /// Sets the material by name for all objects in this node and its children.
+    /// Sets the material for this node's object and all its descendants.
+    ///
+    /// The material defines how the object is shaded (shader program and uniforms).
+    ///
+    /// # Arguments
+    /// * `material` - The material to apply
+    ///
+    /// # See also
+    /// * [`Self::set_material`] - to only modify this node.
+    #[inline]
+    pub fn set_material_recursive(
+        &mut self,
+        material: Rc<RefCell<Box<dyn Material3d + 'static>>>,
+    ) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_material(material.clone()));
+        self.clone()
+    }
+
+    /// Sets the material by name for this node's object only.
     ///
     /// The material must have been previously registered with the global material manager.
     ///
@@ -979,6 +1000,9 @@ impl SceneNode3d {
     ///
     /// # Panics
     /// Panics if the material with the given name doesn't exist
+    ///
+    /// # See also
+    /// * [`Self::set_material_with_name_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_material_with_name(&mut self, name: &str) -> Self {
         let material = MaterialManager3d::get_global_manager(|tm| {
@@ -990,144 +1014,375 @@ impl SceneNode3d {
         self.set_material(material)
     }
 
-    /// Sets the line width for wireframe rendering of objects in this node and its children.
+    /// Sets the material by name for this node's object and all its descendants.
+    ///
+    /// The material must have been previously registered with the global material manager.
+    ///
+    /// # Arguments
+    /// * `name` - The name of the registered material
+    ///
+    /// # Panics
+    /// Panics if the material with the given name doesn't exist
+    ///
+    /// # See also
+    /// * [`Self::set_material_with_name`] - to only modify this node.
+    #[inline]
+    pub fn set_material_with_name_recursive(&mut self, name: &str) -> Self {
+        let material = MaterialManager3d::get_global_manager(|tm| {
+            tm.get(name).unwrap_or_else(|| {
+                panic!("Invalid attempt to use the unregistered material: {}", name)
+            })
+        });
+
+        self.set_material_recursive(material)
+    }
+
+    /// Sets the line width for wireframe rendering of this node's object only.
     ///
     /// # Arguments
     /// * `width` - The line width
     /// * `use_perspective` - If true, width is in world units and scales with distance.
     ///   If false, width is in screen pixels and stays constant.
+    ///
+    /// # See also
+    /// * [`Self::set_lines_width_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_lines_width(&mut self, width: f32, use_perspective: bool) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_lines_width(width, use_perspective));
+        self.apply_to_object_mut(&mut |o| o.set_lines_width(width, use_perspective));
         self.clone()
     }
 
-    /// Sets the line color for wireframe rendering of objects in this node and its children.
+    /// Sets the line width for wireframe rendering of this node's object and all its descendants.
+    ///
+    /// # Arguments
+    /// * `width` - The line width
+    /// * `use_perspective` - If true, width is in world units and scales with distance.
+    ///   If false, width is in screen pixels and stays constant.
+    ///
+    /// # See also
+    /// * [`Self::set_lines_width`] - to only modify this node.
+    #[inline]
+    pub fn set_lines_width_recursive(&mut self, width: f32, use_perspective: bool) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_lines_width(width, use_perspective));
+        self.clone()
+    }
+
+    /// Sets the line color for wireframe rendering of this node's object only.
     ///
     /// # Arguments
     /// * `color` - The RGBA color for lines, or `None` to use the object's default color
+    ///
+    /// # See also
+    /// * [`Self::set_lines_color_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_lines_color(&mut self, color: Option<Color>) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_lines_color(color));
+        self.apply_to_object_mut(&mut |o| o.set_lines_color(color));
         self.clone()
     }
 
-    /// Sets the point size for point cloud rendering of objects in this node and its children.
+    /// Sets the line color for wireframe rendering of this node's object and all its descendants.
+    ///
+    /// # Arguments
+    /// * `color` - The RGBA color for lines, or `None` to use the object's default color
+    ///
+    /// # See also
+    /// * [`Self::set_lines_color`] - to only modify this node.
+    #[inline]
+    pub fn set_lines_color_recursive(&mut self, color: Option<Color>) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_lines_color(color));
+        self.clone()
+    }
+
+    /// Sets the point size for point cloud rendering of this node's object only.
     ///
     /// # Arguments
     /// * `size` - The point size
     /// * `use_perspective` - If true, size is in world units and scales with distance.
     ///   If false, size is in screen pixels and stays constant.
+    ///
+    /// # See also
+    /// * [`Self::set_points_size_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_points_size(&mut self, size: f32, use_perspective: bool) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_points_size(size, use_perspective));
+        self.apply_to_object_mut(&mut |o| o.set_points_size(size, use_perspective));
         self.clone()
     }
 
-    /// Sets the point color for point cloud rendering of objects in this node and its children.
+    /// Sets the point size for point cloud rendering of this node's object and all its descendants.
+    ///
+    /// # Arguments
+    /// * `size` - The point size
+    /// * `use_perspective` - If true, size is in world units and scales with distance.
+    ///   If false, size is in screen pixels and stays constant.
+    ///
+    /// # See also
+    /// * [`Self::set_points_size`] - to only modify this node.
+    #[inline]
+    pub fn set_points_size_recursive(&mut self, size: f32, use_perspective: bool) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_points_size(size, use_perspective));
+        self.clone()
+    }
+
+    /// Sets the point color for point cloud rendering of this node's object only.
     ///
     /// # Arguments
     /// * `color` - The RGBA color for points, or `None` to use the object's default color
+    ///
+    /// # See also
+    /// * [`Self::set_points_color_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_points_color(&mut self, color: Option<Color>) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_points_color(color));
+        self.apply_to_object_mut(&mut |o| o.set_points_color(color));
         self.clone()
     }
 
-    /// Enables or disables surface rendering for objects in this node and its children.
+    /// Sets the point color for point cloud rendering of this node's object and all its descendants.
+    ///
+    /// # Arguments
+    /// * `color` - The RGBA color for points, or `None` to use the object's default color
+    ///
+    /// # See also
+    /// * [`Self::set_points_color`] - to only modify this node.
+    #[inline]
+    pub fn set_points_color_recursive(&mut self, color: Option<Color>) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_points_color(color));
+        self.clone()
+    }
+
+    /// Enables or disables surface rendering for this node's object only.
     ///
     /// When disabled, only wireframe and points are rendered.
     ///
     /// # Arguments
     /// * `active` - `true` to enable surface rendering, `false` to disable it
+    ///
+    /// # See also
+    /// * [`Self::set_surface_rendering_activation_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_surface_rendering_activation(&mut self, active: bool) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_surface_rendering_activation(active));
+        self.apply_to_object_mut(&mut |o| o.set_surface_rendering_activation(active));
         self.clone()
     }
 
-    /// Enables or disables backface culling for objects in this node and its children.
+    /// Enables or disables surface rendering for this node's object and all its descendants.
+    ///
+    /// When disabled, only wireframe and points are rendered.
+    ///
+    /// # Arguments
+    /// * `active` - `true` to enable surface rendering, `false` to disable it
+    ///
+    /// # See also
+    /// * [`Self::set_surface_rendering_activation`] - to only modify this node.
+    #[inline]
+    pub fn set_surface_rendering_activation_recursive(&mut self, active: bool) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_surface_rendering_activation(active));
+        self.clone()
+    }
+
+    /// Enables or disables backface culling for this node's object only.
     ///
     /// Backface culling improves performance by not rendering triangles facing away from the camera.
     ///
     /// # Arguments
     /// * `active` - `true` to enable backface culling, `false` to disable it
+    ///
+    /// # See also
+    /// * [`Self::enable_backface_culling_recursive`] - to also modify all descendants.
     #[inline]
     pub fn enable_backface_culling(&mut self, active: bool) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.enable_backface_culling(active));
+        self.apply_to_object_mut(&mut |o| o.enable_backface_culling(active));
         self.clone()
     }
 
-    /// Mutably accesses the vertices of the objects contained by this node and its children.
+    /// Enables or disables backface culling for this node's object and all its descendants.
     ///
-    /// The provided closure is called once per object.
+    /// Backface culling improves performance by not rendering triangles facing away from the camera.
+    ///
+    /// # Arguments
+    /// * `active` - `true` to enable backface culling, `false` to disable it
+    ///
+    /// # See also
+    /// * [`Self::enable_backface_culling`] - to only modify this node.
+    #[inline]
+    pub fn enable_backface_culling_recursive(&mut self, active: bool) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.enable_backface_culling(active));
+        self.clone()
+    }
+
+    /// Mutably accesses the vertices of this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::modify_vertices_recursive`] - to also modify all descendants.
     #[inline(always)]
     pub fn modify_vertices<F: FnMut(&mut Vec<Vec3>)>(&mut self, f: &mut F) {
-        self.apply_to_objects_mut(&mut |o| o.modify_vertices(f))
+        self.apply_to_object_mut(&mut |o| o.modify_vertices(f))
     }
 
-    /// Accesses the vertices of the objects contained by this node and its children.
+    /// Mutably accesses the vertices of this node's object and all its descendants.
     ///
-    /// The provided closure is called once per object.
+    /// # See also
+    /// * [`Self::modify_vertices`] - to only modify this node.
+    #[inline(always)]
+    pub fn modify_vertices_recursive<F: FnMut(&mut Vec<Vec3>)>(&mut self, f: &mut F) {
+        self.apply_to_objects_mut_recursive(&mut |o| o.modify_vertices(f))
+    }
+
+    /// Accesses the vertices of this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::read_vertices_recursive`] - to also access all descendants.
     #[inline(always)]
     pub fn read_vertices<F: FnMut(&[Vec3])>(&self, f: &mut F) {
-        self.apply_to_objects(&mut |o| o.read_vertices(f))
+        self.apply_to_object(&mut |o| o.read_vertices(f))
     }
 
-    /// Recomputes the normals of the meshes of the objects contained by this node and its
-    /// children.
+    /// Accesses the vertices of this node's object and all its descendants.
+    ///
+    /// The provided closure is called once per object.
+    ///
+    /// # See also
+    /// * [`Self::read_vertices`] - to only access this node.
+    #[inline(always)]
+    pub fn read_vertices_recursive<F: FnMut(&[Vec3])>(&self, f: &mut F) {
+        self.apply_to_objects_recursive(&mut |o| o.read_vertices(f))
+    }
+
+    /// Recomputes the normals of this node's mesh only.
+    ///
+    /// # See also
+    /// * [`Self::recompute_normals_recursive`] - to also modify all descendants.
     #[inline]
     pub fn recompute_normals(&mut self) {
-        self.apply_to_objects_mut(&mut |o| o.recompute_normals())
+        self.apply_to_object_mut(&mut |o| o.recompute_normals())
     }
 
-    /// Mutably accesses the normals of the objects contained by this node and its children.
+    /// Recomputes the normals of this node's mesh and all its descendants.
     ///
-    /// The provided closure is called once per object.
+    /// # See also
+    /// * [`Self::recompute_normals`] - to only modify this node.
+    #[inline]
+    pub fn recompute_normals_recursive(&mut self) {
+        self.apply_to_objects_mut_recursive(&mut |o| o.recompute_normals())
+    }
+
+    /// Mutably accesses the normals of this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::modify_normals_recursive`] - to also modify all descendants.
     #[inline(always)]
     pub fn modify_normals<F: FnMut(&mut Vec<Vec3>)>(&mut self, f: &mut F) {
-        self.apply_to_objects_mut(&mut |o| o.modify_normals(f))
+        self.apply_to_object_mut(&mut |o| o.modify_normals(f))
     }
 
-    /// Accesses the normals of the objects contained by this node and its children.
+    /// Mutably accesses the normals of this node's object and all its descendants.
     ///
     /// The provided closure is called once per object.
+    ///
+    /// # See also
+    /// * [`Self::modify_normals`] - to only modify this node.
+    #[inline(always)]
+    pub fn modify_normals_recursive<F: FnMut(&mut Vec<Vec3>)>(&mut self, f: &mut F) {
+        self.apply_to_objects_mut_recursive(&mut |o| o.modify_normals(f))
+    }
+
+    /// Accesses the normals of this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::read_normals_recursive`] - to also access all descendants.
     #[inline(always)]
     pub fn read_normals<F: FnMut(&[Vec3])>(&self, f: &mut F) {
-        self.apply_to_objects(&mut |o| o.read_normals(f))
+        self.apply_to_object(&mut |o| o.read_normals(f))
     }
 
-    /// Mutably accesses the faces of the objects contained by this node and its children.
+    /// Accesses the normals of this node's object and all its descendants.
     ///
     /// The provided closure is called once per object.
+    ///
+    /// # See also
+    /// * [`Self::read_normals`] - to only access this node.
+    #[inline(always)]
+    pub fn read_normals_recursive<F: FnMut(&[Vec3])>(&self, f: &mut F) {
+        self.apply_to_objects_recursive(&mut |o| o.read_normals(f))
+    }
+
+    /// Mutably accesses the faces of this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::modify_faces_recursive`] - to also modify all descendants.
     #[inline(always)]
     pub fn modify_faces<F: FnMut(&mut Vec<[VertexIndex; 3]>)>(&mut self, f: &mut F) {
-        self.apply_to_objects_mut(&mut |o| o.modify_faces(f))
+        self.apply_to_object_mut(&mut |o| o.modify_faces(f))
     }
 
-    /// Accesses the faces of the objects contained by this node and its children.
+    /// Mutably accesses the faces of this node's object and all its descendants.
     ///
     /// The provided closure is called once per object.
+    ///
+    /// # See also
+    /// * [`Self::modify_faces`] - to only modify this node.
+    #[inline(always)]
+    pub fn modify_faces_recursive<F: FnMut(&mut Vec<[VertexIndex; 3]>)>(&mut self, f: &mut F) {
+        self.apply_to_objects_mut_recursive(&mut |o| o.modify_faces(f))
+    }
+
+    /// Accesses the faces of this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::read_faces_recursive`] - to also access all descendants.
     #[inline(always)]
     pub fn read_faces<F: FnMut(&[[VertexIndex; 3]])>(&self, f: &mut F) {
-        self.apply_to_objects(&mut |o| o.read_faces(f))
+        self.apply_to_object(&mut |o| o.read_faces(f))
     }
 
-    /// Mutably accesses the texture coordinates of the objects contained by this node and its
-    /// children.
+    /// Accesses the faces of this node's object and all its descendants.
     ///
     /// The provided closure is called once per object.
+    ///
+    /// # See also
+    /// * [`Self::read_faces`] - to only access this node.
+    #[inline(always)]
+    pub fn read_faces_recursive<F: FnMut(&[[VertexIndex; 3]])>(&self, f: &mut F) {
+        self.apply_to_objects_recursive(&mut |o| o.read_faces(f))
+    }
+
+    /// Mutably accesses the texture coordinates of this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::modify_uvs_recursive`] - to also modify all descendants.
     #[inline(always)]
     pub fn modify_uvs<F: FnMut(&mut Vec<Vec2>)>(&mut self, f: &mut F) {
-        self.apply_to_objects_mut(&mut |o| o.modify_uvs(f))
+        self.apply_to_object_mut(&mut |o| o.modify_uvs(f))
     }
 
-    /// Accesses the texture coordinates of the objects contained by this node and its children.
+    /// Mutably accesses the texture coordinates of this node's object and all its descendants.
     ///
     /// The provided closure is called once per object.
+    ///
+    /// # See also
+    /// * [`Self::modify_uvs`] - to only modify this node.
+    #[inline(always)]
+    pub fn modify_uvs_recursive<F: FnMut(&mut Vec<Vec2>)>(&mut self, f: &mut F) {
+        self.apply_to_objects_mut_recursive(&mut |o| o.modify_uvs(f))
+    }
+
+    /// Accesses the texture coordinates of this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::read_uvs_recursive`] - to also access all descendants.
     #[inline(always)]
     pub fn read_uvs<F: FnMut(&[Vec2])>(&self, f: &mut F) {
-        self.apply_to_objects(&mut |o| o.read_uvs(f))
+        self.apply_to_object(&mut |o| o.read_uvs(f))
+    }
+
+    /// Accesses the texture coordinates of this node's object and all its descendants.
+    ///
+    /// The provided closure is called once per object.
+    ///
+    /// # See also
+    /// * [`Self::read_uvs`] - to only access this node.
+    #[inline(always)]
+    pub fn read_uvs_recursive<F: FnMut(&[Vec2])>(&self, f: &mut F) {
+        self.apply_to_objects_recursive(&mut |o| o.read_uvs(f))
     }
 
     /// Get the visibility status of node.
@@ -1146,22 +1401,40 @@ impl SceneNode3d {
         self.clone()
     }
 
-    /// Sets the color of the objects contained by this node and its children.
+    /// Sets the color of this node's object only.
     ///
     /// Colors components must be on the range `[0.0, 1.0]`.
+    ///
+    /// # See also
+    /// * [`Self::set_color_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_color(&mut self, color: crate::color::Color) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_color(color));
+        self.apply_to_object_mut(&mut |o| o.set_color(color));
         self.clone()
     }
 
-    /// Sets the texture of the objects contained by this node and its children.
+    /// Sets the color of this node's object and all its descendants.
+    ///
+    /// Colors components must be on the range `[0.0, 1.0]`.
+    ///
+    /// # See also
+    /// * [`Self::set_color`] - to only modify this node.
+    #[inline]
+    pub fn set_color_recursive(&mut self, color: crate::color::Color) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_color(color));
+        self.clone()
+    }
+
+    /// Sets the texture of this node's object only.
     ///
     /// The texture is loaded from a file and registered by the global `TextureManager`.
     ///
     /// # Arguments
     ///   * `path` - relative path of the texture on the disk
     ///   * `name` - &str identifier to store this texture under
+    ///
+    /// # See also
+    /// * [`Self::set_texture_from_file_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_texture_from_file(&mut self, path: &Path, name: &str) -> Self {
         let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
@@ -1169,13 +1442,33 @@ impl SceneNode3d {
         self.set_texture(texture)
     }
 
-    /// Sets the texture of the objects contained by this node and its children.
+    /// Sets the texture of this node's object and all its descendants.
+    ///
+    /// The texture is loaded from a file and registered by the global `TextureManager`.
+    ///
+    /// # Arguments
+    ///   * `path` - relative path of the texture on the disk
+    ///   * `name` - &str identifier to store this texture under
+    ///
+    /// # See also
+    /// * [`Self::set_texture_from_file`] - to only modify this node.
+    #[inline]
+    pub fn set_texture_from_file_recursive(&mut self, path: &Path, name: &str) -> Self {
+        let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
+
+        self.set_texture_recursive(texture)
+    }
+
+    /// Sets the texture of this node's object only.
     ///
     /// The texture is loaded from a byte slice and registered by the global `TextureManager`.
     ///
     /// # Arguments
     ///   * `image_data` - slice of bytes containing encoded image
     ///   * `name` - &str identifier to store this texture under
+    ///
+    /// # See also
+    /// * [`Self::set_texture_from_memory_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_texture_from_memory(&mut self, image_data: &[u8], name: &str) -> Self {
         let texture =
@@ -1184,9 +1477,30 @@ impl SceneNode3d {
         self.set_texture(texture)
     }
 
-    /// Sets the texture of the objects contained by this node and its children.
+    /// Sets the texture of this node's object and all its descendants.
+    ///
+    /// The texture is loaded from a byte slice and registered by the global `TextureManager`.
+    ///
+    /// # Arguments
+    ///   * `image_data` - slice of bytes containing encoded image
+    ///   * `name` - &str identifier to store this texture under
+    ///
+    /// # See also
+    /// * [`Self::set_texture_from_memory`] - to only modify this node.
+    #[inline]
+    pub fn set_texture_from_memory_recursive(&mut self, image_data: &[u8], name: &str) -> Self {
+        let texture =
+            TextureManager::get_global_manager(|tm| tm.add_image_from_memory(image_data, name));
+
+        self.set_texture_recursive(texture)
+    }
+
+    /// Sets the texture of this node's object only.
     ///
     /// The texture must already have been registered as `name`.
+    ///
+    /// # See also
+    /// * [`Self::set_texture_with_name_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_texture_with_name(&mut self, name: &str) -> Self {
         let texture = TextureManager::get_global_manager(|tm| {
@@ -1198,153 +1512,420 @@ impl SceneNode3d {
         self.set_texture(texture)
     }
 
-    /// Sets the texture of the objects contained by this node and its children.
+    /// Sets the texture of this node's object and all its descendants.
+    ///
+    /// The texture must already have been registered as `name`.
+    ///
+    /// # See also
+    /// * [`Self::set_texture_with_name`] - to only modify this node.
+    #[inline]
+    pub fn set_texture_with_name_recursive(&mut self, name: &str) -> Self {
+        let texture = TextureManager::get_global_manager(|tm| {
+            tm.get(name).unwrap_or_else(|| {
+                panic!("Invalid attempt to use the unregistered texture: {}", name)
+            })
+        });
+
+        self.set_texture_recursive(texture)
+    }
+
+    /// Sets the texture of this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::set_texture_recursive`] - to also modify all descendants.
     pub fn set_texture(&mut self, texture: Arc<Texture>) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_texture(texture.clone()));
+        self.apply_to_object_mut(&mut |o| o.set_texture(texture.clone()));
+        self.clone()
+    }
+
+    /// Sets the texture of this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::set_texture`] - to only modify this node.
+    pub fn set_texture_recursive(&mut self, texture: Arc<Texture>) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_texture(texture.clone()));
         self.clone()
     }
 
     // === PBR Material Properties ===
 
-    /// Sets the metallic factor for all objects in this node and its children.
+    /// Sets the metallic factor for this node's object only.
     ///
     /// # Arguments
     /// * `metallic` - Metallic factor [0.0, 1.0] where 0.0 is dielectric and 1.0 is metal
+    ///
+    /// # See also
+    /// * [`Self::set_metallic_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_metallic(&mut self, metallic: f32) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_metallic(metallic));
+        self.apply_to_object_mut(&mut |o| o.set_metallic(metallic));
         self.clone()
     }
 
-    /// Sets the roughness factor for all objects in this node and its children.
+    /// Sets the metallic factor for this node's object and all its descendants.
+    ///
+    /// # Arguments
+    /// * `metallic` - Metallic factor [0.0, 1.0] where 0.0 is dielectric and 1.0 is metal
+    ///
+    /// # See also
+    /// * [`Self::set_metallic`] - to only modify this node.
+    #[inline]
+    pub fn set_metallic_recursive(&mut self, metallic: f32) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_metallic(metallic));
+        self.clone()
+    }
+
+    /// Sets the roughness factor for this node's object only.
     ///
     /// # Arguments
     /// * `roughness` - Roughness factor [0.0, 1.0] where 0.0 is smooth and 1.0 is rough
+    ///
+    /// # See also
+    /// * [`Self::set_roughness_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_roughness(&mut self, roughness: f32) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_roughness(roughness));
+        self.apply_to_object_mut(&mut |o| o.set_roughness(roughness));
         self.clone()
     }
 
-    /// Sets the emissive color for all objects in this node and its children.
+    /// Sets the roughness factor for this node's object and all its descendants.
+    ///
+    /// # Arguments
+    /// * `roughness` - Roughness factor [0.0, 1.0] where 0.0 is smooth and 1.0 is rough
+    ///
+    /// # See also
+    /// * [`Self::set_roughness`] - to only modify this node.
+    #[inline]
+    pub fn set_roughness_recursive(&mut self, roughness: f32) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_roughness(roughness));
+        self.clone()
+    }
+
+    /// Sets the emissive color for this node's object only.
     ///
     /// # Arguments
     /// * `color` - RGBA emissive color
+    ///
+    /// # See also
+    /// * [`Self::set_emissive_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_emissive(&mut self, color: crate::color::Color) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_emissive(color));
+        self.apply_to_object_mut(&mut |o| o.set_emissive(color));
+        self.clone()
+    }
+
+    /// Sets the emissive color for this node's object and all its descendants.
+    ///
+    /// # Arguments
+    /// * `color` - RGBA emissive color
+    ///
+    /// # See also
+    /// * [`Self::set_emissive`] - to only modify this node.
+    #[inline]
+    pub fn set_emissive_recursive(&mut self, color: crate::color::Color) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_emissive(color));
         self.clone()
     }
 
     // === PBR Texture Maps ===
 
-    /// Sets the normal map for all objects in this node and its children.
+    /// Sets the normal map for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::set_normal_map_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_normal_map(&mut self, texture: Arc<Texture>) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_normal_map(texture.clone()));
+        self.apply_to_object_mut(&mut |o| o.set_normal_map(texture.clone()));
         self.clone()
     }
 
-    /// Sets the normal map from a file for all objects in this node and its children.
+    /// Sets the normal map for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::set_normal_map`] - to only modify this node.
+    #[inline]
+    pub fn set_normal_map_recursive(&mut self, texture: Arc<Texture>) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_normal_map(texture.clone()));
+        self.clone()
+    }
+
+    /// Sets the normal map from a file for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::set_normal_map_from_file_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_normal_map_from_file(&mut self, path: &Path, name: &str) -> Self {
         let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
         self.set_normal_map(texture)
     }
 
-    /// Clears the normal map for all objects in this node and its children.
+    /// Sets the normal map from a file for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::set_normal_map_from_file`] - to only modify this node.
+    #[inline]
+    pub fn set_normal_map_from_file_recursive(&mut self, path: &Path, name: &str) -> Self {
+        let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
+        self.set_normal_map_recursive(texture)
+    }
+
+    /// Clears the normal map for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::clear_normal_map_recursive`] - to also modify all descendants.
     #[inline]
     pub fn clear_normal_map(&mut self) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.clear_normal_map());
+        self.apply_to_object_mut(&mut |o| o.clear_normal_map());
         self.clone()
     }
 
-    /// Sets the metallic-roughness map for all objects in this node and its children.
+    /// Clears the normal map for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::clear_normal_map`] - to only modify this node.
+    #[inline]
+    pub fn clear_normal_map_recursive(&mut self) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.clear_normal_map());
+        self.clone()
+    }
+
+    /// Sets the metallic-roughness map for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::set_metallic_roughness_map_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_metallic_roughness_map(&mut self, texture: Arc<Texture>) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_metallic_roughness_map(texture.clone()));
+        self.apply_to_object_mut(&mut |o| o.set_metallic_roughness_map(texture.clone()));
         self.clone()
     }
 
-    /// Sets the metallic-roughness map from a file for all objects in this node and its children.
+    /// Sets the metallic-roughness map for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::set_metallic_roughness_map`] - to only modify this node.
+    #[inline]
+    pub fn set_metallic_roughness_map_recursive(&mut self, texture: Arc<Texture>) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_metallic_roughness_map(texture.clone()));
+        self.clone()
+    }
+
+    /// Sets the metallic-roughness map from a file for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::set_metallic_roughness_map_from_file_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_metallic_roughness_map_from_file(&mut self, path: &Path, name: &str) -> Self {
         let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
         self.set_metallic_roughness_map(texture)
     }
 
-    /// Clears the metallic-roughness map for all objects in this node and its children.
+    /// Sets the metallic-roughness map from a file for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::set_metallic_roughness_map_from_file`] - to only modify this node.
+    #[inline]
+    pub fn set_metallic_roughness_map_from_file_recursive(
+        &mut self,
+        path: &Path,
+        name: &str,
+    ) -> Self {
+        let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
+        self.set_metallic_roughness_map_recursive(texture)
+    }
+
+    /// Clears the metallic-roughness map for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::clear_metallic_roughness_map_recursive`] - to also modify all descendants.
     #[inline]
     pub fn clear_metallic_roughness_map(&mut self) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.clear_metallic_roughness_map());
+        self.apply_to_object_mut(&mut |o| o.clear_metallic_roughness_map());
         self.clone()
     }
 
-    /// Sets the ambient occlusion map for all objects in this node and its children.
+    /// Clears the metallic-roughness map for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::clear_metallic_roughness_map`] - to only modify this node.
+    #[inline]
+    pub fn clear_metallic_roughness_map_recursive(&mut self) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.clear_metallic_roughness_map());
+        self.clone()
+    }
+
+    /// Sets the ambient occlusion map for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::set_ao_map_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_ao_map(&mut self, texture: Arc<Texture>) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_ao_map(texture.clone()));
+        self.apply_to_object_mut(&mut |o| o.set_ao_map(texture.clone()));
         self.clone()
     }
 
-    /// Sets the ambient occlusion map from a file for all objects in this node and its children.
+    /// Sets the ambient occlusion map for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::set_ao_map`] - to only modify this node.
+    #[inline]
+    pub fn set_ao_map_recursive(&mut self, texture: Arc<Texture>) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_ao_map(texture.clone()));
+        self.clone()
+    }
+
+    /// Sets the ambient occlusion map from a file for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::set_ao_map_from_file_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_ao_map_from_file(&mut self, path: &Path, name: &str) -> Self {
         let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
         self.set_ao_map(texture)
     }
 
-    /// Clears the ambient occlusion map for all objects in this node and its children.
+    /// Sets the ambient occlusion map from a file for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::set_ao_map_from_file`] - to only modify this node.
+    #[inline]
+    pub fn set_ao_map_from_file_recursive(&mut self, path: &Path, name: &str) -> Self {
+        let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
+        self.set_ao_map_recursive(texture)
+    }
+
+    /// Clears the ambient occlusion map for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::clear_ao_map_recursive`] - to also modify all descendants.
     #[inline]
     pub fn clear_ao_map(&mut self) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.clear_ao_map());
+        self.apply_to_object_mut(&mut |o| o.clear_ao_map());
         self.clone()
     }
 
-    /// Sets the emissive map for all objects in this node and its children.
+    /// Clears the ambient occlusion map for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::clear_ao_map`] - to only modify this node.
+    #[inline]
+    pub fn clear_ao_map_recursive(&mut self) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.clear_ao_map());
+        self.clone()
+    }
+
+    /// Sets the emissive map for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::set_emissive_map_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_emissive_map(&mut self, texture: Arc<Texture>) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.set_emissive_map(texture.clone()));
+        self.apply_to_object_mut(&mut |o| o.set_emissive_map(texture.clone()));
         self.clone()
     }
 
-    /// Sets the emissive map from a file for all objects in this node and its children.
+    /// Sets the emissive map for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::set_emissive_map`] - to only modify this node.
+    #[inline]
+    pub fn set_emissive_map_recursive(&mut self, texture: Arc<Texture>) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_emissive_map(texture.clone()));
+        self.clone()
+    }
+
+    /// Sets the emissive map from a file for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::set_emissive_map_from_file_recursive`] - to also modify all descendants.
     #[inline]
     pub fn set_emissive_map_from_file(&mut self, path: &Path, name: &str) -> Self {
         let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
         self.set_emissive_map(texture)
     }
 
-    /// Clears the emissive map for all objects in this node and its children.
+    /// Sets the emissive map from a file for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::set_emissive_map_from_file`] - to only modify this node.
+    #[inline]
+    pub fn set_emissive_map_from_file_recursive(&mut self, path: &Path, name: &str) -> Self {
+        let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
+        self.set_emissive_map_recursive(texture)
+    }
+
+    /// Clears the emissive map for this node's object only.
+    ///
+    /// # See also
+    /// * [`Self::clear_emissive_map_recursive`] - to also modify all descendants.
     #[inline]
     pub fn clear_emissive_map(&mut self) -> Self {
-        self.apply_to_objects_mut(&mut |o| o.clear_emissive_map());
+        self.apply_to_object_mut(&mut |o| o.clear_emissive_map());
         self.clone()
     }
 
-    /// Applies a closure to each object contained by this node and its children.
+    /// Clears the emissive map for this node's object and all its descendants.
+    ///
+    /// # See also
+    /// * [`Self::clear_emissive_map`] - to only modify this node.
     #[inline]
-    pub fn apply_to_objects_mut<F: FnMut(&mut Object3d)>(&mut self, f: &mut F) {
+    pub fn clear_emissive_map_recursive(&mut self) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.clear_emissive_map());
+        self.clone()
+    }
+
+    /// Applies a closure to this node's object (if any).
+    ///
+    /// # See also
+    /// * [`Self::apply_to_objects_mut_recursive`] - to also apply to all descendants.
+    #[inline]
+    pub fn apply_to_object_mut<F: FnMut(&mut Object3d)>(&mut self, f: &mut F) {
+        let mut data = self.data_mut();
+        if let Some(ref mut o) = data.object {
+            f(o)
+        }
+    }
+
+    /// Applies a closure to this node's object (if any).
+    ///
+    /// # See also
+    /// * [`Self::apply_to_objects_recursive`] - to also apply to all descendants.
+    #[inline]
+    pub fn apply_to_object<F: FnMut(&Object3d)>(&self, f: &mut F) {
+        let data = self.data();
+        if let Some(ref o) = data.object {
+            f(o)
+        }
+    }
+
+    /// Applies a closure to each object contained by this node and its descendants.
+    ///
+    /// # See also
+    /// * [`Self::apply_to_object_mut`] - to only apply to this node.
+    #[inline]
+    pub fn apply_to_objects_mut_recursive<F: FnMut(&mut Object3d)>(&mut self, f: &mut F) {
         let mut data = self.data_mut();
         if let Some(ref mut o) = data.object {
             f(o)
         }
 
         for c in data.children.iter_mut() {
-            c.apply_to_objects_mut(f)
+            c.apply_to_objects_mut_recursive(f)
         }
     }
 
-    /// Applies a closure to each object contained by this node and its children.
+    /// Applies a closure to each object contained by this node and its descendants.
+    ///
+    /// # See also
+    /// * [`Self::apply_to_object`] - to only apply to this node.
     #[inline]
-    pub fn apply_to_objects<F: FnMut(&Object3d)>(&self, f: &mut F) {
+    pub fn apply_to_objects_recursive<F: FnMut(&Object3d)>(&self, f: &mut F) {
         let data = self.data();
         if let Some(ref o) = data.object {
             f(o)
         }
 
         for c in data.children.iter() {
-            c.apply_to_objects(f)
+            c.apply_to_objects_recursive(f)
         }
     }
 

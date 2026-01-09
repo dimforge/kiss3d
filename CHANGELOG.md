@@ -1,3 +1,44 @@
+# Unreleased
+
+## Breaking Changes
+
+### SceneNode3d and SceneNode2d: Recursive vs Non-Recursive Methods
+
+Methods that previously modified both a node and all its descendants now only modify the current node.
+Use the new `_recursive` suffix variants for the previous behavior.
+
+**Renamed methods (now non-recursive by default):**
+
+`SceneNode3d`:
+- `set_material`, `set_material_with_name`
+- `set_color`, `set_texture`, `set_texture_from_file`, `set_texture_from_memory`, `set_texture_with_name`
+- `set_lines_width`, `set_lines_color`, `set_points_size`, `set_points_color`
+- `set_surface_rendering_activation`, `enable_backface_culling`
+- `set_local_scale`, `set_visible`
+- `set_metallic`, `set_roughness`, `set_emissive`
+- `set_normal_map`, `set_normal_map_from_file`, `set_normal_map_from_memory`, `set_normal_map_with_name`
+- `set_ao_map`, `set_ao_map_from_file`, `set_ao_map_from_memory`, `set_ao_map_with_name`
+- `set_emissive_map`, `set_emissive_map_from_file`, `set_emissive_map_from_memory`, `set_emissive_map_with_name`
+- `modify_vertices`, `read_vertices`, `recompute_normals`, `modify_normals`, `read_normals`
+- `modify_uvs`, `read_uvs`, `modify_faces`, `read_faces`
+
+`SceneNode2d`:
+- `set_material`, `set_material_with_name`
+- `set_color`, `set_texture`, `set_texture_from_file`, `set_texture_from_memory`, `set_texture_with_name`
+- `set_lines_width`, `set_lines_color`, `set_points_size`, `set_points_color`
+- `set_surface_rendering_activation`
+- `set_local_scale`, `set_visible`
+- `modify_vertices`, `read_vertices`, `modify_uvs`, `read_uvs`, `modify_faces`, `read_faces`
+
+**New recursive variants:**
+All the above methods now have `_recursive` suffix versions (e.g., `set_color_recursive`) that apply to the node and all descendants.
+
+**Helper method renames:**
+- `apply_to_objects_mut` → `apply_to_objects_mut_recursive` / `apply_to_object_mut` (new)
+- `apply_to_objects` → `apply_to_objects_recursive` / `apply_to_object` (new)
+- `apply_to_scene_nodes_mut` → `apply_to_scene_nodes_mut_recursive`
+- `apply_to_scene_nodes` → `apply_to_scene_nodes_recursive`
+
 # v0.39.1
 
 Update website links in documentations.
