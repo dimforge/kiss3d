@@ -1,6 +1,8 @@
-# Unreleased
+# v0.40.0
 
 ## Breaking Changes
+
+- Switched to parry 0.26.0.
 
 ### SceneNode3d and SceneNode2d: Recursive vs Non-Recursive Methods
 
