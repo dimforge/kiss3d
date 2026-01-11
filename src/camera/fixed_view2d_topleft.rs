@@ -27,13 +27,11 @@ impl FixedView2dTopLeft {
 }
 
 impl Camera2d for FixedView2dTopLeft {
-    fn handle_event(&mut self, canvas: &Canvas, event: &WindowEvent) {
-        let scale = canvas.scale_factor();
-
+    fn handle_event(&mut self, _canvas: &Canvas, event: &WindowEvent) {
         if let WindowEvent::FramebufferSize(w, h) = *event {
             let proj = Mat3::from_cols(
-                Vec3::new(2.0 * scale as f32 / w as f32, 0.0, 0.0),
-                Vec3::new(0.0, -2.0 * scale as f32 / h as f32, 0.0),
+                Vec3::new(2.0 / w as f32, 0.0, 0.0),
+                Vec3::new(0.0, -2.0 / h as f32, 0.0),
                 Vec3::new(-1.0, 1.0, 1.0),
             );
 
