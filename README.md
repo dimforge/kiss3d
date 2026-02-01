@@ -46,23 +46,28 @@ to the camera is as simple as:
 
 ```rust
 use kiss3d::prelude::*;
+use nalgebra::{Point3, UnitQuaternion, Vector3};
 
 #[kiss3d::main]
 async fn main() {
-  let mut window = Window::new("Kiss3d: cube").await;
-  let mut camera = OrbitCamera3d::default();
-  let mut scene = SceneNode3d::empty();
-  scene
-          .add_light(Light::point(100.0))
-          .set_position(Vec3::new(0.0, 2.0, -2.0));
+    let mut window = Window::new("kiss3d example").await;
 
-  let mut c = scene.add_cube(1.0, 1.0, 1.0).set_color(RED);
+    let mut model = window.add_cube(1.0, 1.0, 1.0);
+    let mut camera = ArcBall::new(
+        Point3::new(0.0, 0.0, 2.0),
+        Point3::origin()
+    );
 
-  let rot = Quat::from_axis_angle(Vec3::Y, 0.014);
+    model.set_color(0.8, 0.0, 0.0);
+    window.set_light(Light::StickToCamera);
 
-  while window.render_3d(&mut scene, &mut camera).await {
-    c.rotate(rot);
-  }
+    while window.render_with_camera(&mut camera).await {
+        // Optional: Rotate the model automatically
+        model.prepend_to_local_rotation(&UnitQuaternion::from_axis_angle(
+            &Vector3::y_axis(),
+            0.01,
+        ))
+    }
 }
 ```
 
