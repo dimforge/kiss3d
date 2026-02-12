@@ -33,6 +33,7 @@ egui = ["dep:egui", "dep:egui-wgpu"]
 recording = ["dep:ffmpeg-the-third"]
 parry = ["dep:parry3d"]
 serde = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde"]
+drm = ["dep:drm", "dep:gbm"]
 
 [dependencies]
 bitflags     = "2"
@@ -53,6 +54,8 @@ rusttype     = { version = "0.9", features = ["gpu_cache"] }
 serde        = { version = "1", features = ["derive"], optional = true }
 wgpu         = "27"
 winit        = "0.30"
+drm          = { version = "0.14.1", optional = true }
+gbm          = { version = "0.18.0", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"

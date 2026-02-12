@@ -3,19 +3,174 @@
 #![allow(clippy::await_holding_refcell_ref)]
 
 use crate::camera::{Camera2d, Camera3d, FixedView3d};
+use crate::color::Color;
 use crate::context::Context;
 use crate::event::WindowEvent;
 use crate::light::LightCollection;
 use crate::post_processing::{PostProcessingContext, PostProcessingEffect};
 use crate::prelude::FixedView2d;
-use crate::renderer::Renderer3d;
+use crate::renderer::{PointRenderer3d, PolylineRenderer3d, Renderer3d};
 use crate::resource::{
     MaterialManager2d, MaterialManager3d, RenderContext, RenderContext2d, RenderContext2dEncoder,
     RenderTarget,
 };
 use crate::scene::{SceneNode2d, SceneNode3d};
+use crate::window::Canvas;
 
 use super::Window;
+
+/// Helper function to render a 3D scene frame.
+///
+/// This is the core rendering pipeline that can be reused by different window types.
+/// It handles the prepare → flush → render pipeline for 3D scenes.
+pub(crate) fn render_frame_3d(
+    encoder: &mut wgpu::CommandEncoder,
+    color_view: &wgpu::TextureView,
+    depth_view: &wgpu::TextureView,
+    surface_format: wgpu::TextureFormat,
+    sample_count: u32,
+    width: u32,
+    height: u32,
+    background: Color,
+    ambient_intensity: f32,
+    scene: &mut SceneNode3d,
+    camera: &mut dyn Camera3d,
+    canvas: &Canvas,
+    point_renderer: &mut PointRenderer3d,
+    polyline_renderer: &mut PolylineRenderer3d,
+    custom_renderer: &mut Option<&mut dyn Renderer3d>,
+) {
+    let w = width;
+    let h = height;
+    
+    // Clear the render target at the start of the frame
+    {
+        let bg = background;
+        let _clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("clear_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: color_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color {
+                        r: bg.r as f64,
+                        g: bg.g as f64,
+                        b: bg.b as f64,
+                        a: bg.a as f64,
+                    }),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: depth_view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(1.0),
+                    store: wgpu::StoreOp::Store,
+                }),
+                stencil_ops: None,
+            }),
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        // Render pass is dropped here, ending the clear pass
+    }
+
+    // Signal start of new frame to all materials (for dynamic buffer clearing)
+    MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
+
+    // Create a light collection for this frame
+    let mut lights = LightCollection::with_ambient(ambient_intensity);
+
+    // Render the 3D scene using two-phase rendering
+    for pass in 0usize..camera.num_passes() {
+        camera.start_pass(pass, canvas);
+
+        // Phase 1: Prepare - collect uniforms in CPU memory and gather lights from scene
+        scene.data_mut().prepare(pass, camera, &mut lights, w, h);
+
+        // Phase 2: Flush - upload all batched uniforms to GPU
+        MaterialManager3d::get_global_manager(|mm| mm.flush());
+
+        // Phase 3: Render - issue draw calls using a SINGLE render pass
+        {
+            let render_context = RenderContext {
+                surface_format,
+                sample_count,
+                viewport_width: w,
+                viewport_height: h,
+            };
+
+            // Create one render pass for all 3D scene objects
+            let mut wgpu_render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("scene_render_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: color_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+            });
+
+            // Render points
+            point_renderer.render(pass, camera, &mut wgpu_render_pass, &render_context);
+
+            // Render polylines
+            polyline_renderer.render(pass, camera, &mut wgpu_render_pass, &render_context);
+
+            // Render scene graph
+            scene.data_mut().render(pass, camera, &lights, &mut wgpu_render_pass, &render_context);
+
+            // Custom renderer still needs the old interface - drop render pass first
+            drop(wgpu_render_pass);
+
+            if let Some(ref mut renderer) = custom_renderer {
+                // Create a separate render pass for custom renderers
+                let mut custom_render_pass =
+                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("custom_renderer_pass"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: color_view,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        })],
+                        depth_stencil_attachment: Some(
+                            wgpu::RenderPassDepthStencilAttachment {
+                                view: depth_view,
+                                depth_ops: Some(wgpu::Operations {
+                                    load: wgpu::LoadOp::Load,
+                                    store: wgpu::StoreOp::Store,
+                                }),
+                                stencil_ops: None,
+                            },
+                        ),
+                        timestamp_writes: None,
+                        occlusion_query_set: None,
+                    });
+                renderer.render(pass, camera, &mut custom_render_pass, &render_context);
+            }
+        }
+    }
+
+    camera.render_complete(canvas);
+}
 
 impl Window {
     /// Renders one frame of a 3D scene.
@@ -139,137 +294,26 @@ impl Window {
         };
         let (color_view, depth_view) = (color_view.clone(), depth_view.clone());
 
-        // Clear the render target at the start of the frame
-        {
-            let bg = self.background;
-            let _clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("clear_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg.r as f64,
-                            g: bg.g as f64,
-                            b: bg.b as f64,
-                            a: bg.a as f64,
-                        }),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            // Render pass is dropped here, ending the clear pass
+        // Render the 3D scene (if present)
+        if let Some(scene) = scene.as_deref_mut() {
+            render_frame_3d(
+                &mut encoder,
+                &color_view,
+                &depth_view,
+                self.canvas.surface_format(),
+                self.canvas.sample_count(),
+                w,
+                h,
+                self.background,
+                self.ambient_intensity,
+                scene,
+                camera,
+                &self.canvas,
+                &mut self.point_renderer,
+                &mut self.polyline_renderer,
+                &mut renderer,
+            );
         }
-
-        // Signal start of new frame to all materials (for dynamic buffer clearing)
-        MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
-
-        // Create a light collection for this frame
-        let mut lights = LightCollection::with_ambient(self.ambient_intensity);
-
-        // Render the 3D scene using two-phase rendering
-        for pass in 0usize..camera.num_passes() {
-            camera.start_pass(pass, &self.canvas);
-
-            // Phase 1: Prepare - collect uniforms in CPU memory and gather lights from scene
-            if let Some(scene) = scene.as_deref_mut() {
-                scene.data_mut().prepare(pass, camera, &mut lights, w, h);
-            }
-
-            // Phase 2: Flush - upload all batched uniforms to GPU
-            MaterialManager3d::get_global_manager(|mm| mm.flush());
-
-            // Phase 3: Render - issue draw calls using a SINGLE render pass
-            {
-                let render_context = RenderContext {
-                    surface_format: self.canvas.surface_format(),
-                    sample_count: self.canvas.sample_count(),
-                    viewport_width: w,
-                    viewport_height: h,
-                };
-
-                // Create one render pass for all 3D scene objects
-                let mut wgpu_render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("scene_render_pass"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &color_view,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                        depth_slice: None,
-                    })],
-                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                        view: &depth_view,
-                        depth_ops: Some(wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        }),
-                        stencil_ops: None,
-                    }),
-                    timestamp_writes: None,
-                    occlusion_query_set: None,
-                });
-
-                if let Some(scene) = scene.as_deref_mut() {
-                    self.render_scene(
-                        scene,
-                        camera,
-                        &lights,
-                        pass,
-                        &mut wgpu_render_pass,
-                        &render_context,
-                    );
-                }
-
-                // Custom renderer still needs the old interface - drop render pass first
-                drop(wgpu_render_pass);
-
-                if let Some(ref mut renderer) = renderer {
-                    // Create a separate render pass for custom renderers
-                    let mut custom_render_pass =
-                        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("custom_renderer_pass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: &color_view,
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                },
-                                depth_slice: None,
-                            })],
-                            depth_stencil_attachment: Some(
-                                wgpu::RenderPassDepthStencilAttachment {
-                                    view: &depth_view,
-                                    depth_ops: Some(wgpu::Operations {
-                                        load: wgpu::LoadOp::Load,
-                                        store: wgpu::StoreOp::Store,
-                                    }),
-                                    stencil_ops: None,
-                                },
-                            ),
-                            timestamp_writes: None,
-                            occlusion_query_set: None,
-                        });
-                    renderer.render(pass, camera, &mut custom_render_pass, &render_context);
-                }
-            }
-        }
-
-        camera.render_complete(&self.canvas);
 
         // Render the 2D planar scene
         {
@@ -411,28 +455,5 @@ impl Window {
         }
 
         !self.should_close()
-    }
-
-    fn render_scene(
-        &mut self,
-        scene: &mut SceneNode3d,
-        camera: &mut dyn Camera3d,
-        lights: &LightCollection,
-        pass: usize,
-        render_pass: &mut wgpu::RenderPass<'_>,
-        context: &RenderContext,
-    ) {
-        // Render points
-        self.point_renderer
-            .render(pass, camera, render_pass, context);
-
-        // Render polylines (lines with configurable width)
-        self.polyline_renderer
-            .render(pass, camera, render_pass, context);
-
-        // Render scene graph (surfaces and wireframes are handled by ObjectMaterial)
-        scene
-            .data_mut()
-            .render(pass, camera, lights, render_pass, context);
     }
 }

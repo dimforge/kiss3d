@@ -2,6 +2,8 @@
 
 mod canvas;
 mod drawing;
+#[cfg(feature = "drm")]
+mod drm;
 #[cfg(feature = "egui")]
 mod egui_integration;
 mod events;
@@ -14,6 +16,8 @@ mod window;
 mod window_cache;
 
 pub use canvas::{Canvas, CanvasSetup, NumSamples};
+#[cfg(feature = "drm")]
+pub use drm::DRMWindow;
 #[cfg(feature = "recording")]
 pub use recording::RecordingConfig;
 pub use wgpu_canvas::WgpuCanvas;
