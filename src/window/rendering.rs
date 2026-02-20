@@ -42,7 +42,7 @@ pub(crate) fn render_frame_3d(
 ) {
     let w = width;
     let h = height;
-    
+
     // Clear the render target at the start of the frame
     {
         let bg = background;
@@ -132,7 +132,13 @@ pub(crate) fn render_frame_3d(
             polyline_renderer.render(pass, camera, &mut wgpu_render_pass, &render_context);
 
             // Render scene graph
-            scene.data_mut().render(pass, camera, &lights, &mut wgpu_render_pass, &render_context);
+            scene.data_mut().render(
+                pass,
+                camera,
+                &lights,
+                &mut wgpu_render_pass,
+                &render_context,
+            );
 
             // Custom renderer still needs the old interface - drop render pass first
             drop(wgpu_render_pass);
@@ -151,16 +157,14 @@ pub(crate) fn render_frame_3d(
                             },
                             depth_slice: None,
                         })],
-                        depth_stencil_attachment: Some(
-                            wgpu::RenderPassDepthStencilAttachment {
-                                view: depth_view,
-                                depth_ops: Some(wgpu::Operations {
-                                    load: wgpu::LoadOp::Load,
-                                    store: wgpu::StoreOp::Store,
-                                }),
-                                stencil_ops: None,
-                            },
-                        ),
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
                         timestamp_writes: None,
                         occlusion_query_set: None,
                     });
@@ -242,7 +246,7 @@ impl Window {
 
     async fn render_single_frame(
         &mut self,
-        mut scene: Option<&mut SceneNode3d>,
+        scene: Option<&mut SceneNode3d>,
         mut scene_2d: Option<&mut SceneNode2d>,
         camera: &mut dyn Camera3d,
         camera_2d: &mut dyn Camera2d,
@@ -295,7 +299,7 @@ impl Window {
         let (color_view, depth_view) = (color_view.clone(), depth_view.clone());
 
         // Render the 3D scene (if present)
-        if let Some(scene) = scene.as_deref_mut() {
+        if let Some(scene) = scene {
             render_frame_3d(
                 &mut encoder,
                 &color_view,

@@ -1,4 +1,6 @@
+#[cfg(feature = "drm")]
 use kiss3d::prelude::*;
+use log::info;
 
 #[cfg(feature = "drm")]
 #[kiss3d::main]
@@ -20,21 +22,21 @@ async fn main() {
     let mut frame_count = 0;
     while window.render_3d(&mut scene, &mut camera).await {
         c.rotate(rot);
-        
+
         // Save screenshot every 24 frames
         if frame_count % 24 == 0 {
             let image = window.snap_image();
             let filename = format!("frame_{:04}.png", frame_count);
             image.save(&filename).expect("Failed to save screenshot");
-            println!("Saved {}", filename);
+            info!("Saved {}", filename);
         }
-        
+
         frame_count += 1;
     }
 }
 
-
 #[cfg(not(feature = "drm"))]
 #[kiss3d::main]
 async fn main() {
+    info!("This example is supposed to be run with the featuere 'drm' enabled.");
 }

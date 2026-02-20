@@ -63,11 +63,7 @@ impl DrmCanvas {
     ///
     /// # Errors
     /// Returns an error if wgpu initialization fails
-    pub async fn new(
-        _device_path: &str,
-        width: u32,
-        height: u32,
-    ) -> Result<Self, DrmCanvasError> {
+    pub async fn new(_device_path: &str, width: u32, height: u32) -> Result<Self, DrmCanvasError> {
         // Ensure minimum dimensions
         let width = width.max(1);
         let height = height.max(1);
@@ -137,7 +133,9 @@ impl DrmCanvas {
                 force_fallback_adapter: false,
             })
             .await
-            .map_err(|e| DrmCanvasError::DeviceRequest(format!("Failed to request adapter: {:?}", e)))?;
+            .map_err(|e| {
+                DrmCanvasError::DeviceRequest(format!("Failed to request adapter: {:?}", e))
+            })?;
 
         log::info!("Adapter info: {:?}", adapter.get_info());
 
@@ -174,7 +172,7 @@ impl DrmCanvas {
     /// Gets the current texture for rendering.
     ///
     /// For DRM canvas, this returns a wrapper around the offscreen color texture.
-    pub fn get_current_texture(&self) -> Result<DrmSurfaceTexture, DrmCanvasError> {
+    pub fn get_current_texture(&self) -> Result<DrmSurfaceTexture<'_>, DrmCanvasError> {
         Ok(DrmSurfaceTexture {
             texture: &self.offscreen_buffers.color_texture,
         })
