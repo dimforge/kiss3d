@@ -99,11 +99,15 @@ impl Window {
         camera_2d: &mut dyn Camera2d,
         event: &WindowEvent,
     ) {
-        match *event {
-            WindowEvent::Key(Key::Escape, Action::Release, _) | WindowEvent::Close => {
-                self.close();
+        if let Some(binding_key) = self.close_key {
+            if let WindowEvent::Key(key, Action::Release, modifiers) = event {
+                if binding_key == *key && (Some(*modifiers) == self.close_modifiers || self.close_modifiers.is_none()) {
+                    self.close()
+                }
             }
-            _ => {}
+        }
+        if *event == WindowEvent::Close {
+            self.close();
         }
 
         // Feed events to egui and check if it wants to capture input
