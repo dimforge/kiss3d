@@ -273,6 +273,21 @@ impl Window {
         Window::do_new(title, true, DEFAULT_WIDTH, DEFAULT_HEIGHT, None).await
     }
 
+    /// Creates a new hidden window with custom dimensions.
+    ///
+    /// The window is created but not displayed. Use [`show()`](Self::show) to make it visible.
+    ///
+    /// # Arguments
+    /// * `title` - The window title
+    /// * `width` - The window width in pixels
+    /// * `height` - The window height in pixels
+    ///
+    /// # Returns
+    /// A new `Window` instance
+    pub async fn new_hidden_with_size(title: &str, width: u32, height: u32) -> Window {
+        Window::do_new(title, true, width, height, None).await
+    }
+
     /// Creates a new visible window with default settings.
     ///
     /// The window is created and immediately visible with a default size of 800x600 pixels.
