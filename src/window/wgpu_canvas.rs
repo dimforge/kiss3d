@@ -90,18 +90,10 @@ pub struct WgpuCanvas {
 impl WgpuCanvas {
     /// Opens a new window and initializes the wgpu context.
     pub async fn open(
-        title: &str,
-        hide: bool,
-        width: u32,
-        height: u32,
+        window_attrs: WindowAttributes,
         canvas_setup: Option<CanvasSetup>,
         out_events: Sender<WindowEvent>,
     ) -> Self {
-        let window_attrs = WindowAttributes::default()
-            .with_title(title)
-            .with_inner_size(LogicalSize::new(width as f64, height as f64))
-            .with_visible(!hide);
-
         let canvas_setup = canvas_setup.unwrap_or(CanvasSetup {
             vsync: true,
             samples: NumSamples::Zero,

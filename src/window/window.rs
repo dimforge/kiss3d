@@ -18,6 +18,8 @@ use crate::window::canvas::CanvasSetup;
 use crate::window::Canvas;
 use glamx::UVec2;
 use image::{GenericImage, Pixel};
+use winit::dpi::LogicalSize;
+use winit::window::WindowAttributes;
 
 #[cfg(feature = "egui")]
 pub(super) use super::egui_integration::EguiContext;
@@ -337,6 +339,21 @@ impl Window {
         Window::do_new(title, false, width, height, Some(setup)).await
     }
 
+    /// Creates a new window with custom attributes.
+    ///
+    /// This allows fine-grained control over window creation.
+    ///
+    /// # Arguments
+    /// * `window_attrs` - The window title
+    ///
+    /// # Returns
+    /// A new `Window` instance
+    pub async fn new_with_window_attributes(
+        window_attrs: WindowAttributes,
+    ) -> Window {
+        Window::do_new_with_window_attributes(window_attrs, None).await
+    }
+
     // TODO: make this pub?
     async fn do_new(
         title: &str,
@@ -345,8 +362,20 @@ impl Window {
         height: u32,
         setup: Option<CanvasSetup>,
     ) -> Window {
+        let window_attrs = WindowAttributes::default()
+            .with_title(title)
+            .with_inner_size(LogicalSize::new(width as f64, height as f64))
+            .with_visible(!hide);
+        Self::do_new_with_window_attributes(window_attrs, setup).await
+    }
+    async fn do_new_with_window_attributes(
+        window_attrs: WindowAttributes,
+        setup: Option<CanvasSetup>,
+    ) -> Window {
         let (event_send, event_receive) = mpsc::channel();
-        let canvas = Canvas::open(title, hide, width, height, setup, event_send).await;
+        let hide = !window_attrs.visible;
+        let canvas = Canvas::open(window_attrs, setup, event_send).await;
+        let (width, height) = canvas.size();
 
         // Track window count for proper cleanup
         Context::increment_window_count();

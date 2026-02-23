@@ -3,6 +3,7 @@ use std::sync::mpsc::Sender;
 use crate::event::{Action, Key, MouseButton, WindowEvent};
 use crate::window::WgpuCanvas;
 use image::{GenericImage, Pixel};
+use winit::window::WindowAttributes;
 
 /// The possible number of samples for multisample anti-aliasing.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -56,15 +57,12 @@ pub struct Canvas {
 impl Canvas {
     /// Open a new window, and initialize the wgpu context.
     pub async fn open(
-        title: &str,
-        hide: bool,
-        width: u32,
-        height: u32,
+        window_attrs: WindowAttributes,
         canvas_setup: Option<CanvasSetup>,
         out_events: Sender<WindowEvent>,
     ) -> Self {
         Canvas {
-            canvas: WgpuCanvas::open(title, hide, width, height, canvas_setup, out_events).await,
+            canvas: WgpuCanvas::open(window_attrs, canvas_setup, out_events).await,
         }
     }
 
