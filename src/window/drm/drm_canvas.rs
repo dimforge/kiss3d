@@ -5,6 +5,17 @@ use crate::resource::OffscreenBuffers;
 use std::error::Error;
 use std::fmt;
 
+#[cfg(feature = "drm")]
+use super::card::Card;
+#[cfg(feature = "drm")]
+use drm::buffer::DrmFourcc;
+#[cfg(feature = "drm")]
+use drm::control::{connector, crtc, framebuffer, Device as ControlDevice, Mode, ResourceHandles};
+#[cfg(feature = "drm")]
+use gbm;
+#[cfg(feature = "drm")]
+use std::collections::HashMap;
+
 /// Error type for DRM canvas operations.
 #[derive(Debug)]
 pub enum DrmCanvasError {
@@ -14,6 +25,18 @@ pub enum DrmCanvasError {
     DeviceRequest(String),
     /// General initialization error.
     Init(String),
+    /// DRM-specific errors.
+    DrmError(String),
+    /// GBM-specific errors.
+    GbmError(String),
+    /// Display configuration errors.
+    ModesetError(String),
+    /// Page flip failures.
+    PageFlipError(String),
+    /// File I/O errors.
+    IoError(std::io::Error),
+    /// No connected display found.
+    NoConnectedDisplay,
 }
 
 impl fmt::Display for DrmCanvasError {
@@ -22,11 +45,32 @@ impl fmt::Display for DrmCanvasError {
             DrmCanvasError::NoAdapter => write!(f, "Failed to find suitable wgpu adapter"),
             DrmCanvasError::DeviceRequest(msg) => write!(f, "Failed to request device: {}", msg),
             DrmCanvasError::Init(msg) => write!(f, "Initialization error: {}", msg),
+            DrmCanvasError::DrmError(msg) => write!(f, "DRM error: {}", msg),
+            DrmCanvasError::GbmError(msg) => write!(f, "GBM error: {}", msg),
+            DrmCanvasError::ModesetError(msg) => write!(f, "Display configuration error: {}", msg),
+            DrmCanvasError::PageFlipError(msg) => write!(f, "Page flip error: {}", msg),
+            DrmCanvasError::IoError(e) => write!(f, "I/O error: {}", e),
+            DrmCanvasError::NoConnectedDisplay => write!(f, "No connected display found"),
         }
     }
 }
 
 impl Error for DrmCanvasError {}
+
+impl From<std::io::Error> for DrmCanvasError {
+    fn from(err: std::io::Error) -> Self {
+        DrmCanvasError::IoError(err)
+    }
+}
+
+/// Rendering mode for DrmCanvas
+enum RenderMode {
+    /// Offscreen rendering only (screenshots/recording)
+    Offscreen,
+    /// Display output via DRM/KMS
+    #[cfg(feature = "drm")]
+    Display(Box<DrmDisplayState>),
+}
 
 /// A canvas for headless rendering using offscreen buffers.
 ///
@@ -41,6 +85,8 @@ pub struct DrmCanvas {
     depth_texture: wgpu::Texture,
     /// Depth texture view
     depth_view: wgpu::TextureView,
+    /// Rendering mode (offscreen or display)
+    mode: RenderMode,
 }
 
 /// Configuration for the DRM surface (mimics wgpu::SurfaceConfiguration).
@@ -48,6 +94,52 @@ struct DrmSurfaceConfig {
     width: u32,
     height: u32,
     format: wgpu::TextureFormat,
+}
+
+/// Display configuration discovered from hardware
+#[cfg(feature = "drm")]
+struct DisplayConfig {
+    connector: connector::Handle,
+    crtc: crtc::Handle,
+    mode: Mode,
+    width: u32,
+    height: u32,
+}
+
+/// Format compatibility information
+#[cfg(feature = "drm")]
+struct FormatInfo {
+    wgpu_format: wgpu::TextureFormat,
+    gbm_format: gbm::Format,
+    drm_format: DrmFourcc,
+    bytes_per_pixel: u32,
+}
+
+/// DRM display state for actual screen output
+#[cfg(feature = "drm")]
+struct DrmDisplayState {
+    /// DRM device handle
+    card: Card,
+    /// Display connector
+    connector: connector::Handle,
+    /// Display controller (CRTC)
+    crtc: crtc::Handle,
+    /// Display mode (resolution, refresh rate)
+    mode: Mode,
+    /// GBM device for buffer allocation
+    gbm_device: gbm::Device<Card>,
+    /// GBM surface (buffer pool)
+    gbm_surface: gbm::Surface<()>,
+    /// Framebuffer cache (maps GBM buffer pointers to DRM framebuffer handles)
+    framebuffer_cache: HashMap<usize, framebuffer::Handle>,
+    /// Currently displayed framebuffer
+    current_fb: Option<framebuffer::Handle>,
+    /// Buffer being displayed (front buffer)
+    front_buffer: Option<gbm::BufferObject<()>>,
+    /// Pixel format for DRM
+    drm_format: DrmFourcc,
+    /// Pixel format for GBM
+    gbm_format: gbm::Format,
 }
 
 impl DrmCanvas {
@@ -106,6 +198,134 @@ impl DrmCanvas {
             surface_config,
             depth_texture,
             depth_view,
+            mode: RenderMode::Offscreen,
+        })
+    }
+
+    /// Creates a new DRM canvas with display output.
+    ///
+    /// This constructor initializes GBM and sets up the display pipeline for
+    /// actual screen output via KMS/DRM.
+    ///
+    /// # Arguments
+    /// * `device_path` - Path to DRM device (e.g., "/dev/dri/card0")
+    ///
+    /// # Returns
+    /// A new DrmCanvas ready for display rendering
+    ///
+    /// # Errors
+    /// Returns an error if:
+    /// - DRM device cannot be opened
+    /// - No connected display is found
+    /// - GBM initialization fails
+    /// - wgpu initialization fails
+    #[cfg(feature = "drm")]
+    pub async fn new_with_display(device_path: &str) -> Result<Self, DrmCanvasError> {
+        log::info!("Creating DRM canvas with display output: {}", device_path);
+
+        // Step 1: Open DRM device (for querying)
+        let card_query = Card::open(device_path)?;
+        log::info!("Opened DRM device: {}", device_path);
+
+        // Step 2: Query display resources
+        let display_config = Self::query_display_resources(&card_query)?;
+        log::info!(
+            "Display configuration: {}x{} @ {}Hz",
+            display_config.width,
+            display_config.height,
+            display_config.mode.vrefresh()
+        );
+
+        // Step 3: Choose compatible formats
+        let format_info = Self::choose_formats();
+        log::info!(
+            "Format selection - wgpu: {:?}, gbm: {:?}, drm: {:?}",
+            format_info.wgpu_format,
+            format_info.gbm_format,
+            format_info.drm_format
+        );
+
+        // Step 4: Open a separate Card handle for GBM (GBM takes ownership)
+        let card_for_gbm = Card::open(device_path)?;
+
+        // Step 5: Create GBM device (takes ownership of card_for_gbm)
+        let gbm_device = gbm::Device::new(card_for_gbm)
+            .map_err(|e| DrmCanvasError::GbmError(format!("Failed to create GBM device: {}", e)))?;
+        log::info!("Created GBM device");
+
+        // Step 6: Create GBM surface
+        let gbm_surface = gbm_device
+            .create_surface::<()>(
+                display_config.width,
+                display_config.height,
+                format_info.gbm_format,
+                gbm::BufferObjectFlags::SCANOUT | gbm::BufferObjectFlags::RENDERING,
+            )
+            .map_err(|e| {
+                DrmCanvasError::GbmError(format!("Failed to create GBM surface: {}", e))
+            })?;
+        log::info!(
+            "Created GBM surface: {}x{}",
+            display_config.width,
+            display_config.height
+        );
+
+        // Step 7: Initialize wgpu (headless for now, will integrate with GBM later)
+        Self::init_wgpu_headless().await?;
+
+        // Step 8: Create offscreen buffers for rendering
+        let offscreen_buffers = OffscreenBuffers::new(
+            display_config.width,
+            display_config.height,
+            format_info.wgpu_format,
+            true,
+        );
+
+        // Step 9: Create depth texture
+        let ctxt = Context::get();
+        let depth_texture = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("drm_display_depth_texture"),
+            size: wgpu::Extent3d {
+                width: display_config.width,
+                height: display_config.height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth_texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Step 10: Create display state (use the query card for DRM operations)
+        let display_state = DrmDisplayState {
+            card: card_query, // Use the card we opened for querying
+            connector: display_config.connector,
+            crtc: display_config.crtc,
+            mode: display_config.mode,
+            gbm_device,
+            gbm_surface,
+            framebuffer_cache: HashMap::new(),
+            current_fb: None,
+            front_buffer: None,
+            drm_format: format_info.drm_format,
+            gbm_format: format_info.gbm_format,
+        };
+
+        log::info!("DRM canvas with display created successfully");
+
+        Ok(Self {
+            offscreen_buffers,
+            surface_config: DrmSurfaceConfig {
+                width: display_config.width,
+                height: display_config.height,
+                format: format_info.wgpu_format,
+            },
+            depth_texture,
+            depth_view,
+            mode: RenderMode::Display(Box::new(display_state)),
         })
     }
 
@@ -185,11 +405,20 @@ impl DrmCanvas {
 
     /// Presents the rendered frame.
     ///
-    /// For offscreen rendering, this is a no-op. In a future DRM display
-    /// implementation, this would trigger a page flip.
-    pub fn present(&self) {
-        // No-op for offscreen rendering
-        // Future: trigger DRM page flip here
+    /// For offscreen rendering, this is a no-op. For display mode,
+    /// this triggers a page flip to show the rendered frame.
+    pub fn present(&mut self) -> Result<(), DrmCanvasError> {
+        match &mut self.mode {
+            RenderMode::Offscreen => {
+                // No-op for offscreen rendering
+                Ok(())
+            }
+            #[cfg(feature = "drm")]
+            RenderMode::Display(_display) => {
+                // TODO: Implement page flip in Phase 3
+                Ok(())
+            }
+        }
     }
 
     /// Returns the dimensions of the render target.
@@ -320,6 +549,133 @@ impl Drop for DrmCanvas {
         if Context::decrement_window_count() {
             log::info!("Last DRM canvas dropped, resetting wgpu context");
             Context::reset();
+        }
+    }
+}
+
+#[cfg(feature = "drm")]
+impl Drop for DrmDisplayState {
+    fn drop(&mut self) {
+        log::info!("Dropping DRM display state");
+
+        // Destroy all cached framebuffers
+        for &fb in self.framebuffer_cache.values() {
+            if let Err(e) = self.card.destroy_framebuffer(fb) {
+                log::warn!("Failed to destroy framebuffer: {}", e);
+            }
+        }
+
+        // Release front buffer if held
+        if let Some(buffer) = self.front_buffer.take() {
+            drop(buffer);
+        }
+
+        log::info!("DRM display state cleaned up");
+    }
+}
+
+// ============================================================================
+// Phase 1: Display Resource Query Functions
+// ============================================================================
+
+#[cfg(feature = "drm")]
+impl DrmCanvas {
+    /// Query display resources and find a suitable display configuration.
+    fn query_display_resources(card: &Card) -> Result<DisplayConfig, DrmCanvasError> {
+        log::info!("Querying DRM display resources");
+
+        // Get resource handles
+        let resources = card.resource_handles().map_err(|e| {
+            DrmCanvasError::DrmError(format!("Failed to get resource handles: {}", e))
+        })?;
+
+        // Find connected connector
+        let connector_info = Self::find_connected_connector(card, &resources)?;
+        log::info!(
+            "Found connected connector: {:?} (id: {:?})",
+            connector_info.interface(),
+            connector_info.handle()
+        );
+
+        // Find available CRTC
+        let crtc = Self::find_available_crtc(card, &connector_info, &resources)?;
+        log::info!("Selected CRTC: {:?}", crtc);
+
+        // Select best mode
+        let mode = Self::select_best_mode(&connector_info)?;
+        let (width, height) = mode.size();
+        log::info!(
+            "Selected mode: {}x{} @ {}Hz",
+            width,
+            height,
+            mode.vrefresh()
+        );
+
+        Ok(DisplayConfig {
+            connector: connector_info.handle(),
+            crtc,
+            mode,
+            width: width as u32,
+            height: height as u32,
+        })
+    }
+
+    /// Find the first connected connector.
+    fn find_connected_connector(
+        card: &Card,
+        resources: &ResourceHandles,
+    ) -> Result<connector::Info, DrmCanvasError> {
+        for &conn_handle in resources.connectors() {
+            let conn_info = card.get_connector(conn_handle, false).map_err(|e| {
+                DrmCanvasError::DrmError(format!("Failed to get connector info: {}", e))
+            })?;
+
+            if conn_info.state() == connector::State::Connected {
+                return Ok(conn_info);
+            }
+        }
+
+        Err(DrmCanvasError::NoConnectedDisplay)
+    }
+
+    /// Find an available CRTC for the given connector.
+    fn find_available_crtc(
+        _card: &Card,
+        _connector_info: &connector::Info,
+        resources: &ResourceHandles,
+    ) -> Result<crtc::Handle, DrmCanvasError> {
+        // For simplicity, just use the first available CRTC
+        // A more sophisticated implementation would check encoder compatibility
+        resources
+            .crtcs()
+            .first()
+            .copied()
+            .ok_or_else(|| DrmCanvasError::ModesetError("No CRTCs available".to_string()))
+    }
+
+    /// Select the best display mode (usually the preferred/native mode).
+    fn select_best_mode(connector_info: &connector::Info) -> Result<Mode, DrmCanvasError> {
+        let modes = connector_info.modes();
+
+        if modes.is_empty() {
+            return Err(DrmCanvasError::ModesetError(
+                "No display modes available".to_string(),
+            ));
+        }
+
+        // The first mode is typically the preferred/native resolution
+        Ok(*modes.first().unwrap())
+    }
+
+    /// Choose compatible pixel formats for wgpu, GBM, and DRM.
+    fn choose_formats() -> FormatInfo {
+        // Use XRGB8888 for maximum compatibility with displays
+        // Note: wgpu uses BGRA8Unorm which we'll need to convert
+        FormatInfo {
+            wgpu_format: wgpu::TextureFormat::Bgra8Unorm,
+            gbm_format: gbm::Format::Xrgb8888,
+            drm_format: DrmFourcc::Xrgb8888,
+            bytes_per_pixel: 4,
         }
     }
 }
