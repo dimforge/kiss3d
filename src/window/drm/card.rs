@@ -1,6 +1,6 @@
 // #![allow(dead_code)]
-use drm::Device;
 use drm::control::Device as ControlDevice;
+use drm::Device;
 
 #[derive(Debug)]
 /// A simple wrapper for a device node.
@@ -25,10 +25,6 @@ impl Card {
         options.read(true);
         options.write(true);
         Ok(Card(options.open(path)?))
-    }
-
-    pub fn open_global(device: &str) -> Result<Self, std::io::Error> {
-        Self::open(device)
     }
 }
 

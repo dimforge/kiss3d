@@ -1,4 +1,5 @@
 //! Canvas wrapper for DRM to satisfy camera interface requirements.
+#![allow(dead_code)]
 
 use crate::event::{Action, Key, MouseButton};
 use crate::window::drm::DrmCanvas;

@@ -1,4 +1,5 @@
 mod card;
+mod display_thread;
 mod drm_canvas;
 mod drm_canvas_wrapper;
 mod drm_window;

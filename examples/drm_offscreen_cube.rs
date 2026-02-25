@@ -6,7 +6,7 @@ use log::info;
 #[kiss3d::main]
 async fn main() {
     env_logger::init();
-    let mut window = DRMWindow::new("/dev/dri/card0", 1024, 600)
+    let mut window = DRMWindow::new_offscreen(1024, 600)
         .await
         .expect("Failed to create DRM window");
     let mut camera = OrbitCamera3d::default();

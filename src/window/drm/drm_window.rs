@@ -22,19 +22,22 @@ pub struct DRMWindow {
     /// The DRM canvas backend
     drm_canvas: DrmCanvas,
     /// Renderer for 3D polylines (lines in 3D space)
-    polyline_renderer: PolylineRenderer3d,
+    pub(super) polyline_renderer: PolylineRenderer3d,
     /// Renderer for 3D points
-    point_renderer: PointRenderer3d,
+    pub(super) point_renderer: PointRenderer3d,
     /// Renderer for 2D polylines
-    polyline_renderer_2d: PolylineRenderer2d,
+    #[allow(dead_code)]
+    pub(super) polyline_renderer_2d: PolylineRenderer2d,
     /// Renderer for 2D points
-    point_renderer_2d: PointRenderer2d,
+    #[allow(dead_code)]
+    pub(super) point_renderer_2d: PointRenderer2d,
     /// Text renderer for 2D text overlays
-    text_renderer: TextRenderer,
+    pub(super) text_renderer: TextRenderer,
     /// Framebuffer manager for offscreen rendering
-    framebuffer_manager: FramebufferManager,
+    #[allow(dead_code)]
+    pub(super) framebuffer_manager: FramebufferManager,
     /// Render target for post-processing effects
-    post_process_render_target: RenderTarget,
+    pub(super) post_process_render_target: RenderTarget,
     /// Ambient light intensity (0.0 to 1.0)
     pub(crate) ambient_intensity: f32,
     /// Background clear color
@@ -42,7 +45,7 @@ pub struct DRMWindow {
 }
 
 impl DRMWindow {
-    /// Creates a new DRM window for headless rendering.
+    /// Creates a new DRM window for rendering.
     ///
     /// # Arguments
     /// * `device_path` - Path to the DRM device (e.g., "/dev/dri/card0")
@@ -61,7 +64,7 @@ impl DRMWindow {
     ///     let mut window = DRMWindow::new("/dev/dri/card0", 1920, 1080)
     ///         .await
     ///         .expect("Failed to create DRM window");
-    ///     
+    ///
     ///     let mut camera = OrbitCamera3d::default();
     ///     let mut scene = SceneNode3d::empty();
     ///
@@ -70,42 +73,59 @@ impl DRMWindow {
     ///     }
     /// }
     /// ```
-    pub async fn new(
-        device_path: &str,
+    pub async fn new(device_path: &str, width: u32, height: u32) -> Result<Self, Box<dyn Error>> {
+        log::info!("Creating DRM window with display: {}x{}", width, height);
+
+        // Create DRM canvas with display output (initializes wgpu headless + DRM/KMS)
+        let drm_canvas = DrmCanvas::new_with_display(device_path).await?;
+
+        Self::new_from_canvas(drm_canvas, width, height).await
+    }
+
+    /// Creates a new DRM window for offscreen-only rendering (no display output).
+    ///
+    /// This mode is useful for:
+    /// - Screenshot/recording without a connected display
+    /// - Server-side rendering
+    /// - Testing without display hardware
+    ///
+    /// # Arguments
+    /// * `width` - Width of the render target in pixels
+    /// * `height` - Height of the render target in pixels
+    ///
+    /// # Returns
+    /// A new DRMWindow ready for offscreen rendering (no display output)
+    pub async fn new_offscreen(width: u32, height: u32) -> Result<Self, Box<dyn Error>> {
+        log::info!("Creating DRM window (offscreen only): {}x{}", width, height);
+
+        // Create DRM canvas in offscreen mode (no display initialization, no DRM device needed)
+        let drm_canvas = DrmCanvas::new(width, height).await?;
+
+        Self::new_from_canvas(drm_canvas, width, height).await
+    }
+
+    /// Internal helper to initialize DRMWindow from a DrmCanvas
+    async fn new_from_canvas(
+        drm_canvas: DrmCanvas,
         width: u32,
         height: u32,
     ) -> Result<Self, Box<dyn Error>> {
-        log::info!("Creating DRM window: {}x{}", width, height);
-
-        // Create DRM canvas (initializes wgpu headless)
-        let drm_canvas = DrmCanvas::new(device_path, width, height).await?;
-
         // Initialize window cache (material manager, mesh manager, texture manager)
         WindowCache::populate();
 
         // Create framebuffer manager
         let framebuffer_manager = FramebufferManager::new();
+        let post_process_render_target = framebuffer_manager.new_render_target(width, height, true);
 
-        // Create post-processing render target
-        let post_process_render_target =
-            framebuffer_manager.new_render_target(width, height, true);
-
-        // Initialize all renderers
-        let polyline_renderer_2d = PolylineRenderer2d::new();
-        let point_renderer_2d = PointRenderer2d::new();
-        let point_renderer = PointRenderer3d::new();
-        let polyline_renderer = PolylineRenderer3d::new();
-        let text_renderer = TextRenderer::new();
-
-        log::info!("DRM window created successfully");
+        log::info!("DRM window initialized successfully");
 
         Ok(Self {
             drm_canvas,
-            polyline_renderer,
-            point_renderer,
-            polyline_renderer_2d,
-            point_renderer_2d,
-            text_renderer,
+            polyline_renderer: PolylineRenderer3d::new(),
+            point_renderer: PointRenderer3d::new(),
+            polyline_renderer_2d: PolylineRenderer2d::new(),
+            point_renderer_2d: PointRenderer2d::new(),
+            text_renderer: TextRenderer::new(),
             framebuffer_manager,
             post_process_render_target,
             ambient_intensity: 0.2,
@@ -180,11 +200,7 @@ impl DRMWindow {
     /// }
     /// # }
     /// ```
-    pub async fn render_3d(
-        &mut self,
-        scene: &mut SceneNode3d,
-        camera: &mut impl Camera3d,
-    ) -> bool {
+    pub async fn render_3d(&mut self, scene: &mut SceneNode3d, camera: &mut impl Camera3d) -> bool {
         use crate::context::Context;
         use crate::event::WindowEvent;
         use crate::resource::RenderContext2dEncoder;
@@ -195,7 +211,7 @@ impl DRMWindow {
 
         // Create a canvas wrapper for camera compatibility
         let canvas_wrapper = super::DrmCanvasWrapper::new(&self.drm_canvas);
-        
+
         // SAFETY: Cameras need a &Canvas reference, but in headless mode most
         // don't actually use it. This transmute is safe because:
         // 1. The camera only reads from the canvas (no writes)
@@ -203,7 +219,7 @@ impl DRMWindow {
         // 3. DrmCanvasWrapper provides compatible methods for camera calls
         let canvas_ref: &Canvas = unsafe { std::mem::transmute(&canvas_wrapper) };
 
-        // Update camera state  
+        // Update camera state
         camera.handle_event(canvas_ref, &WindowEvent::FramebufferSize(w, h));
         camera.update(canvas_ref);
 
@@ -224,8 +240,7 @@ impl DRMWindow {
 
         // Resize post-process render target if needed
         let surface_format = self.drm_canvas.surface_format();
-        self.post_process_render_target
-            .resize(w, h, surface_format);
+        self.post_process_render_target.resize(w, h, surface_format);
 
         // Render directly to the frame (no post-processing for now)
         let color_view = &frame_view;
@@ -260,15 +275,18 @@ impl DRMWindow {
                 viewport_width: w,
                 viewport_height: h,
             };
-            
-            self.text_renderer.render(w as f32, h as f32, &mut context_2d_encoder);
+
+            self.text_renderer
+                .render(w as f32, h as f32, &mut context_2d_encoder);
         }
 
         // Submit commands
         ctxt.submit(std::iter::once(encoder.finish()));
 
         // Present the frame
-        self.drm_canvas.present();
+        if let Err(e) = self.drm_canvas.present() {
+            log::error!("Failed to present frame: {}", e);
+        }
 
         true // Always continue in headless mode
     }
@@ -286,7 +304,7 @@ impl DRMWindow {
     /// ```no_run
     /// # use kiss3d::window::DRMWindow;
     /// # async fn example() {
-    /// # let window = DRMWindow::new(800, 600).await.unwrap();
+    /// # let window = DRMWindow::new("dev/dri/card0", 800, 600).await.unwrap();
     /// let mut pixels = Vec::new();
     /// window.snap(&mut pixels);
     /// // pixels now contains RGB data
@@ -325,7 +343,7 @@ impl DRMWindow {
     /// ```no_run
     /// # use kiss3d::window::DRMWindow;
     /// # async fn example() {
-    /// # let window = DRMWindow::new(800, 600).await.unwrap();
+    /// # let window = DRMWindow::new("dev/dri/card0", 800, 600).await.unwrap();
     /// let image = window.snap_image();
     /// image.save("frame.png").unwrap();
     /// # }
