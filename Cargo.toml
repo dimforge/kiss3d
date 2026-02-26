@@ -1,15 +1,15 @@
 [package]
 authors = ["Sébastien Crozet <developer@crozet.re>"]
-name = "kiss3d"
+name    = "kiss3d"
 version = "0.40.0"
 
 autoexamples = true
-description = "Keep it simple, stupid, 2D and 3D graphics engine for Rust."
-edition = "2018"
-keywords = ["graphics", "wgpu", "KISS"]
-license = "BSD-3-Clause"
-readme = "README.md"
-repository = "https://github.com/dimforge/kiss3d"
+description  = "Keep it simple, stupid, 2D and 3D graphics engine for Rust."
+edition      = "2018"
+keywords     = ["graphics", "wgpu", "KISS"]
+license      = "BSD-3-Clause"
+readme       = "README.md"
+repository   = "https://github.com/dimforge/kiss3d"
 
 include = [
   "src/**/*.rs",
@@ -29,42 +29,42 @@ name = "kiss3d"
 path = "src/lib.rs"
 
 [features]
-egui = ["dep:egui", "dep:egui-wgpu"]
+egui      = ["dep:egui", "dep:egui-wgpu"]
 recording = ["dep:ffmpeg-the-third"]
-parry = ["dep:parry3d"]
-serde = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde"]
-drm = ["dep:drm"]
+parry     = ["dep:parry3d"]
+serde     = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde"]
+drm       = ["dep:drm"]
 
 [dependencies]
-bitflags = "2"
-bytemuck = { version = "1", features = ["derive"] }
-egui = { version = "0.33", optional = true, default-features = true }
-egui-wgpu = { version = "0.33", optional = true }
-either = "1"
-image = "0.25"
-web-time = "1"
-kiss3d-macro = { version = "0.36.0", path = "kiss3d-macro" }
-log = "0.4"
-glamx = { version = "0.1", features = ["bytemuck"] }
+bitflags         = "2"
+bytemuck         = { version = "1", features = ["derive"] }
+egui             = { version = "0.33", optional = true, default-features = true }
+egui-wgpu        = { version = "0.33", optional = true }
+either           = "1"
+image            = "0.25"
+web-time         = "1"
+kiss3d-macro     = { version = "0.36.0", path = "kiss3d-macro" }
+log              = "0.4"
+glamx            = { version = "0.1", features = ["bytemuck"] }
 ffmpeg-the-third = { version = "4", optional = true }
-num-traits = "0.2"
-parry3d = { version = "0.26", optional = true }
-rgb = "0.8"
-rusttype = { version = "0.9", features = ["gpu_cache"] }
-serde = { version = "1", features = ["derive"], optional = true }
-wgpu = "27"
-winit = "0.30"
-drm = { version = "0.14.1", optional = true }
+num-traits       = "0.2"
+parry3d          = { version = "0.26", optional = true }
+rgb              = "0.8"
+rusttype         = { version = "0.9", features = ["gpu_cache"] }
+serde            = { version = "1", features = ["derive"], optional = true }
+wgpu             = "27"
+winit            = "0.30"
+drm              = { version = "0.14.1", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "0.4"
 
 [target.wasm32-unknown-unknown.dependencies]
-oneshot = "0.1"
-getrandom = { version = "0.3", features = ["wasm_js"] }
-wasm-bindgen = "0.2"
+oneshot              = "0.1"
+getrandom            = { version = "0.3", features = ["wasm_js"] }
+wasm-bindgen         = "0.2"
 wasm-bindgen-futures = "0.4.54"
-web-sys = { version = "0.3", features = [
+web-sys = { version  = "0.3", features = [
   "console",
   "KeyEvent",
   "KeyboardEvent",
@@ -85,18 +85,18 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 env_logger = "0.11"
-parry2d = "0.26"
-rand = "0.9"
+parry2d    = "0.26"
+rand       = "0.9"
 
 [[example]]
-name = "decomp"
+name              = "decomp"
 required-features = ["parry"]
 
 [[example]]
-name = "procedural"
+name              = "procedural"
 required-features = ["parry"]
 
 [patch.crates-io]
-#glamx = { path = "../glamx" }
+#glamx   = { path = "../glamx" }
 #parry3d = { path = "../parry/crates/parry3d" }
 #parry2d = { path = "../parry/crates/parry2d" }
