@@ -39,7 +39,7 @@ impl NumSamples {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 /// Canvas options.
 pub struct CanvasSetup {
@@ -47,6 +47,30 @@ pub struct CanvasSetup {
     pub vsync: bool,
     /// Number of AA samples.
     pub samples: NumSamples,
+    /// The id of the canvas element to use (WASM only).
+    /// Defaults to `"canvas"`. If an element with this id exists in the DOM,
+    /// it will be used; otherwise a new canvas element with this id is created.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use kiss3d::window::{Window, CanvasSetup};
+    /// let setup = CanvasSetup {
+    ///     canvas_id: "my-3d-canvas".to_string(),
+    ///     ..Default::default()
+    /// };
+    /// let mut window = Window::new_with_setup("Title", 800, 600, setup);
+    /// ```
+    pub canvas_id: String,
+}
+
+impl Default for CanvasSetup {
+    fn default() -> Self {
+        CanvasSetup {
+            vsync: true,
+            samples: NumSamples::Zero,
+            canvas_id: "canvas".to_string(),
+        }
+    }
 }
 
 /// An abstract structure representing a window for native applications, and a canvas for web applications.

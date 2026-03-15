@@ -1,3 +1,15 @@
+# Unreleased
+
+## Breaking Changes
+
+- `CanvasSetup` no longer implements `Copy` (now contains a `String` field).
+- `CanvasSetup` has a new required field `canvas_id: String`. Use `..Default::default()` to fill it in.
+
+## New Features
+
+- Added `canvas_id` field to `CanvasSetup` to allow configuring the HTML canvas element ID used on WASM targets (defaults to `"canvas"`).
+- Implemented `Default` for `CanvasSetup`.
+
 # v0.40.0
 
 ## Breaking Changes
