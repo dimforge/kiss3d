@@ -261,14 +261,14 @@ impl Window {
 
         // Get canvas reference for camera updates
         // This is the ONLY difference between DRM and regular windows
+        // DRM: Create wrapper for compatibility
         #[cfg(feature = "drm")]
-        let canvas_ref = {
-            // DRM: Create wrapper for compatibility
-            let wrapper = crate::window::drm::DrmCanvasWrapper::new(&self.canvas);
+        let wrapper = crate::window::drm::DrmCanvasWrapper::new(&self.canvas);
+        #[cfg(feature = "drm")]
+        let canvas_ref =
             // SAFETY: Cameras only read from canvas, lifetime is scoped to this function
             unsafe {
                 std::mem::transmute::<&crate::window::drm::DrmCanvasWrapper, &Canvas>(&wrapper)
-            }
         };
         #[cfg(not(feature = "drm"))]
         let canvas_ref = &self.canvas;
