@@ -269,11 +269,14 @@ impl Window {
         #[cfg(not(feature = "drm"))]
         let canvas_ref = &self.canvas;
 
-        camera_2d.handle_event(canvas_ref, &WindowEvent::FramebufferSize(w, h));
+        #[cfg(not(feature = "drm"))]
+        {
+            // todo make it work for drmf
+            camera_2d.handle_event(canvas_ref, &WindowEvent::FramebufferSize(w, h));
+            camera_2d.update(canvas_ref);
+        }
         camera.handle_event(canvas_ref, &WindowEvent::FramebufferSize(w, h));
-        camera_2d.update(canvas_ref);
         camera.update(canvas_ref);
-
         // No need to update the light position here - it's computed per-frame
         // in the material's prepare() based on the camera position
 
@@ -452,7 +455,10 @@ impl Window {
         self.capture_frame_if_recording();
 
         // Present the frame
+        #[cfg(not(feature = "drm"))]
         self.canvas.present(frame);
+        #[cfg(feature = "drm")]
+        let _ = self.canvas.present(frame);
         #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsCast;

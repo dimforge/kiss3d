@@ -2,13 +2,11 @@
 
 use super::drm_canvas::DrmCanvas;
 use super::drm_events::DrmEventManager;
-use crate::camera::{Camera2d, Camera3d, FixedView3d};
+use crate::camera::{Camera2d, Camera3d};
 use crate::color::{Color, BLACK};
 use crate::context::Context;
-use crate::post_processing::{PostProcessingContext, PostProcessingEffect};
 use crate::renderer::{PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d};
 use crate::resource::{FramebufferManager, RenderTarget};
-use crate::scene::{SceneNode2d, SceneNode3d};
 use crate::text::TextRenderer;
 #[cfg(feature = "egui")]
 use crate::window::egui_integration::EguiContext;
@@ -16,8 +14,6 @@ use crate::window::egui_integration::EguiContext;
 use crate::window::recording::RecordingState;
 use crate::window::window_cache::WindowCache;
 use glamx::UVec2;
-use glamx::{Vec2, Vec3};
-use image::{imageops, ImageBuffer, Rgb};
 use std::cell::RefCell;
 use std::error::Error;
 use std::rc::Rc;
