@@ -2,6 +2,7 @@
 
 use crate::context::Context;
 use crate::resource::OffscreenBuffers;
+use crate::window::canvas::CanvasInputState;
 use std::error::Error;
 use std::fmt;
 
@@ -389,6 +390,14 @@ impl DrmCanvas {
     /// Returns the dimensions of the render target.
     pub fn size(&self) -> (u32, u32) {
         (self.surface_config.width, self.surface_config.height)
+    }
+
+    /// Returns a lightweight headless input snapshot (no keyboard/mouse in DRM mode).
+    ///
+    /// The returned value is `'static` — it borrows from empty static slices,
+    /// so no allocation takes place.
+    pub fn input_state(&self) -> CanvasInputState<'static> {
+        CanvasInputState::headless(self.size())
     }
 
     /// Returns the surface format.
