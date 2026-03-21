@@ -1,7 +1,7 @@
 mod card;
 mod display_thread;
-mod drm_canvas;
-mod drm_events;
+pub(super) mod drm_canvas;
+pub(super) mod drm_events;
 mod drm_window;
 
-pub use drm_window::Window;
+pub use crate::window::window_common::Window;

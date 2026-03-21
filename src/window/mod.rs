@@ -17,11 +17,8 @@ mod window_cache;
 mod window_common;
 
 pub use canvas::{Canvas, CanvasInputState, CanvasSetup, NumSamples};
-#[cfg(feature = "drm")]
-pub use drm::Window;
 #[cfg(feature = "recording")]
 pub use recording::RecordingConfig;
 pub use wgpu_canvas::WgpuCanvas;
-#[cfg(not(feature = "drm"))]
-pub use window::Window;
 pub(crate) use window_cache::WINDOW_CACHE;
+pub use window_common::Window;

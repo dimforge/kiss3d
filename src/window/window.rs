@@ -2,56 +2,24 @@
 
 #![cfg(not(feature = "drm"))]
 
-use std::cell::RefCell;
 use std::path::Path;
-use std::rc::Rc;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc;
 use std::sync::Arc;
 
 use crate::color::BLACK;
 use crate::context::Context;
-use crate::event::WindowEvent;
-use crate::renderer::{PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d};
-use crate::resource::{
-    FramebufferManager, MaterialManager2d, MeshManager2d, RenderTarget, Texture, TextureManager,
-};
-use crate::text::TextRenderer;
+use crate::resource::{MaterialManager2d, MeshManager2d, Texture, TextureManager};
 use crate::window::canvas::CanvasSetup;
 use crate::window::Canvas;
 use image::{GenericImage, Pixel};
 
-#[cfg(feature = "egui")]
-pub(super) use super::egui_integration::EguiContext;
-#[cfg(feature = "recording")]
-pub(super) use super::recording::RecordingState;
 use super::window_cache::WindowCache;
 
-pub(super) static DEFAULT_WIDTH: u32 = 800u32;
-pub(super) static DEFAULT_HEIGHT: u32 = 600u32;
+pub(crate) static DEFAULT_WIDTH: u32 = 800u32;
+pub(crate) static DEFAULT_HEIGHT: u32 = 600u32;
 
-/// Structure representing a window and a 3D scene.
-///
-/// This is the main interface with the 3d engine.
-pub struct Window {
-    pub(super) events: Rc<Receiver<WindowEvent>>,
-    pub(super) unhandled_events: Rc<RefCell<Vec<WindowEvent>>>,
-    pub(super) ambient_intensity: f32,
-    pub(super) background: crate::color::Color,
-    pub(super) polyline_renderer_2d: PolylineRenderer2d,
-    pub(super) point_renderer_2d: PointRenderer2d,
-    pub(super) point_renderer: PointRenderer3d,
-    pub(super) polyline_renderer: PolylineRenderer3d,
-    pub(super) text_renderer: TextRenderer,
-    #[allow(dead_code)]
-    pub(super) framebuffer_manager: FramebufferManager,
-    pub(super) post_process_render_target: RenderTarget,
-    pub(super) should_close: bool,
-    #[cfg(feature = "egui")]
-    pub(super) egui_context: EguiContext,
-    pub(super) canvas: Canvas,
-    #[cfg(feature = "recording")]
-    pub(super) recording: Option<RecordingState>,
-}
+// Window struct is defined in window_common.rs.
+use super::window_common::Window;
 
 impl Window {
     /// Gets a reference to the underlying canvas.
@@ -257,24 +225,25 @@ impl Window {
         let (event_send, event_receive) = mpsc::channel();
         let canvas = Canvas::open(title, hide, width, height, setup, event_send).await;
 
+        // Track window count for proper cleanup
         Context::increment_window_count();
         WindowCache::populate();
 
-        let framebuffer_manager = FramebufferManager::new();
+        let framebuffer_manager = crate::resource::FramebufferManager::new();
         let mut usr_window = Window {
             should_close: false,
             canvas,
-            events: Rc::new(event_receive),
-            unhandled_events: Rc::new(RefCell::new(Vec::new())),
+            events: std::rc::Rc::new(event_receive),
+            unhandled_events: std::rc::Rc::new(std::cell::RefCell::new(Vec::new())),
             ambient_intensity: 0.2,
             background: BLACK,
-            polyline_renderer_2d: PolylineRenderer2d::new(),
-            point_renderer_2d: PointRenderer2d::new(),
-            point_renderer: PointRenderer3d::new(),
-            polyline_renderer: PolylineRenderer3d::new(),
-            text_renderer: TextRenderer::new(),
+            polyline_renderer_2d: crate::renderer::PolylineRenderer2d::new(),
+            point_renderer_2d: crate::renderer::PointRenderer2d::new(),
+            point_renderer: crate::renderer::PointRenderer3d::new(),
+            polyline_renderer: crate::renderer::PolylineRenderer3d::new(),
+            text_renderer: crate::text::TextRenderer::new(),
             #[cfg(feature = "egui")]
-            egui_context: EguiContext::new(),
+            egui_context: super::egui_integration::EguiContext::new(),
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             framebuffer_manager,
             #[cfg(feature = "recording")]

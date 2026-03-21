@@ -302,7 +302,8 @@ impl Window {
         } else {
             (&frame_view, self.canvas.depth_view())
         };
-        let (color_view, depth_view) = (color_view.clone(), depth_view.clone());
+        let (color_view, depth_view): (wgpu::TextureView, wgpu::TextureView) =
+            (color_view.clone(), depth_view.clone());
 
         // Render the 3D scene (if present)
         if let Some(scene) = scene {

@@ -4,45 +4,14 @@ use super::drm_canvas::DrmCanvas;
 use super::drm_events::DrmEventManager;
 use crate::color::BLACK;
 use crate::context::Context;
-use crate::renderer::{PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d};
-use crate::resource::{FramebufferManager, MaterialManager2d, MeshManager2d, RenderTarget};
-use crate::text::TextRenderer;
-#[cfg(feature = "egui")]
-use crate::window::egui_integration::EguiContext;
-#[cfg(feature = "recording")]
-use crate::window::recording::RecordingState;
+use crate::resource::{FramebufferManager, MaterialManager2d, MeshManager2d};
 use crate::window::window_cache::WindowCache;
 use std::cell::RefCell;
 use std::error::Error;
 use std::rc::Rc;
 
-/// A window for headless 3D rendering using DRM (Direct Rendering Manager).
-///
-/// Suitable for console-only systems such as Raspberry Pi. All rendering logic
-/// (drawing, screenshots, recording, render loop) is shared with the windowed
-/// `Window` through the common `impl` blocks in the sibling modules.
-pub struct Window {
-    // ── DRM-specific ──────────────────────────────────────────────────────
-    pub(crate) canvas: DrmCanvas,
-    pub(crate) event_manager: Rc<RefCell<DrmEventManager>>,
-
-    // ── Shared fields — must mirror window::Window exactly ────────────────
-    pub(crate) ambient_intensity: f32,
-    pub(crate) background: crate::color::Color,
-    pub(crate) polyline_renderer_2d: PolylineRenderer2d,
-    pub(crate) point_renderer_2d: PointRenderer2d,
-    pub(crate) point_renderer: PointRenderer3d,
-    pub(crate) polyline_renderer: PolylineRenderer3d,
-    pub(crate) text_renderer: TextRenderer,
-    #[allow(dead_code)]
-    pub(crate) framebuffer_manager: FramebufferManager,
-    pub(crate) post_process_render_target: RenderTarget,
-    pub(crate) should_close: bool,
-    #[cfg(feature = "egui")]
-    pub(crate) egui_context: EguiContext,
-    #[cfg(feature = "recording")]
-    pub(crate) recording: Option<RecordingState>,
-}
+// Window struct is defined in window_common.rs.
+use crate::window::window_common::Window;
 
 impl Window {
     // ── Constructors ──────────────────────────────────────────────────────
@@ -78,16 +47,16 @@ impl Window {
             event_manager: Rc::new(RefCell::new(DrmEventManager::new_headless())),
             ambient_intensity: 0.2,
             background: BLACK,
-            polyline_renderer_2d: PolylineRenderer2d::new(),
-            point_renderer_2d: PointRenderer2d::new(),
-            point_renderer: PointRenderer3d::new(),
-            polyline_renderer: PolylineRenderer3d::new(),
-            text_renderer: TextRenderer::new(),
+            polyline_renderer_2d: crate::renderer::PolylineRenderer2d::new(),
+            point_renderer_2d: crate::renderer::PointRenderer2d::new(),
+            point_renderer: crate::renderer::PointRenderer3d::new(),
+            polyline_renderer: crate::renderer::PolylineRenderer3d::new(),
+            text_renderer: crate::text::TextRenderer::new(),
             framebuffer_manager,
             post_process_render_target,
             should_close: false,
             #[cfg(feature = "egui")]
-            egui_context: EguiContext::new(),
+            egui_context: crate::window::egui_integration::EguiContext::new(),
             #[cfg(feature = "recording")]
             recording: None,
         })
