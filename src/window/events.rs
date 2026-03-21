@@ -120,7 +120,8 @@ impl Window {
             }
         }
 
-        camera.handle_event(&self.canvas, event);
-        camera_2d.handle_event(&self.canvas, event);
+        let input = self.canvas.input_state();
+        camera.handle_event(&input, event);
+        camera_2d.handle_event(&input, event);
     }
 }

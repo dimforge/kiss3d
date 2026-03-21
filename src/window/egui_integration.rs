@@ -5,9 +5,6 @@ use egui::RawInput;
 use crate::event::{Action, Key, WindowEvent};
 use crate::renderer::EguiRenderer;
 
-#[cfg(feature = "drm")]
-use super::drm::Window;
-#[cfg(not(feature = "drm"))]
 use super::Window;
 
 pub(crate) struct EguiContext {

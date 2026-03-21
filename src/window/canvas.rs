@@ -4,6 +4,72 @@ use crate::event::{Action, Key, MouseButton, WindowEvent};
 use crate::window::WgpuCanvas;
 use image::{GenericImage, Pixel};
 
+/// Static fully-released key/button tables used by the headless/DRM variant.
+static HEADLESS_KEYS: [Action; Key::Unknown as usize + 1] =
+    [Action::Release; Key::Unknown as usize + 1];
+static HEADLESS_BUTTONS: [Action; MouseButton::Button8 as usize + 1] =
+    [Action::Release; MouseButton::Button8 as usize + 1];
+
+/// Lightweight view of canvas input state passed to cameras.
+///
+/// Cameras receive this instead of a `&Canvas` so that headless back-ends
+/// (DRM, offscreen) can satisfy the same interface without wrapping or
+/// transmuting unrelated types.
+///
+/// The struct borrows directly from the underlying canvas arrays — no
+/// allocation or copying takes place.
+#[derive(Copy, Clone, Debug)]
+pub struct CanvasInputState<'a> {
+    /// The HiDPI scale factor of the display.
+    pub scale_factor: f64,
+    /// The size of the render target in pixels `(width, height)`.
+    pub size: (u32, u32),
+    key_states: &'a [Action],
+    button_states: &'a [Action],
+}
+
+impl<'a> CanvasInputState<'a> {
+    /// Build from borrowed slices; used by `Canvas::input_state()`.
+    pub fn new(
+        scale_factor: f64,
+        size: (u32, u32),
+        key_states: &'a [Action],
+        button_states: &'a [Action],
+    ) -> Self {
+        Self {
+            scale_factor,
+            size,
+            key_states,
+            button_states,
+        }
+    }
+
+    /// Headless / no-input variant (`DrmCanvas`, offscreen, tests).
+    ///
+    /// Returns a `'static` value backed by fully-released static arrays —
+    /// all key and button queries return `Action::Release`.
+    pub fn headless(size: (u32, u32)) -> CanvasInputState<'static> {
+        CanvasInputState {
+            scale_factor: 1.0,
+            size,
+            key_states: &HEADLESS_KEYS,
+            button_states: &HEADLESS_BUTTONS,
+        }
+    }
+
+    /// Returns the current state of the given key.
+    #[inline]
+    pub fn get_key(&self, key: Key) -> Action {
+        self.key_states[key as usize]
+    }
+
+    /// Returns the current state of the given mouse button.
+    #[inline]
+    pub fn get_mouse_button(&self, button: MouseButton) -> Action {
+        self.button_states[button as usize]
+    }
+}
+
 /// The possible number of samples for multisample anti-aliasing.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -164,6 +230,20 @@ impl Canvas {
     /// The state of a key.
     pub fn get_key(&self, key: Key) -> Action {
         self.canvas.get_key(key)
+    }
+
+    /// Returns a lightweight view of the current input state.
+    ///
+    /// Pass this to camera `handle_event` and `update` instead of `&Canvas`.
+    /// No allocation or copying takes place — the returned value borrows
+    /// directly from the underlying `WgpuCanvas` arrays.
+    pub fn input_state(&self) -> CanvasInputState<'_> {
+        CanvasInputState::new(
+            self.canvas.scale_factor(),
+            self.canvas.size(),
+            &self.canvas.key_states,
+            &self.canvas.button_states,
+        )
     }
 
     /// Copies the frame texture to the readback texture for later reading.

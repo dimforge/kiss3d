@@ -15,11 +15,8 @@ use crate::resource::{
     RenderTarget,
 };
 use crate::scene::{SceneNode2d, SceneNode3d};
-use crate::window::Canvas;
+use crate::window::CanvasInputState;
 
-#[cfg(feature = "drm")]
-use super::drm::Window;
-#[cfg(not(feature = "drm"))]
 use super::Window;
 
 /// Helper function to render a 3D scene frame.
@@ -38,7 +35,7 @@ pub(crate) fn render_frame_3d(
     ambient_intensity: f32,
     scene: &mut SceneNode3d,
     camera: &mut dyn Camera3d,
-    canvas: &Canvas,
+    input: &CanvasInputState<'_>,
     point_renderer: &mut PointRenderer3d,
     polyline_renderer: &mut PolylineRenderer3d,
     custom_renderer: &mut Option<&mut dyn Renderer3d>,
@@ -87,7 +84,7 @@ pub(crate) fn render_frame_3d(
 
     // Render the 3D scene using two-phase rendering
     for pass in 0usize..camera.num_passes() {
-        camera.start_pass(pass, canvas);
+        camera.start_pass(pass, input);
 
         // Phase 1: Prepare - collect uniforms in CPU memory and gather lights from scene
         scene.data_mut().prepare(pass, camera, &mut lights, w, h);
@@ -176,7 +173,7 @@ pub(crate) fn render_frame_3d(
         }
     }
 
-    camera.render_complete(canvas);
+    camera.render_complete(input);
 }
 
 impl Window {
@@ -259,24 +256,12 @@ impl Window {
         let w = self.width();
         let h = self.height();
 
-        // Get canvas reference for camera updates
-        // This is the ONLY difference between DRM and regular windows
-        // DRM: Create wrapper for compatibility
-        #[cfg(feature = "drm")]
-        let canvas_wrapper = crate::window::drm::DrmCanvasWrapper::new(&self.canvas);
-        #[cfg(feature = "drm")]
-        let canvas_ref: &Canvas = unsafe { std::mem::transmute(&canvas_wrapper) };
-        #[cfg(not(feature = "drm"))]
-        let canvas_ref = &self.canvas;
+        let input = self.canvas.input_state();
 
-        #[cfg(not(feature = "drm"))]
-        {
-            // todo make it work for drmf
-            camera_2d.handle_event(canvas_ref, &WindowEvent::FramebufferSize(w, h));
-            camera_2d.update(canvas_ref);
-        }
-        camera.handle_event(canvas_ref, &WindowEvent::FramebufferSize(w, h));
-        camera.update(canvas_ref);
+        camera_2d.handle_event(&input, &WindowEvent::FramebufferSize(w, h));
+        camera_2d.update(&input);
+        camera.handle_event(&input, &WindowEvent::FramebufferSize(w, h));
+        camera.update(&input);
         // No need to update the light position here - it's computed per-frame
         // in the material's prepare() based on the camera position
 
@@ -328,7 +313,7 @@ impl Window {
                 self.ambient_intensity,
                 scene,
                 camera,
-                canvas_ref,
+                &input,
                 &mut self.point_renderer,
                 &mut self.polyline_renderer,
                 &mut renderer,
@@ -455,10 +440,7 @@ impl Window {
         self.capture_frame_if_recording();
 
         // Present the frame
-        #[cfg(not(feature = "drm"))]
         self.canvas.present(frame);
-        #[cfg(feature = "drm")]
-        let _ = self.canvas.present(frame);
         #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsCast;

@@ -8,6 +8,7 @@ use crate::context::Context;
 use crate::renderer::{PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d};
 use crate::resource::{FramebufferManager, RenderTarget};
 use crate::text::TextRenderer;
+use crate::window::canvas::CanvasInputState;
 #[cfg(feature = "egui")]
 use crate::window::egui_integration::EguiContext;
 #[cfg(feature = "recording")]
@@ -276,12 +277,9 @@ impl Window {
             // TODO: implement feed_egui_event for DRM
         }
 
-        // Create a wrapper for camera compatibility
-        let wrapper = super::DrmCanvasWrapper::new(&self.canvas);
-        let canvas_ref: &crate::window::Canvas = unsafe { std::mem::transmute(&wrapper) };
-
-        camera.handle_event(canvas_ref, event);
-        camera_2d.handle_event(canvas_ref, event);
+        let input: CanvasInputState<'static> = self.canvas.input_state();
+        camera.handle_event(&input, event);
+        camera_2d.handle_event(&input, event);
     }
 }
 

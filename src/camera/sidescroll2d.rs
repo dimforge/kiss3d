@@ -1,6 +1,6 @@
 use crate::camera::Camera2d;
 use crate::event::{Action, MouseButton, WindowEvent};
-use crate::window::Canvas;
+use crate::window::CanvasInputState;
 use glamx::{Mat3, Vec2, Vec3, Vec3Swizzles};
 use num::Pow;
 
@@ -133,7 +133,7 @@ impl PanZoomCamera2d {
 }
 
 impl Camera2d for PanZoomCamera2d {
-    fn handle_event(&mut self, canvas: &Canvas, event: &WindowEvent) {
+    fn handle_event(&mut self, canvas: &CanvasInputState<'_>, event: &WindowEvent) {
         let scale = 1.0; // canvas.scale_factor();
 
         match *event {
@@ -167,7 +167,7 @@ impl Camera2d for PanZoomCamera2d {
         (self.view, self.scaled_proj)
     }
 
-    fn update(&mut self, _: &Canvas) {}
+    fn update(&mut self, _: &CanvasInputState<'_>) {}
 
     /// Calculate the global position of the given window coordinate
     fn unproject(&self, window_coord: Vec2, size: Vec2) -> Vec2 {

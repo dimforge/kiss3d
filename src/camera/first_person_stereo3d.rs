@@ -4,7 +4,7 @@ use glamx::{Mat4, Pose3, Vec2, Vec3};
 
 use crate::camera::Camera3d;
 use crate::event::{Action, Key, MouseButton, WindowEvent};
-use crate::window::Canvas;
+use crate::window::CanvasInputState;
 
 /// First-person camera mode.
 ///
@@ -231,17 +231,17 @@ impl Camera3d for FirstPersonCamera3dStereo {
         Pose3::look_at_rh(self.eye, self.at(), Vec3::Y)
     }
 
-    fn handle_event(&mut self, canvas: &Canvas, event: &WindowEvent) {
+    fn handle_event(&mut self, input: &CanvasInputState<'_>, event: &WindowEvent) {
         match *event {
             WindowEvent::CursorPos(x, y, _) => {
                 let curr_pos = Vec2::new(x as f32, y as f32);
 
-                if canvas.get_mouse_button(MouseButton::Button1) == Action::Press {
+                if input.get_mouse_button(MouseButton::Button1) == Action::Press {
                     let dpos = curr_pos - self.last_cursor_pos;
                     self.handle_left_button_displacement(dpos)
                 }
 
-                if canvas.get_mouse_button(MouseButton::Button2) == Action::Press {
+                if input.get_mouse_button(MouseButton::Button2) == Action::Press {
                     let dpos = curr_pos - self.last_cursor_pos;
                     self.handle_right_button_displacement(dpos)
                 }
@@ -269,24 +269,24 @@ impl Camera3d for FirstPersonCamera3dStereo {
         self.inverse_proj_view
     }
 
-    fn update(&mut self, canvas: &Canvas) {
+    fn update(&mut self, input: &CanvasInputState<'_>) {
         let t = self.view_transform();
         let front = t.rotation * Vec3::Z;
         let right = t.rotation * Vec3::X;
 
-        if canvas.get_key(Key::Up) == Action::Press {
+        if input.get_key(Key::Up) == Action::Press {
             self.eye += front * self.move_step
         }
 
-        if canvas.get_key(Key::Down) == Action::Press {
+        if input.get_key(Key::Down) == Action::Press {
             self.eye += front * (-self.move_step)
         }
 
-        if canvas.get_key(Key::Right) == Action::Press {
+        if input.get_key(Key::Right) == Action::Press {
             self.eye += right * (-self.move_step)
         }
 
-        if canvas.get_key(Key::Left) == Action::Press {
+        if input.get_key(Key::Left) == Action::Press {
             self.eye += right * self.move_step
         }
 
@@ -312,11 +312,11 @@ impl Camera3d for FirstPersonCamera3dStereo {
     // The stereo camera's start_pass and render_complete functionality would need
     // to be handled differently in wgpu (e.g., through separate render passes
     // or by storing viewport info for materials to use).
-    fn start_pass(&self, _pass: usize, _canvas: &Canvas) {
+    fn start_pass(&self, _pass: usize, _input: &CanvasInputState<'_>) {
         // TODO: Viewport handling needs to be done at render pass creation in wgpu
     }
 
-    fn render_complete(&self, _canvas: &Canvas) {
+    fn render_complete(&self, _input: &CanvasInputState<'_>) {
         // TODO: Viewport reset handled differently in wgpu
     }
 }

@@ -1,6 +1,6 @@
 use crate::camera::Camera2d;
 use crate::event::WindowEvent;
-use crate::window::Canvas;
+use crate::window::CanvasInputState;
 use glamx::{Mat3, Vec2, Vec3, Vec3Swizzles};
 
 /// A camera that cannot move.
@@ -28,8 +28,8 @@ impl FixedView2d {
 }
 
 impl Camera2d for FixedView2d {
-    fn handle_event(&mut self, canvas: &Canvas, event: &WindowEvent) {
-        let scale = canvas.scale_factor();
+    fn handle_event(&mut self, input: &CanvasInputState<'_>, event: &WindowEvent) {
+        let scale = input.scale_factor;
 
         if let WindowEvent::FramebufferSize(w, h) = *event {
             let diag = Vec3::new(
@@ -49,7 +49,7 @@ impl Camera2d for FixedView2d {
         (Mat3::IDENTITY, self.proj)
     }
 
-    fn update(&mut self, _: &Canvas) {}
+    fn update(&mut self, _: &CanvasInputState<'_>) {}
 
     fn unproject(&self, window_coord: Vec2, size: Vec2) -> Vec2 {
         let normalized_coords = Vec2::new(

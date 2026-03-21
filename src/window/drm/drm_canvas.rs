@@ -2,6 +2,7 @@
 
 use crate::context::Context;
 use crate::resource::OffscreenBuffers;
+use crate::window::canvas::CanvasInputState;
 use std::error::Error;
 use std::fmt;
 
@@ -336,11 +337,10 @@ impl DrmCanvas {
     ///
     /// # Arguments
     /// * `_frame` - The surface texture (unused in DRM, kept for API compatibility)
-    pub fn present(&self, _frame: DrmSurfaceTexture) -> Result<(), DrmCanvasError> {
+    pub fn present(&self, _frame: DrmSurfaceTexture) {
         match &self.mode {
             RenderMode::Offscreen => {
                 // No-op for offscreen rendering
-                Ok(())
             }
             #[cfg(feature = "drm")]
             RenderMode::Display(display) => {
@@ -356,12 +356,15 @@ impl DrmCanvas {
                 });
 
                 // Step 2: Read GPU texture into the CPU buffer
-                Self::read_texture_to_buffer(
+                if let Err(e) = Self::read_texture_to_buffer(
                     &self.offscreen_buffers.color_texture,
                     &mut pixel_buffer,
                     width,
                     height,
-                )?;
+                ) {
+                    log::error!("Present: failed to read GPU texture: {}", e);
+                    return;
+                }
                 log::debug!("Present: read GPU texture to CPU buffer");
 
                 // Step 3: Send pixel data to display thread (non-blocking!)
@@ -373,15 +376,11 @@ impl DrmCanvas {
 
                 if let Err(e) = display.display_thread.send_frame(command) {
                     log::error!("Failed to send frame to display thread: {}", e);
-                    return Err(DrmCanvasError::PageFlipError(format!(
-                        "Failed to send frame to display thread: {}",
-                        e
-                    )));
+                    return;
                 }
 
                 log::trace!("Frame queued for async display - main thread continues");
                 log::debug!("Present: complete");
-                Ok(())
             }
         }
     }
@@ -389,6 +388,14 @@ impl DrmCanvas {
     /// Returns the dimensions of the render target.
     pub fn size(&self) -> (u32, u32) {
         (self.surface_config.width, self.surface_config.height)
+    }
+
+    /// Returns a lightweight headless input state view (no keyboard/mouse in DRM mode).
+    ///
+    /// The returned value is `'static` — it borrows from fully-released static
+    /// arrays, so no allocation takes place.
+    pub fn input_state(&self) -> CanvasInputState<'static> {
+        CanvasInputState::headless(self.size())
     }
 
     /// Returns the surface format.

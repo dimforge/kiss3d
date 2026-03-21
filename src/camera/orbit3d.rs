@@ -1,7 +1,7 @@
 use crate::camera::first_person3d::CoordSystemRh;
 use crate::camera::Camera3d;
 use crate::event::{Action, Key, Modifiers, MouseButton, WindowEvent};
-use crate::window::Canvas;
+use crate::window::CanvasInputState;
 use glamx::{Mat4, Pose3, Vec2, Vec3};
 use std::f32;
 
@@ -496,13 +496,13 @@ impl Camera3d for OrbitCamera3d {
         self.coord_system.rotation_to_y_up.conjugate() * Vec3::new(px, py, pz)
     }
 
-    fn handle_event(&mut self, canvas: &Canvas, event: &WindowEvent) {
+    fn handle_event(&mut self, input: &CanvasInputState<'_>, event: &WindowEvent) {
         match *event {
             WindowEvent::CursorPos(x, y, modifiers) => {
                 let curr_pos = Vec2::new(x as f32, y as f32);
 
                 if let Some(rotate_button) = self.rotate_button {
-                    if canvas.get_mouse_button(rotate_button) == Action::Press
+                    if input.get_mouse_button(rotate_button) == Action::Press
                         && self
                             .rotate_modifiers
                             .map(|m| m == modifiers)
@@ -514,7 +514,7 @@ impl Camera3d for OrbitCamera3d {
                 }
 
                 if let Some(drag_button) = self.drag_button {
-                    if canvas.get_mouse_button(drag_button) == Action::Press
+                    if input.get_mouse_button(drag_button) == Action::Press
                         && self.drag_modifiers.map(|m| m == modifiers).unwrap_or(true)
                     {
                         let dpos = curr_pos - self.last_cursor_pos;
@@ -551,5 +551,5 @@ impl Camera3d for OrbitCamera3d {
         self.inverse_proj_view
     }
 
-    fn update(&mut self, _: &Canvas) {}
+    fn update(&mut self, _: &CanvasInputState<'_>) {}
 }

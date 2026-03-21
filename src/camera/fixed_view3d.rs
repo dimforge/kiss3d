@@ -1,6 +1,6 @@
 use crate::camera::Camera3d;
 use crate::event::WindowEvent;
-use crate::window::Canvas;
+use crate::window::CanvasInputState;
 use glamx::{Mat4, Pose3, Vec3};
 use std::f32;
 
@@ -62,7 +62,7 @@ impl Camera3d for FixedView3d {
         Vec3::ZERO
     }
 
-    fn handle_event(&mut self, _: &Canvas, event: &WindowEvent) {
+    fn handle_event(&mut self, _: &CanvasInputState<'_>, event: &WindowEvent) {
         if let WindowEvent::FramebufferSize(w, h) = *event {
             self.last_framebuffer_size = (w as f32, h as f32);
             self.update_projviews();
@@ -82,5 +82,5 @@ impl Camera3d for FixedView3d {
         self.inv_proj
     }
 
-    fn update(&mut self, _: &Canvas) {}
+    fn update(&mut self, _: &CanvasInputState<'_>) {}
 }

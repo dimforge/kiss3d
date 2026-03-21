@@ -1,5 +1,5 @@
 use crate::event::WindowEvent;
-use crate::window::Canvas;
+use crate::window::CanvasInputState;
 use glamx::{Mat4, Pose3, Vec2, Vec3, Vec4, Vec4Swizzles};
 
 /// Trait that all camera implementations must implement.
@@ -27,9 +27,9 @@ pub trait Camera3d {
     /// the camera to respond to user input.
     ///
     /// # Arguments
-    /// * `canvas` - Reference to the rendering canvas
+    /// * `input` - Borrowed view of the canvas input state
     /// * `event` - The window event to handle
-    fn handle_event(&mut self, canvas: &Canvas, event: &WindowEvent);
+    fn handle_event(&mut self, input: &CanvasInputState<'_>, event: &WindowEvent);
 
     // ==================
     // Transformation-related methods
@@ -87,8 +87,8 @@ pub trait Camera3d {
     /// Use this to update internal camera state based on the canvas size or other factors.
     ///
     /// # Arguments
-    /// * `canvas` - Reference to the rendering canvas
-    fn update(&mut self, canvas: &Canvas);
+    /// * `input` - Borrowed view of the canvas input state
+    fn update(&mut self, input: &CanvasInputState<'_>);
 
     /// Returns the view and projection matrices for a given rendering pass.
     ///
@@ -123,18 +123,18 @@ pub trait Camera3d {
     ///
     /// # Arguments
     /// * `pass` - The index of the pass being started
-    /// * `canvas` - Reference to the rendering canvas
+    /// * `input` - Borrowed view of the canvas input state
     #[inline]
-    fn start_pass(&self, _pass: usize, _canvas: &Canvas) {}
+    fn start_pass(&self, _pass: usize, _input: &CanvasInputState<'_>) {}
 
     /// Called after the scene has been rendered, before post-processing.
     ///
     /// Override this to perform cleanup or additional rendering steps.
     ///
     /// # Arguments
-    /// * `canvas` - Reference to the rendering canvas
+    /// * `input` - Borrowed view of the canvas input state
     #[inline]
-    fn render_complete(&self, _canvas: &Canvas) {}
+    fn render_complete(&self, _input: &CanvasInputState<'_>) {}
 
     /// Projects a 3D point in world coordinates to 2D screen coordinates.
     ///

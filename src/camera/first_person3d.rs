@@ -1,6 +1,6 @@
 use crate::camera::Camera3d;
 use crate::event::{Action, Key, MouseButton, WindowEvent};
-use crate::window::Canvas;
+use crate::window::CanvasInputState;
 use glamx::{Mat4, Pose3, Rot3, Vec2, Vec3};
 use std::f32;
 
@@ -418,20 +418,20 @@ impl Camera3d for FirstPersonCamera3d {
         Pose3::look_at_rh(self.eye, self.at(), self.coord_system.up_axis)
     }
 
-    fn handle_event(&mut self, canvas: &Canvas, event: &WindowEvent) {
+    fn handle_event(&mut self, input: &CanvasInputState<'_>, event: &WindowEvent) {
         match *event {
             WindowEvent::CursorPos(x, y, _) => {
                 let curr_pos = Vec2::new(x as f32, y as f32);
 
                 if let Some(rotate_button) = self.rotate_button {
-                    if canvas.get_mouse_button(rotate_button) == Action::Press {
+                    if input.get_mouse_button(rotate_button) == Action::Press {
                         let dpos = curr_pos - self.last_cursor_pos;
                         self.handle_left_button_displacement(dpos)
                     }
                 }
 
                 if let Some(drag_button) = self.drag_button {
-                    if canvas.get_mouse_button(drag_button) == Action::Press {
+                    if input.get_mouse_button(drag_button) == Action::Press {
                         let dpos = curr_pos - self.last_cursor_pos;
                         self.handle_right_button_displacement(dpos)
                     }
@@ -465,11 +465,11 @@ impl Camera3d for FirstPersonCamera3d {
         (self.view_transform(), self.proj)
     }
 
-    fn update(&mut self, canvas: &Canvas) {
-        let up = check_optional_key_state(canvas, self.up_key, Action::Press);
-        let down = check_optional_key_state(canvas, self.down_key, Action::Press);
-        let right = check_optional_key_state(canvas, self.right_key, Action::Press);
-        let left = check_optional_key_state(canvas, self.left_key, Action::Press);
+    fn update(&mut self, input: &CanvasInputState<'_>) {
+        let up = check_optional_key_state(input, self.up_key, Action::Press);
+        let down = check_optional_key_state(input, self.down_key, Action::Press);
+        let right = check_optional_key_state(input, self.right_key, Action::Press);
+        let left = check_optional_key_state(input, self.left_key, Action::Press);
         let dir = self.move_dir(up, down, right, left);
 
         let move_amount = dir * self.move_step;
@@ -477,9 +477,13 @@ impl Camera3d for FirstPersonCamera3d {
     }
 }
 
-fn check_optional_key_state(canvas: &Canvas, key: Option<Key>, key_state: Action) -> bool {
+fn check_optional_key_state(
+    input: &CanvasInputState<'_>,
+    key: Option<Key>,
+    key_state: Action,
+) -> bool {
     if let Some(actual_key) = key {
-        canvas.get_key(actual_key) == key_state
+        input.get_key(actual_key) == key_state
     } else {
         false
     }
