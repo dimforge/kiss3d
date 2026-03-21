@@ -2,9 +2,6 @@
 
 use image::{imageops, ImageBuffer, Rgb};
 
-#[cfg(feature = "drm")]
-use super::drm::Window;
-#[cfg(not(feature = "drm"))]
 use super::Window;
 
 impl Window {

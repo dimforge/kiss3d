@@ -8,9 +8,6 @@ use crate::color::Color;
 use crate::renderer::{Polyline2d, Polyline3d};
 use crate::text::Font;
 
-#[cfg(feature = "drm")]
-use super::drm::Window;
-#[cfg(not(feature = "drm"))]
 use super::Window;
 
 impl Window {

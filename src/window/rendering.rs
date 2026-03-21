@@ -17,9 +17,6 @@ use crate::resource::{
 use crate::scene::{SceneNode2d, SceneNode3d};
 use crate::window::CanvasInputState;
 
-#[cfg(feature = "drm")]
-use super::drm::Window;
-#[cfg(not(feature = "drm"))]
 use super::Window;
 
 /// Helper function to render a 3D scene frame.
