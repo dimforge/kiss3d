@@ -150,9 +150,9 @@ impl Texture {
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: if generate_mipmaps {
-                wgpu::FilterMode::Linear
+                wgpu::MipmapFilterMode::Linear
             } else {
-                wgpu::FilterMode::Nearest
+                wgpu::MipmapFilterMode::Nearest
             },
             ..Default::default()
         });

@@ -96,7 +96,7 @@ impl Canvas {
     }
 
     /// Gets the current surface texture for rendering.
-    pub fn get_current_texture(&self) -> Result<wgpu::SurfaceTexture, wgpu::SurfaceError> {
+    pub fn get_current_texture(&self) -> Option<wgpu::SurfaceTexture> {
         self.canvas.get_current_texture()
     }
 

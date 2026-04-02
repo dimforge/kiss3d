@@ -103,12 +103,12 @@ impl EguiRenderer {
 
     /// Returns true if egui wants to capture the mouse (e.g., hovering over a widget).
     pub fn wants_pointer_input(&self) -> bool {
-        self.egui_ctx.wants_pointer_input()
+        self.egui_ctx.egui_wants_pointer_input()
     }
 
     /// Returns true if egui wants to capture keyboard input (e.g., text input focused).
     pub fn wants_keyboard_input(&self) -> bool {
-        self.egui_ctx.wants_keyboard_input()
+        self.egui_ctx.egui_wants_keyboard_input()
     }
 
     /// Actually renders the UI.
@@ -163,6 +163,7 @@ impl EguiRenderer {
                     },
                     depth_slice: None,
                 })],
+                multiview_mask: None,
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,
