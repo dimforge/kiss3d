@@ -35,7 +35,7 @@ async fn main() {
 
     // window, cam, scene setup
     let mut window = Window::new_with_size("Kiss3D Ray Casting", SCREEN_WIDTH, SCREEN_HEIGHT).await;
-    let mut camera = FixedView2dTopLeft::default();
+    let mut camera = FixedView2d::new(CoordinateSystem2d::TopLeftDown, false);
     let mut scene = SceneNode2d::empty();
 
     let window_sz = window.size();

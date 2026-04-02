@@ -22,6 +22,7 @@ EXAMPLES=(
     group
     add_remove
     camera
+    dda_raycast2d
     event
     mouse_events
     custom_mesh
