@@ -477,6 +477,16 @@ impl OrbitCamera3d {
             self.look_at(old_eye, self.at);
         }
     }
+
+    /// The camera's field of view angle in radians
+    pub fn fov(&self) -> f32 {
+        self.fov
+    }
+
+    /// Sets the camera's field of view angle in radians.
+    pub fn set_fov(&mut self, new_fov: f32) {
+        self.fov = new_fov;
+    }
 }
 
 impl Camera3d for OrbitCamera3d {
