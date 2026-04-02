@@ -34,7 +34,6 @@ EXAMPLES=(
     obj
     texturing
     texturing_mipmaps
-    decomp
     stereo
     post_processing
     instancing2d
@@ -55,7 +54,7 @@ echo ""
 
 for example in "${EXAMPLES[@]}"; do
     echo "=== Running: $example ==="
-    cargo run --release --example "$example" --features egui,parry
+    cargo run --release --example "$example" --features egui
     echo ""
 done
 

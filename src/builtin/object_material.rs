@@ -680,8 +680,11 @@ impl ObjectMaterial {
         let _wireframe_pipeline_layout =
             ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("wireframe_pipeline_layout"),
-                bind_group_layouts: &[Some(&frame_bind_group_layout), Some(&object_bind_group_layout)],
-            immediate_size: 0,
+                bind_group_layouts: &[
+                    Some(&frame_bind_group_layout),
+                    Some(&object_bind_group_layout),
+                ],
+                immediate_size: 0,
             });
 
         // Vertex buffer layouts for wireframe (position only + instance data)
@@ -795,7 +798,7 @@ impl ObjectMaterial {
                     Some(&wireframe_view_bind_group_layout),
                     Some(&wireframe_model_bind_group_layout),
                 ],
-            immediate_size: 0,
+                immediate_size: 0,
             });
 
         // Load wireframe polyline shader

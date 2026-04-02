@@ -265,7 +265,7 @@ impl Window {
                             ),
                             timestamp_writes: None,
                             occlusion_query_set: None,
-                    multiview_mask: None,
+                            multiview_mask: None,
                         });
                     renderer.render(pass, camera, &mut custom_render_pass, &render_context);
                 }

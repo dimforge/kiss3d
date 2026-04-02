@@ -98,7 +98,10 @@ impl EguiRenderer {
     pub fn end_frame(&mut self) {
         let output = self.egui_ctx.end_pass();
         self.shapes = output.shapes;
-        self.textures_delta = output.textures_delta;
+        // Append rather than replace: if a previous frame's render was skipped
+        // (e.g. failed to acquire surface texture), we must not lose its texture
+        // deltas (such as the font atlas glyph upload).
+        self.textures_delta.append(output.textures_delta);
     }
 
     /// Returns true if egui wants to capture the mouse (e.g., hovering over a widget).

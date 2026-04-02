@@ -3,10 +3,9 @@
 use crate::loader::mtl::MtlMaterial;
 use crate::loader::obj;
 use crate::procedural;
-use crate::procedural::RenderMesh;
+use crate::procedural::{IndexBuffer, RenderMesh};
 use crate::resource::GpuMesh3d;
-#[cfg(feature = "parry")]
-use parry3d::shape::TriMesh;
+use glamx::Vec3;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Result as IoResult;
@@ -75,21 +74,19 @@ impl MeshManager3d {
         mesh
     }
 
-    /// Adds a mesh with the specified parry3d TriMesh and name.
-    ///
-    /// Requires the `parry` feature.
-    #[cfg(feature = "parry")]
+    /// Convenience function to register a new mesh defined by its vertex and index buffers.
     pub fn add_trimesh(
         &mut self,
-        descr: TriMesh,
+        vertices: Vec<Vec3>,
+        indices: Vec<[u32; 3]>,
         dynamic_draw: bool,
         name: &str,
     ) -> Rc<RefCell<GpuMesh3d>> {
-        let mesh = GpuMesh3d::from_render_mesh(descr.into(), dynamic_draw);
+        let render_mesh =
+            RenderMesh::new(vertices, None, None, Some(IndexBuffer::Unified(indices)));
+        let mesh = GpuMesh3d::from_render_mesh(render_mesh, dynamic_draw);
         let mesh = Rc::new(RefCell::new(mesh));
-
         self.add(mesh.clone(), name);
-
         mesh
     }
 

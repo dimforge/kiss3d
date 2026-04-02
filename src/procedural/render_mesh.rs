@@ -1,7 +1,5 @@
 use super::utils;
 use glamx::{Pose3, Vec2, Vec3};
-#[cfg(feature = "parry")]
-use parry3d::shape::TriMesh;
 use std::collections::HashMap;
 
 /// Different representations of the index buffer.
@@ -66,21 +64,6 @@ pub struct RenderMesh {
     pub uvs: Option<Vec<Vec2>>,
     /// Index buffer of the mesh.
     pub indices: IndexBuffer,
-}
-
-#[cfg(feature = "parry")]
-impl From<TriMesh> for RenderMesh {
-    fn from(trimesh: TriMesh) -> RenderMesh {
-        let vertices: Vec<Vec3> = trimesh.vertices().to_vec();
-        let indices: Vec<[u32; 3]> = trimesh.indices().to_vec();
-
-        RenderMesh::new(
-            vertices,
-            None, // Normals will be computed if needed
-            None, // UVs will be set to default values
-            Some(IndexBuffer::Unified(indices)),
-        )
-    }
 }
 
 impl RenderMesh {

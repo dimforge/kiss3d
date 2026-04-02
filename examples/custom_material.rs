@@ -135,7 +135,10 @@ impl NormalMaterial {
 
         let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("custom_material_pipeline_layout"),
-            bind_group_layouts: &[Some(&frame_bind_group_layout), Some(&object_bind_group_layout)],
+            bind_group_layouts: &[
+                Some(&frame_bind_group_layout),
+                Some(&object_bind_group_layout),
+            ],
             immediate_size: 0,
         });
 

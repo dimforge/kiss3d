@@ -2,15 +2,13 @@ use crate::camera::Camera3d;
 use crate::color::Color;
 use crate::light::{CollectedLight, Light, LightCollection, LightType, MAX_LIGHTS};
 use crate::procedural;
-use crate::procedural::RenderMesh;
+use crate::procedural::{IndexBuffer, RenderMesh};
 use crate::resource::vertex_index::VertexIndex;
 use crate::resource::{
     GpuMesh3d, Material3d, MaterialManager3d, MeshManager3d, RenderContext, Texture, TextureManager,
 };
 use crate::scene::{InstanceData3d, Object3d};
 use glamx::{Pose3, Quat, Vec2, Vec3};
-#[cfg(feature = "parry")]
-use parry3d::shape::TriMesh;
 use std::cell::{Ref, RefCell, RefMut};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -511,12 +509,15 @@ impl SceneNode3d {
         )
     }
 
-    /// Creates a new scene node using a parry3d TriMesh.
-    ///
-    /// Requires the `parry` feature.
-    #[cfg(feature = "parry")]
-    pub fn trimesh(mesh: TriMesh, scale: Vec3, flat_normals: bool) -> SceneNode3d {
-        let mut render_mesh = RenderMesh::from(mesh);
+    /// Convenience function to add a new scene node using a mesh defined by its vertex and index buffers.
+    pub fn trimesh(
+        vertices: Vec<Vec3>,
+        indices: Vec<[u32; 3]>,
+        scale: Vec3,
+        flat_normals: bool,
+    ) -> SceneNode3d {
+        let mut render_mesh =
+            RenderMesh::new(vertices, None, None, Some(IndexBuffer::Unified(indices)));
         if flat_normals {
             render_mesh.replicate_vertices();
             render_mesh.recompute_normals();
@@ -856,12 +857,15 @@ impl SceneNode3d {
         node
     }
 
-    /// Creates and adds a new object using a parry3d TriMesh.
-    ///
-    /// Requires the `parry` feature.
-    #[cfg(feature = "parry")]
-    pub fn add_trimesh(&mut self, mesh: TriMesh, scale: Vec3, flat_normals: bool) -> SceneNode3d {
-        let node = Self::trimesh(mesh, scale, flat_normals);
+    /// Convenience function to add a new object using a mesh defined by its vertex and index buffers.
+    pub fn add_trimesh(
+        &mut self,
+        vertices: Vec<Vec3>,
+        indices: Vec<[u32; 3]>,
+        scale: Vec3,
+        flat_normals: bool,
+    ) -> SceneNode3d {
+        let node = Self::trimesh(vertices, indices, scale, flat_normals);
         self.add_child(node.clone());
         node
     }

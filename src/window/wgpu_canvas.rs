@@ -966,6 +966,16 @@ impl WgpuCanvas {
         match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                // Reconfigure and retry once
+                let ctxt = Context::get();
+                self.surface.configure(&ctxt.device, &self.surface_config);
+                match self.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(texture)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }

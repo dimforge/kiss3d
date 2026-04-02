@@ -561,7 +561,7 @@ impl ObjectMaterial2d {
                     Some(&wireframe_view_bind_group_layout),
                     Some(&wireframe_model_bind_group_layout),
                 ],
-            immediate_size: 0,
+                immediate_size: 0,
             });
 
         // Load wireframe shader
