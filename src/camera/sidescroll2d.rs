@@ -77,6 +77,16 @@ impl PanZoomCamera2d {
         self.update_projviews();
     }
 
+    /// Gets the zoom step of the camera.
+    pub fn zoom_step(&self) -> f32 {
+        self.zoom_step
+    }
+
+    /// Sets the zoom step of the camera.
+    pub fn set_zoom_step(&mut self, new_zoom_step: f32) {
+        self.zoom_step = new_zoom_step;
+    }
+
     /// Move the camera such that it is centered on a specific point.
     pub fn look_at(&mut self, at: Vec2, zoom: f32) {
         self.at = at;
