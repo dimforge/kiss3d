@@ -6,11 +6,10 @@ use std::sync::Arc;
 
 use crate::context::Context;
 use crate::event::{Action, Key, Modifiers, MouseButton, TouchAction, WindowEvent};
-use crate::window::canvas::{CanvasSetup, NumSamples};
+use crate::window::canvas::CanvasSetup;
 use image::{GenericImage, Pixel};
 #[cfg(not(target_arch = "wasm32"))]
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
 #[cfg(not(target_arch = "wasm32"))]
 use winit::event::{MouseScrollDelta, TouchPhase, WindowEvent as WinitWindowEvent};
 #[cfg(not(target_arch = "wasm32"))]
@@ -94,10 +93,7 @@ impl WgpuCanvas {
         canvas_setup: Option<CanvasSetup>,
         out_events: Sender<WindowEvent>,
     ) -> Self {
-        let canvas_setup = canvas_setup.unwrap_or(CanvasSetup {
-            vsync: true,
-            samples: NumSamples::Zero,
-        });
+        let canvas_setup = canvas_setup.unwrap_or_default();
 
         // Create the window
         #[cfg(not(target_arch = "wasm32"))]
@@ -127,9 +123,9 @@ impl WgpuCanvas {
             let web_window = web_sys::window().expect("Failed to get web_sys window");
             let document = web_window.document().expect("Failed to get document");
 
-            // Try to find an existing canvas with id "canvas", or create one
+            // Try to find an existing canvas with the configured id, or create one
             let canvas = document
-                .get_element_by_id("canvas")
+                .get_element_by_id(&canvas_setup.canvas_id)
                 .and_then(|elem| elem.dyn_into::<web_sys::HtmlCanvasElement>().ok())
                 .unwrap_or_else(|| {
                     // Create a new canvas element
@@ -138,7 +134,7 @@ impl WgpuCanvas {
                         .expect("Failed to create canvas element")
                         .dyn_into::<web_sys::HtmlCanvasElement>()
                         .expect("Failed to cast to HtmlCanvasElement");
-                    canvas.set_id("canvas");
+                    canvas.set_id(&canvas_setup.canvas_id);
 
                     // Append to body
                     if let Some(body) = document.body() {

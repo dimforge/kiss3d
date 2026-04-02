@@ -101,7 +101,9 @@ impl Window {
     ) {
         if let Some(binding_key) = self.close_key {
             if let WindowEvent::Key(key, Action::Release, modifiers) = event {
-                if binding_key == *key && (Some(*modifiers) == self.close_modifiers || self.close_modifiers.is_none()) {
+                if binding_key == *key
+                    && (Some(*modifiers) == self.close_modifiers || self.close_modifiers.is_none())
+                {
                     self.close()
                 }
             }

@@ -387,9 +387,7 @@ impl Window {
     ///
     /// # Returns
     /// A new `Window` instance
-    pub async fn new_with_window_attributes(
-        window_attrs: WindowAttributes,
-    ) -> Window {
+    pub async fn new_with_window_attributes(window_attrs: WindowAttributes) -> Window {
         Window::do_new_with_window_attributes(window_attrs, None).await
     }
 
