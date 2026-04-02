@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::color::{Color, BLACK};
 use crate::context::Context;
-use crate::event::WindowEvent;
+use crate::event::{Key, Modifiers, WindowEvent};
 use crate::renderer::{PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d};
 use crate::resource::{
     FramebufferManager, MaterialManager2d, MeshManager2d, RenderTarget, Texture, TextureManager,
@@ -45,6 +45,8 @@ pub struct Window {
     pub(super) framebuffer_manager: FramebufferManager,
     pub(super) post_process_render_target: RenderTarget,
     pub(super) should_close: bool,
+    pub(super) close_key: Option<Key>,
+    pub(super) close_modifiers: Option<Modifiers>,
     #[cfg(feature = "egui")]
     pub(super) egui_context: EguiContext,
     pub(super) canvas: Canvas,
@@ -259,6 +261,28 @@ impl Window {
         self.ambient_intensity
     }
 
+    /// Rebinds the key to close the window.
+    /// Set to None to disable.
+    pub fn rebind_close_key(&mut self, new_close_key: Option<Key>) {
+        self.close_key = new_close_key;
+    }
+
+    /// Rebinds the modifiers to close the window.
+    /// Set to None make it work with any modifiers.
+    pub fn rebind_close_modifiers(&mut self, new_close_modifiers: Option<Modifiers>) {
+        self.close_modifiers = new_close_modifiers;
+    }
+
+    /// Returns the current key to close the window.
+    pub fn close_key(&self) -> Option<Key> {
+        self.close_key
+    }
+
+    /// Returns the current modifiers to close the window.
+    pub fn close_modifiers(&self) -> Option<Modifiers> {
+        self.close_modifiers
+    }
+
     /// Creates a new hidden window.
     ///
     /// The window is created but not displayed. Use [`show()`](Self::show) to make it visible.
@@ -371,6 +395,8 @@ impl Window {
         let framebuffer_manager = FramebufferManager::new();
         let mut usr_window = Window {
             should_close: false,
+            close_key: Some(Key::Escape),
+            close_modifiers: None,
             canvas,
             events: Rc::new(event_receive),
             unhandled_events: Rc::new(RefCell::new(Vec::new())),
