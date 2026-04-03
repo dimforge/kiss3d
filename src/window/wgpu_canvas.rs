@@ -207,9 +207,9 @@ impl WgpuCanvas {
             (surface, surface_format)
         } else {
             // First window - create the full wgpu context
-            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
                 backends: wgpu::Backends::all(),
-                ..Default::default()
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
             });
 
             // Create surface
@@ -962,8 +962,22 @@ impl WgpuCanvas {
     }
 
     /// Gets the current surface texture for rendering.
-    pub fn get_current_texture(&self) -> Result<wgpu::SurfaceTexture, wgpu::SurfaceError> {
-        self.surface.get_current_texture()
+    pub fn get_current_texture(&self) -> Option<wgpu::SurfaceTexture> {
+        match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(texture)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                // Reconfigure and retry once
+                let ctxt = Context::get();
+                self.surface.configure(&ctxt.device, &self.surface_config);
+                match self.surface.get_current_texture() {
+                    wgpu::CurrentSurfaceTexture::Success(texture)
+                    | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Copies the frame texture to the readback texture for later reading.

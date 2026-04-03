@@ -393,11 +393,11 @@ impl ObjectMaterial2d {
         let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("planar_material_pipeline_layout"),
             bind_group_layouts: &[
-                &frame_bind_group_layout,
-                &object_bind_group_layout,
-                &texture_bind_group_layout,
+                Some(&frame_bind_group_layout),
+                Some(&object_bind_group_layout),
+                Some(&texture_bind_group_layout),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         // Load shader
@@ -505,7 +505,7 @@ impl ObjectMaterial2d {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -558,10 +558,10 @@ impl ObjectMaterial2d {
             ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("planar_wireframe_pipeline_layout"),
                 bind_group_layouts: &[
-                    &wireframe_view_bind_group_layout,
-                    &wireframe_model_bind_group_layout,
+                    Some(&wireframe_view_bind_group_layout),
+                    Some(&wireframe_model_bind_group_layout),
                 ],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         // Load wireframe shader
@@ -667,7 +667,7 @@ impl ObjectMaterial2d {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -719,10 +719,10 @@ impl ObjectMaterial2d {
         let points_pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("planar_points_pipeline_layout"),
             bind_group_layouts: &[
-                &points_view_bind_group_layout,
-                &points_model_bind_group_layout,
+                Some(&points_view_bind_group_layout),
+                Some(&points_model_bind_group_layout),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         // Load points shader
@@ -828,7 +828,7 @@ impl ObjectMaterial2d {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 

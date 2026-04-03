@@ -114,11 +114,11 @@ impl SobelEdgeHighlight {
         let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("sobel_pipeline_layout"),
             bind_group_layouts: &[
-                &color_bind_group_layout,
-                &depth_bind_group_layout,
-                &uniform_bind_group_layout,
+                Some(&color_bind_group_layout),
+                Some(&depth_bind_group_layout),
+                Some(&uniform_bind_group_layout),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         // Load shader
@@ -170,7 +170,7 @@ impl SobelEdgeHighlight {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -221,7 +221,7 @@ impl SobelEdgeHighlight {
             address_mode_w: wgpu::AddressMode::ClampToEdge,
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
-            mipmap_filter: wgpu::FilterMode::Nearest,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             compare: None,
             ..Default::default()
         });
@@ -322,6 +322,7 @@ impl PostProcessingEffect for SobelEdgeHighlight {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
 
             render_pass.set_pipeline(&self.pipeline);

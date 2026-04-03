@@ -129,6 +129,7 @@ impl Window {
                     .push(egui::Event::MouseWheel {
                         unit: egui::MouseWheelUnit::Point,
                         delta: egui::Vec2::new(x as f32, y as f32),
+                        phase: egui::TouchPhase::Move,
                         modifiers: self.get_egui_modifiers(),
                     });
             }

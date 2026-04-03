@@ -2,7 +2,6 @@ use kiss3d::prelude::*;
 use kiss3d::procedural::path::StrokePattern;
 use kiss3d::procedural::path::{ArrowheadCap, PolylinePath, PolylinePattern};
 use kiss3d::procedural::RenderMesh;
-use parry3d::shape::TriMesh;
 use std::path::Path;
 
 #[kiss3d::main]
@@ -153,18 +152,6 @@ async fn main() {
         ));
     }
 
-    let chull = parry3d::transformation::convex_hull(&points);
-    scene
-        .add_trimesh(
-            TriMesh::new(chull.0, chull.1).unwrap(),
-            Vec3::splat(1.0),
-            false,
-        )
-        .set_position(Vec3::new(0.0, 2.0, -1.0))
-        .set_color(GREEN)
-        .set_lines_width(2.0, false)
-        .set_surface_rendering_activation(false)
-        .set_points_size(10.0, false);
     scene
         .add_render_mesh(RenderMesh::new(points, None, None, None), Vec3::splat(1.0))
         .set_color(BLUE)
@@ -181,43 +168,10 @@ async fn main() {
         points2d.push(origin + Vec2::new(rand::random::<f32>() * 2.0, rand::random::<f32>() * 2.0));
     }
 
-    let polyline = parry2d::transformation::convex_hull(&points2d);
-
     /*
      *
      * Rendering.
      *
      */
-    while window.render_3d(&mut scene, &mut camera).await {
-        draw_polyline(&mut window, &polyline, &points2d);
-    }
-}
-
-fn draw_polyline(window: &mut Window, polyline: &[Vec2], points: &[Vec2]) {
-    for pt in polyline.windows(2) {
-        window.draw_line(
-            Vec3::new(pt[0].x, pt[0].y, 0.0),
-            Vec3::new(pt[1].x, pt[1].y, 0.0),
-            GREEN,
-            10.0,
-            false,
-        );
-    }
-
-    let last = polyline.len() - 1;
-    window.draw_line(
-        Vec3::new(polyline[0].x, polyline[0].y, 0.0),
-        Vec3::new(polyline[last].x, polyline[last].y, 0.0),
-        GREEN,
-        6.0,
-        false,
-    );
-
-    for pt in points.iter() {
-        window.draw_point(Vec3::new(pt.x, pt.y, 0.0), BLUE, 1.0);
-    }
-
-    for pt in polyline.iter() {
-        window.draw_point(Vec3::new(pt.x, pt.y, 0.0), RED, 8.0);
-    }
+    while window.render_3d(&mut scene, &mut camera).await {}
 }

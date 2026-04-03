@@ -98,17 +98,20 @@ impl EguiRenderer {
     pub fn end_frame(&mut self) {
         let output = self.egui_ctx.end_pass();
         self.shapes = output.shapes;
-        self.textures_delta = output.textures_delta;
+        // Append rather than replace: if a previous frame's render was skipped
+        // (e.g. failed to acquire surface texture), we must not lose its texture
+        // deltas (such as the font atlas glyph upload).
+        self.textures_delta.append(output.textures_delta);
     }
 
     /// Returns true if egui wants to capture the mouse (e.g., hovering over a widget).
     pub fn wants_pointer_input(&self) -> bool {
-        self.egui_ctx.wants_pointer_input()
+        self.egui_ctx.egui_wants_pointer_input()
     }
 
     /// Returns true if egui wants to capture keyboard input (e.g., text input focused).
     pub fn wants_keyboard_input(&self) -> bool {
-        self.egui_ctx.wants_keyboard_input()
+        self.egui_ctx.egui_wants_keyboard_input()
     }
 
     /// Actually renders the UI.
@@ -163,6 +166,7 @@ impl EguiRenderer {
                     },
                     depth_slice: None,
                 })],
+                multiview_mask: None,
                 depth_stencil_attachment: None,
                 timestamp_writes: None,
                 occlusion_query_set: None,

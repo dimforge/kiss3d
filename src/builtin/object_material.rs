@@ -524,12 +524,12 @@ impl ObjectMaterial {
         let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("object_material_pipeline_layout"),
             bind_group_layouts: &[
-                &frame_bind_group_layout,
-                &object_bind_group_layout,
-                &texture_bind_group_layout,
-                &pbr_texture_bind_group_layout,
+                Some(&frame_bind_group_layout),
+                Some(&object_bind_group_layout),
+                Some(&texture_bind_group_layout),
+                Some(&pbr_texture_bind_group_layout),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         // Load shader
@@ -650,8 +650,8 @@ impl ObjectMaterial {
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: Context::depth_format(),
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::Less,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
                     stencil: wgpu::StencilState::default(),
                     bias: wgpu::DepthBiasState::default(),
                 }),
@@ -660,7 +660,7 @@ impl ObjectMaterial {
                     mask: !0,
                     alpha_to_coverage_enabled: false,
                 },
-                multiview: None,
+                multiview_mask: None,
                 cache: None,
             })
         };
@@ -680,8 +680,11 @@ impl ObjectMaterial {
         let _wireframe_pipeline_layout =
             ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("wireframe_pipeline_layout"),
-                bind_group_layouts: &[&frame_bind_group_layout, &object_bind_group_layout],
-                push_constant_ranges: &[],
+                bind_group_layouts: &[
+                    Some(&frame_bind_group_layout),
+                    Some(&object_bind_group_layout),
+                ],
+                immediate_size: 0,
             });
 
         // Vertex buffer layouts for wireframe (position only + instance data)
@@ -792,10 +795,10 @@ impl ObjectMaterial {
             ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("wireframe_polyline_pipeline_layout"),
                 bind_group_layouts: &[
-                    &wireframe_view_bind_group_layout,
-                    &wireframe_model_bind_group_layout,
+                    Some(&wireframe_view_bind_group_layout),
+                    Some(&wireframe_model_bind_group_layout),
                 ],
-                push_constant_ranges: &[],
+                immediate_size: 0,
             });
 
         // Load wireframe polyline shader
@@ -904,8 +907,8 @@ impl ObjectMaterial {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Context::depth_format(),
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -914,7 +917,7 @@ impl ObjectMaterial {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 
@@ -966,10 +969,10 @@ impl ObjectMaterial {
         let points_pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("points_pipeline_layout"),
             bind_group_layouts: &[
-                &points_view_bind_group_layout,
-                &points_model_bind_group_layout,
+                Some(&points_view_bind_group_layout),
+                Some(&points_model_bind_group_layout),
             ],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         // Load points shader
@@ -1074,8 +1077,8 @@ impl ObjectMaterial {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Context::depth_format(),
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -1084,7 +1087,7 @@ impl ObjectMaterial {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 

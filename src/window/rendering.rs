@@ -107,9 +107,9 @@ impl Window {
 
         // Get the surface texture
         let frame = match self.canvas.get_current_texture() {
-            Ok(frame) => frame,
-            Err(e) => {
-                eprintln!("Failed to acquire surface texture: {:?}", e);
+            Some(frame) => frame,
+            None => {
+                eprintln!("Failed to acquire surface texture");
                 return !self.should_close();
             }
         };
@@ -168,6 +168,7 @@ impl Window {
                 }),
                 timestamp_writes: None,
                 occlusion_query_set: None,
+                multiview_mask: None,
             });
             // Render pass is dropped here, ending the clear pass
         }
@@ -221,6 +222,7 @@ impl Window {
                     }),
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
 
                 if let Some(scene) = scene.as_deref_mut() {
@@ -263,6 +265,7 @@ impl Window {
                             ),
                             timestamp_writes: None,
                             occlusion_query_set: None,
+                            multiview_mask: None,
                         });
                     renderer.render(pass, camera, &mut custom_render_pass, &render_context);
                 }
@@ -307,6 +310,7 @@ impl Window {
                     depth_stencil_attachment: None,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    multiview_mask: None,
                 });
 
                 if let Some(scene_2d) = scene_2d {

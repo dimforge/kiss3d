@@ -1,7 +1,7 @@
 [package]
 authors = ["Sébastien Crozet <developer@crozet.re>"]
 name    = "kiss3d"
-version = "0.40.0"
+version = "0.41.0"
 
 autoexamples = true
 description  = "Keep it simple, stupid, 2D and 3D graphics engine for Rust."
@@ -31,27 +31,23 @@ path = "src/lib.rs"
 [features]
 egui = ["dep:egui", "dep:egui-wgpu"]
 recording = ["dep:ffmpeg-the-third"]
-parry = ["dep:parry3d"]
 serde = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde"]
 
 [dependencies]
 bitflags     = "2"
 bytemuck     = { version = "1", features = ["derive"] }
-egui         = { version = "0.33", optional = true, default-features = true }
-egui-wgpu    = { version = "0.33", optional = true }
-either       = "1"
-image        = "0.25"
+egui         = { version = "0.34", optional = true, default-features = true }
+egui-wgpu    = { version = "0.34", optional = true }
+image        = { version = "0.25", default-features = false, features = ["default-formats"] }
 web-time     = "1"
 kiss3d-macro = { version = "0.36.0", path = "kiss3d-macro" }
-log          = "0.4"
-glamx         = { version = "0.1", features = ["bytemuck"] }
+glamx         = { version = "0.2", features = ["bytemuck"] }
 ffmpeg-the-third = { version = "4", optional = true }
 num-traits   = "0.2"
-parry3d      = { version = "0.26", optional = true }
 rgb          = "0.8"
 rusttype     = { version = "0.9", features = ["gpu_cache"] }
 serde        = { version = "1", features = ["derive"], optional = true }
-wgpu         = "27"
+wgpu         = "29"
 winit        = "0.30"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
@@ -59,7 +55,10 @@ pollster = "0.4"
 
 [target.wasm32-unknown-unknown.dependencies]
 oneshot = { version = "0.2.0", features = ["async"] }
-getrandom = { version = "0.3", features = ["wasm_js"] }
+# We depend on getrandom 0.3 only to enable its wasm_js feature.
+# And this is needed only because some dependencies still depend on 0.3.
+getrandom_03 = { package = "getrandom", version = "0.3", features = ["wasm_js"] }
+getrandom = { version = "0.4", features = ["wasm_js"] }
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4.54"
 web-sys = { version = "0.3", features = [
@@ -83,18 +82,7 @@ web-sys = { version = "0.3", features = [
 
 [dev-dependencies]
 env_logger = "0.11"
-parry2d    = "0.26"
-rand       = "0.9"
-
-[[example]]
-name = "decomp"
-required-features = ["parry"]
-
-[[example]]
-name = "procedural"
-required-features = ["parry"]
+rand       = "0.10"
 
 [patch.crates-io]
 #glamx = { path = "../glamx" }
-#parry3d = { path = "../parry/crates/parry3d" }
-#parry2d = { path = "../parry/crates/parry2d" }

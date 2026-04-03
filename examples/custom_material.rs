@@ -135,8 +135,11 @@ impl NormalMaterial {
 
         let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("custom_material_pipeline_layout"),
-            bind_group_layouts: &[&frame_bind_group_layout, &object_bind_group_layout],
-            push_constant_ranges: &[],
+            bind_group_layouts: &[
+                Some(&frame_bind_group_layout),
+                Some(&object_bind_group_layout),
+            ],
+            immediate_size: 0,
         });
 
         // Create shader module from WGSL source
@@ -196,8 +199,8 @@ impl NormalMaterial {
             },
             depth_stencil: Some(wgpu::DepthStencilState {
                 format: Context::depth_format(),
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::Less,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
                 bias: wgpu::DepthBiasState::default(),
             }),
@@ -206,7 +209,7 @@ impl NormalMaterial {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview: None,
+            multiview_mask: None,
             cache: None,
         });
 

@@ -87,7 +87,7 @@ build_example() {
         --manifest-path "$KISS3D_DIR/Cargo.toml" \
         --example "$example" \
         --target wasm32-unknown-unknown \
-        --features parry,egui \
+        --features egui \
         --release 2>&1; then
         echo -e "${RED}✗${NC} $example (cargo build failed)"
         return 1

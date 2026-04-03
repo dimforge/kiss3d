@@ -1,14 +1,24 @@
-# Unreleased
+# v0.41.0
 
 ## Breaking Changes
 
-- `CanvasSetup` no longer implements `Copy` (now contains a `String` field).
-- `CanvasSetup` has a new required field `canvas_id: String`. Use `..Default::default()` to fill it in.
+- Removed the `parry` feature flag and `parry3d` dependency to avoid circular dependencies when publishing.
+  `SceneNode3d::trimesh`/`add_trimesh` and `MeshManager3d::add_trimesh` now take `(Vec<Vec3>, Vec<[u32; 3]>, ...)` instead of a `parry3d::shape::TriMesh`. The `From<TriMesh> for RenderMesh` conversion and the `parry3d` re-export are removed.
+- `CanvasSetup` no longer implements `Copy` (now contains a `String` field) and has a new required field `canvas_id: String`. Use `..Default::default()` to fill it in. ([#372](https://github.com/dimforge/kiss3d/pull/372))
+- `FixedView2d::new()` now takes `(CoordinateSystem2d, bool)` parameters instead of no arguments. Use `FixedView2d::default()` for the previous behavior. ([#354](https://github.com/dimforge/kiss3d/pull/354))
+- Removed the `decomp` example (depended on `parry`).
+- Bumped dependencies: `wgpu` 27 → 29, `glamx` 0.1 → 0.2, `egui`/`egui-wgpu` 0.33 → 0.34, `getrandom` 0.3 → 0.4, `oneshot` 0.1 → 0.2, `rand` (dev) 0.9 → 0.10.
 
 ## New Features
 
-- Added `canvas_id` field to `CanvasSetup` to allow configuring the HTML canvas element ID used on WASM targets (defaults to `"canvas"`).
-- Implemented `Default` for `CanvasSetup`.
+- `FixedView2d`: added `CoordinateSystem2d` enum with `CenterUp` (default, unchanged) and `TopLeftDown` (top-left origin, Y-down) coordinate systems, and a configurable `apply_hidpi` flag. ([#354](https://github.com/dimforge/kiss3d/pull/354))
+- Added new `dda_raycast2d` example demonstrating 2D ray casting with the top-left coordinate system. ([#354](https://github.com/dimforge/kiss3d/pull/354))
+- `Window::new_with_window_attributes()`: create a window from a `winit::window::WindowAttributes` for fine-grained control. ([#364](https://github.com/dimforge/kiss3d/pull/364))
+- `Window::new_hidden_with_size()`: create a hidden window with custom dimensions. ([#365](https://github.com/dimforge/kiss3d/pull/365))
+- `Window::rebind_close_key()` / `rebind_close_modifiers()`: customize or disable the window-close keybinding (default: Escape). ([#367](https://github.com/dimforge/kiss3d/pull/367))
+- `PanZoomCamera2d`: added `zoom_step()` / `set_zoom_step()` ([#362](https://github.com/dimforge/kiss3d/pull/362)), and `rebind_drag_modifier()` / `rebind_zoom_modifier()` for modifier-gated drag and zoom. ([#360](https://github.com/dimforge/kiss3d/pull/360))
+- `OrbitCamera3d`: added `fov()` / `set_fov()`. ([#361](https://github.com/dimforge/kiss3d/pull/361))
+- Implemented `Default` for `CanvasSetup`. ([#372](https://github.com/dimforge/kiss3d/pull/372))
 
 # v0.40.0
 
