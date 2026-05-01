@@ -197,10 +197,11 @@ impl WgpuCanvas {
 
             // Configure surface with existing device
             let surface_caps = surface.get_capabilities(&ctxt.adapter);
+            let enabled_features = ctxt.device.features();
             let surface_format = surface_caps
                 .formats
                 .iter()
-                .find(|f| !f.is_srgb())
+                .find(|f| !f.is_srgb() && enabled_features.contains(f.required_features()))
                 .copied()
                 .unwrap_or(surface_caps.formats[0]);
 
@@ -251,10 +252,11 @@ impl WgpuCanvas {
             // WebGL2 often doesn't support sRGB framebuffers, so we do manual gamma correction
             // in shaders instead. This ensures colors look the same on native and web.
             let surface_caps = surface.get_capabilities(&adapter);
+            let enabled_features = device.features();
             let surface_format = surface_caps
                 .formats
                 .iter()
-                .find(|f| !f.is_srgb())
+                .find(|f| !f.is_srgb() && enabled_features.contains(f.required_features()))
                 .copied()
                 .unwrap_or(surface_caps.formats[0]);
 
