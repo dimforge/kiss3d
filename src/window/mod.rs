@@ -5,6 +5,8 @@ mod drawing;
 #[cfg(feature = "egui")]
 mod egui_integration;
 mod events;
+#[cfg(not(target_arch = "wasm32"))]
+mod offscreen;
 #[cfg(feature = "recording")]
 mod recording;
 mod rendering;
@@ -14,6 +16,8 @@ mod window;
 mod window_cache;
 
 pub use canvas::{Canvas, CanvasSetup, NumSamples};
+#[cfg(not(target_arch = "wasm32"))]
+pub use offscreen::OffscreenSurface;
 #[cfg(feature = "recording")]
 pub use recording::RecordingConfig;
 pub use wgpu_canvas::WgpuCanvas;

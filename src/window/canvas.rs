@@ -90,9 +90,27 @@ impl Canvas {
         }
     }
 
+    /// Open a headless canvas (no window) for off-screen rendering.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn open_headless(
+        width: u32,
+        height: u32,
+        canvas_setup: Option<CanvasSetup>,
+        out_events: Sender<WindowEvent>,
+    ) -> Self {
+        Canvas {
+            canvas: WgpuCanvas::open_headless(width, height, canvas_setup, out_events).await,
+        }
+    }
+
     /// Poll all events that occurred since the last call to this method.
     pub fn poll_events(&mut self) {
         self.canvas.poll_events()
+    }
+
+    /// Resizes the canvas render targets.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        self.canvas.resize(width, height)
     }
 
     /// Gets the current surface texture for rendering.

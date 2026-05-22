@@ -471,6 +471,49 @@ impl Window {
 
         usr_window
     }
+
+    /// Creates a headless window: a render target backed by no actual window,
+    /// for off-screen rendering. Powers [`OffscreenSurface`](crate::window::OffscreenSurface).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(super) async fn do_new_headless(
+        width: u32,
+        height: u32,
+        setup: Option<CanvasSetup>,
+    ) -> Window {
+        let (event_send, event_receive) = mpsc::channel();
+        let canvas = Canvas::open_headless(width, height, setup, event_send).await;
+        let (width, height) = canvas.size();
+
+        Context::increment_window_count();
+        WindowCache::populate();
+
+        let framebuffer_manager = FramebufferManager::new();
+        Window {
+            should_close: false,
+            first_frame: true,
+            close_key: None,
+            close_modifiers: None,
+            canvas,
+            events: Rc::new(event_receive),
+            unhandled_events: Rc::new(RefCell::new(Vec::new())),
+            ambient_intensity: 0.2,
+            background: BLACK,
+            polyline_renderer_2d: PolylineRenderer2d::new(),
+            point_renderer_2d: PointRenderer2d::new(),
+            point_renderer: PointRenderer3d::new(),
+            polyline_renderer: PolylineRenderer3d::new(),
+            text_renderer: TextRenderer::new(),
+            #[cfg(feature = "egui")]
+            egui_context: EguiContext::new(),
+            post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
+            offscreen_output_target: None,
+            // A headless window has no surface; always render off-screen.
+            hidden: true,
+            framebuffer_manager,
+            #[cfg(feature = "recording")]
+            recording: None,
+        }
+    }
 }
 
 impl Drop for Window {
