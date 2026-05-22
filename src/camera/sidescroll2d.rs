@@ -186,9 +186,10 @@ impl Camera2d for PanZoomCamera2d {
                 self.last_cursor_pos = curr_pos;
             }
             WindowEvent::Scroll(_, off, modifiers)
-                if (self.zoom_modifier.is_none() || self.zoom_modifier == Some(modifiers)) => {
-                    self.handle_scroll(off as f32)
-                }
+                if (self.zoom_modifier.is_none() || self.zoom_modifier == Some(modifiers)) =>
+            {
+                self.handle_scroll(off as f32)
+            }
             WindowEvent::FramebufferSize(w, h) => {
                 self.proj = Mat3::from_cols(
                     Vec3::new(2.0 * (scale as f32) / (w as f32), 0.0, 0.0),

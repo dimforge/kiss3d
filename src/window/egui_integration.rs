@@ -133,13 +133,12 @@ impl Window {
                         modifiers: self.get_egui_modifiers(),
                     });
             }
-            WindowEvent::Char(ch)
-                if !ch.is_control() => {
-                    self.egui_context
-                        .raw_input
-                        .events
-                        .push(egui::Event::Text(ch.to_string()));
-                }
+            WindowEvent::Char(ch) if !ch.is_control() => {
+                self.egui_context
+                    .raw_input
+                    .events
+                    .push(egui::Event::Text(ch.to_string()));
+            }
             WindowEvent::Key(key, action, _modifiers) => {
                 if let Some(egui_key) = self.translate_key_to_egui(key) {
                     self.egui_context.raw_input.events.push(egui::Event::Key {

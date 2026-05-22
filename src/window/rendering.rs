@@ -136,7 +136,11 @@ impl Window {
 
         // `OffscreenBuffers` are never multisampled, so offscreen rendering
         // always uses a single sample (a hidden window is not antialiased).
-        let sample_count = if offscreen { 1 } else { self.canvas.sample_count() };
+        let sample_count = if offscreen {
+            1
+        } else {
+            self.canvas.sample_count()
+        };
 
         let ctxt = Context::get();
         let mut encoder = ctxt.create_command_encoder(Some("kiss3d_frame_encoder"));
@@ -149,10 +153,11 @@ impl Window {
                 self.offscreen_output_target =
                     Some(self.framebuffer_manager.new_render_target(w, h, true));
             }
-            self.offscreen_output_target
-                .as_mut()
-                .unwrap()
-                .resize(w, h, self.canvas.surface_format());
+            self.offscreen_output_target.as_mut().unwrap().resize(
+                w,
+                h,
+                self.canvas.surface_format(),
+            );
         }
 
         // The view that receives the final composited image: the surface

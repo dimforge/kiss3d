@@ -74,9 +74,7 @@ pub fn parse(string: &str) -> Vec<MtlMaterial> {
             // specular texture map
             "map_Ks" => curr_material.specular_texture = Some(parse_name(l, words)),
             // specular texture map
-            "map_d" | "map_opacity" => {
-                curr_material.opacity_map = Some(parse_name(l, words))
-            }
+            "map_d" | "map_opacity" => curr_material.opacity_map = Some(parse_name(l, words)),
             _ => {
                 log::warn!("unknown line {} ignored: `{}'", l, line);
             }

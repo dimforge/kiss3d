@@ -531,11 +531,7 @@ fn reformat(
     )));
 
     let mut meshes = Vec::new();
-    for ((fs, name), mtl) in resfs
-        .into_iter()
-        .zip(names)
-        .zip(mtls)
-    {
+    for ((fs, name), mtl) in resfs.into_iter().zip(names).zip(mtls) {
         if !fs.is_empty() {
             let fs = Arc::new(RwLock::new(GPUVec::new(
                 fs,
