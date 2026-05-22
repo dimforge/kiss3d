@@ -104,15 +104,22 @@ impl Window {
         mut renderer: Option<&mut dyn Renderer3d>,
         mut post_processing: Option<&mut dyn PostProcessingEffect>,
     ) -> bool {
-        // Acquire the surface texture first. A just-created window may not be
-        // presentable yet, so `acquire_next_frame` retries until it is.
-        let frame = match self.acquire_next_frame() {
-            Some(frame) => frame,
-            None => return !self.should_close(),
+        // A visible window renders into its surface; a hidden window has no
+        // presentable surface, so it renders into an offscreen texture that
+        // `snap` and recording can still read back.
+        let offscreen = self.hidden;
+
+        // Acquire the surface texture for visible windows. A just-created
+        // window may not be presentable yet, so `acquire_next_frame` retries
+        // until it is.
+        let frame = if offscreen {
+            None
+        } else {
+            match self.acquire_next_frame() {
+                Some(frame) => Some(frame),
+                None => return !self.should_close(),
+            }
         };
-        let frame_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
         // Read the size only now: while retrying, a pending resize event may
         // have been processed and the surface reconfigured.
@@ -127,27 +134,64 @@ impl Window {
         // No need to update the light position here - it's computed per-frame
         // in the material's prepare() based on the camera position
 
+        // `OffscreenBuffers` are never multisampled, so offscreen rendering
+        // always uses a single sample (a hidden window is not antialiased).
+        let sample_count = if offscreen { 1 } else { self.canvas.sample_count() };
+
         let ctxt = Context::get();
         let mut encoder = ctxt.create_command_encoder(Some("kiss3d_frame_encoder"));
 
-        // Resize post-process render target if needed
+        // Resize the offscreen render targets if needed.
         self.post_process_render_target
             .resize(w, h, self.canvas.surface_format());
-
-        // Determine which views to render to
-        let (color_view, depth_view) = if post_processing.is_some() {
-            // Render to offscreen buffer for post-processing
-            match &self.post_process_render_target {
-                RenderTarget::Offscreen(o) => (&o.color_view, &o.depth_view),
-                RenderTarget::Screen => {
-                    // Shouldn't happen, but fallback to main view
-                    (&frame_view, self.canvas.depth_view())
-                }
+        if offscreen {
+            if self.offscreen_output_target.is_none() {
+                self.offscreen_output_target =
+                    Some(self.framebuffer_manager.new_render_target(w, h, true));
             }
-        } else {
-            (&frame_view, self.canvas.depth_view())
+            self.offscreen_output_target
+                .as_mut()
+                .unwrap()
+                .resize(w, h, self.canvas.surface_format());
+        }
+
+        // The view that receives the final composited image: the surface
+        // texture for a visible window, the offscreen color texture otherwise.
+        let frame_view = match &frame {
+            Some(frame) => frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default()),
+            None => self
+                .offscreen_output_target
+                .as_ref()
+                .expect("offscreen render target was just created")
+                .color_view()
+                .expect("offscreen render target is never the screen")
+                .clone(),
         };
-        let (color_view, depth_view) = (color_view.clone(), depth_view.clone());
+
+        // Determine which views the scene is rendered into.
+        let (color_view, depth_view) = if post_processing.is_some() {
+            // Render to the offscreen buffer for post-processing.
+            match &self.post_process_render_target {
+                RenderTarget::Offscreen(o) => (o.color_view.clone(), o.depth_view.clone()),
+                // Shouldn't happen, but fall back to the final view.
+                RenderTarget::Screen => (frame_view.clone(), self.canvas.depth_view().clone()),
+            }
+        } else if offscreen {
+            let o = self
+                .offscreen_output_target
+                .as_ref()
+                .expect("offscreen render target was just created");
+            (
+                frame_view.clone(),
+                o.depth_view()
+                    .expect("offscreen render target is never the screen")
+                    .clone(),
+            )
+        } else {
+            (frame_view.clone(), self.canvas.depth_view().clone())
+        };
 
         // Clear the render target at the start of the frame
         {
@@ -205,7 +249,7 @@ impl Window {
             {
                 let render_context = RenderContext {
                     surface_format: self.canvas.surface_format(),
-                    sample_count: self.canvas.sample_count(),
+                    sample_count,
                     viewport_width: w,
                     viewport_height: h,
                 };
@@ -288,7 +332,7 @@ impl Window {
         {
             let context_2d = RenderContext2d {
                 surface_format: self.canvas.surface_format(),
-                sample_count: self.canvas.sample_count(),
+                sample_count,
                 viewport_width: w,
                 viewport_height: h,
             };
@@ -336,7 +380,7 @@ impl Window {
                     encoder: &mut encoder,
                     color_view: &color_view,
                     surface_format: self.canvas.surface_format(),
-                    sample_count: self.canvas.sample_count(),
+                    sample_count,
                     viewport_width: w,
                     viewport_height: h,
                 };
@@ -374,7 +418,7 @@ impl Window {
                 encoder: &mut encoder,
                 color_view: &frame_view,
                 surface_format: self.canvas.surface_format(),
-                sample_count: self.canvas.sample_count(),
+                sample_count,
                 viewport_width: w,
                 viewport_height: h,
             };
@@ -397,15 +441,31 @@ impl Window {
             );
         }
 
-        // Copy frame to readback texture for snap/snap_rect functionality
-        self.canvas.copy_frame_to_readback(&frame);
+        // Copy the rendered image into the readback texture so `snap`,
+        // `snap_rect` and recording can read it back.
+        match &frame {
+            Some(frame) => self.canvas.copy_frame_to_readback(frame),
+            None => {
+                let color = self
+                    .offscreen_output_target
+                    .as_ref()
+                    .expect("offscreen render target was just created")
+                    .color_texture()
+                    .expect("offscreen render target is never the screen")
+                    .clone();
+                self.canvas.copy_texture_to_readback(&color);
+            }
+        }
 
         // Capture frame for video recording if enabled
         #[cfg(feature = "recording")]
         self.capture_frame_if_recording();
 
-        // Present the frame
-        self.canvas.present(frame);
+        // Present the frame (visible windows only; a hidden window has no
+        // presentable surface).
+        if let Some(frame) = frame {
+            self.canvas.present(frame);
+        }
         #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsCast;

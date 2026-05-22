@@ -982,14 +982,26 @@ impl WgpuCanvas {
         }
     }
 
-    /// Copies the frame texture to the readback texture for later reading.
+    /// Copies the surface frame texture into the readback texture for later
+    /// reading via [`read_pixels`](Self::read_pixels).
     pub fn copy_frame_to_readback(&self, frame: &wgpu::SurfaceTexture) {
+        self.copy_texture_to_readback(&frame.texture);
+    }
+
+    /// Copies an arbitrary texture into the readback texture used by
+    /// [`read_pixels`](Self::read_pixels).
+    ///
+    /// The source texture must have `COPY_SRC` usage and the same size and
+    /// format as the surface. This is how a hidden window, which renders into
+    /// an offscreen texture rather than a surface, makes its frame available
+    /// to `snap`/`snap_rect`.
+    pub fn copy_texture_to_readback(&self, src: &wgpu::Texture) {
         let ctxt = Context::get();
         let mut encoder = ctxt.create_command_encoder(Some("readback_copy_encoder"));
 
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &frame.texture,
+                texture: src,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
