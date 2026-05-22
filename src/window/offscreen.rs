@@ -80,7 +80,14 @@ impl OffscreenSurface {
     ) {
         let _ = self
             .window
-            .render(scene, scene_2d, camera, camera_2d, renderer, post_processing)
+            .render(
+                scene,
+                scene_2d,
+                camera,
+                camera_2d,
+                renderer,
+                post_processing,
+            )
             .await;
     }
 

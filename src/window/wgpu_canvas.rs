@@ -678,8 +678,13 @@ impl WgpuCanvas {
         let (depth_texture, depth_view) =
             Self::create_depth_texture(&ctxt.device, width, height, sample_count);
         let (msaa_texture, msaa_view) = if sample_count > 1 {
-            let (tex, view) =
-                Self::create_msaa_texture(&ctxt.device, width, height, surface_format, sample_count);
+            let (tex, view) = Self::create_msaa_texture(
+                &ctxt.device,
+                width,
+                height,
+                surface_format,
+                sample_count,
+            );
             (Some(tex), Some(view))
         } else {
             (None, None)
@@ -1308,7 +1313,9 @@ impl WgpuCanvas {
 
     /// The scale factor.
     pub fn scale_factor(&self) -> f64 {
-        self.window.as_ref().map_or(1.0, |window| window.scale_factor())
+        self.window
+            .as_ref()
+            .map_or(1.0, |window| window.scale_factor())
     }
 
     /// Set the window title.
