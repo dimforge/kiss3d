@@ -42,6 +42,7 @@ EXAMPLES=(
     polyline_strip
     polylines2d
     screenshot
+    offscreen
     recording
     window
     multi_windows

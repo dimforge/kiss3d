@@ -59,10 +59,10 @@ enum PendingEvent {
 /// A unified canvas based on wgpu that works on both native and web platforms.
 #[allow(dead_code)]
 pub struct WgpuCanvas {
-    window: Arc<Window>,
+    window: Option<Arc<Window>>,
     #[cfg(not(target_arch = "wasm32"))]
-    window_id: winit::window::WindowId,
-    surface: wgpu::Surface<'static>,
+    window_id: Option<winit::window::WindowId>,
+    surface: Option<wgpu::Surface<'static>>,
     surface_config: wgpu::SurfaceConfiguration,
     cursor_pos: Option<(f64, f64)>,
     key_states: [Action; Key::Unknown as usize + 1],
@@ -586,10 +586,10 @@ impl WgpuCanvas {
         let window_id = window.id();
 
         WgpuCanvas {
-            window,
+            window: Some(window),
             #[cfg(not(target_arch = "wasm32"))]
-            window_id,
-            surface,
+            window_id: Some(window_id),
+            surface: Some(surface),
             surface_config,
             cursor_pos: None,
             key_states: [Action::Release; Key::Unknown as usize + 1],
@@ -607,6 +607,142 @@ impl WgpuCanvas {
             #[cfg(target_arch = "wasm32")]
             _event_closures,
         }
+    }
+
+    /// Opens a headless canvas: a wgpu context with no window and no surface,
+    /// for off-screen rendering. Works without a display server.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub async fn open_headless(
+        width: u32,
+        height: u32,
+        canvas_setup: Option<CanvasSetup>,
+        out_events: Sender<WindowEvent>,
+    ) -> Self {
+        let canvas_setup = canvas_setup.unwrap_or_default();
+        let width = width.max(1);
+        let height = height.max(1);
+
+        // Reuse the wgpu context if one already exists (e.g. a window was
+        // created first); otherwise create a surface-less one.
+        let surface_format = if Context::is_initialized() {
+            Context::get().surface_format
+        } else {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::all(),
+                ..wgpu::InstanceDescriptor::new_without_display_handle()
+            });
+
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    power_preference: wgpu::PowerPreference::default(),
+                    compatible_surface: None,
+                    force_fallback_adapter: false,
+                })
+                .await
+                .expect("Failed to find an appropriate adapter");
+
+            let (device, queue) = adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("kiss3d headless device"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    memory_hints: wgpu::MemoryHints::default(),
+                    trace: wgpu::Trace::Off,
+                    experimental_features: ExperimentalFeatures::default(),
+                })
+                .await
+                .expect("Failed to create device");
+
+            // No surface to query for a preferred format; pick a widely
+            // supported non-sRGB format (gamma is handled in shaders).
+            let surface_format = wgpu::TextureFormat::Rgba8Unorm;
+            Context::init(instance, device, queue, adapter, surface_format);
+            surface_format
+        };
+
+        let ctxt = Context::get();
+        let sample_count = canvas_setup.samples as u32;
+
+        // Kept only to carry the size and format; no surface is configured.
+        let surface_config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            format: surface_format,
+            width,
+            height,
+            present_mode: wgpu::PresentMode::AutoNoVsync,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+            desired_maximum_frame_latency: 2,
+        };
+
+        let (depth_texture, depth_view) =
+            Self::create_depth_texture(&ctxt.device, width, height, sample_count);
+        let (msaa_texture, msaa_view) = if sample_count > 1 {
+            let (tex, view) =
+                Self::create_msaa_texture(&ctxt.device, width, height, surface_format, sample_count);
+            (Some(tex), Some(view))
+        } else {
+            (None, None)
+        };
+        let readback_texture =
+            Self::create_readback_texture(&ctxt.device, width, height, surface_format);
+
+        WgpuCanvas {
+            window: None,
+            window_id: None,
+            surface: None,
+            surface_config,
+            cursor_pos: None,
+            key_states: [Action::Release; Key::Unknown as usize + 1],
+            button_states: [Action::Release; MouseButton::Button8 as usize + 1],
+            out_events,
+            modifiers_state: ModifiersState::default(),
+            depth_texture,
+            depth_view,
+            msaa_texture,
+            msaa_view,
+            sample_count,
+            readback_texture,
+        }
+    }
+
+    /// Resizes the canvas render targets.
+    ///
+    /// For an off-screen (headless) canvas this is the only way to change the
+    /// render size, since there is no window to emit resize events.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let width = width.max(1);
+        let height = height.max(1);
+        if self.surface_config.width == width && self.surface_config.height == height {
+            return;
+        }
+
+        let ctxt = Context::get();
+        self.surface_config.width = width;
+        self.surface_config.height = height;
+        if let Some(surface) = &self.surface {
+            surface.configure(&ctxt.device, &self.surface_config);
+        }
+
+        let (depth_texture, depth_view) =
+            Self::create_depth_texture(&ctxt.device, width, height, self.sample_count);
+        self.depth_texture = depth_texture;
+        self.depth_view = depth_view;
+
+        if self.sample_count > 1 {
+            let (msaa_texture, msaa_view) = Self::create_msaa_texture(
+                &ctxt.device,
+                width,
+                height,
+                self.surface_config.format,
+                self.sample_count,
+            );
+            self.msaa_texture = Some(msaa_texture);
+            self.msaa_view = Some(msaa_view);
+        }
+
+        self.readback_texture =
+            Self::create_readback_texture(&ctxt.device, width, height, self.surface_config.format);
     }
 
     fn create_depth_texture(
@@ -692,6 +828,11 @@ impl WgpuCanvas {
 
     /// Polls events from the window system.
     pub fn poll_events(&mut self) {
+        // A headless canvas has no window and no event loop; nothing to poll.
+        if self.window.is_none() {
+            return;
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         {
             use winit::platform::pump_events::EventLoopExtPumpEvents;
@@ -826,7 +967,7 @@ impl WgpuCanvas {
             let events = PENDING_WINDOW_EVENTS.with(|storage| {
                 storage
                     .borrow_mut()
-                    .remove(&self.window_id)
+                    .remove(&self.window_id.unwrap())
                     .unwrap_or_default()
             });
 
@@ -853,7 +994,9 @@ impl WgpuCanvas {
                         // Resize surface
                         self.surface_config.width = width;
                         self.surface_config.height = height;
-                        self.surface.configure(&ctxt.device, &self.surface_config);
+                        if let Some(surface) = &self.surface {
+                            surface.configure(&ctxt.device, &self.surface_config);
+                        }
 
                         // Recreate depth texture
                         let (new_depth, new_depth_view) = Self::create_depth_texture(
@@ -893,7 +1036,7 @@ impl WgpuCanvas {
         #[cfg(target_arch = "wasm32")]
         {
             // Check for resize - compare current window size to surface config
-            let current_size = self.window.inner_size();
+            let current_size = self.window.as_ref().unwrap().inner_size();
             if current_size.width > 0
                 && current_size.height > 0
                 && (current_size.width != self.surface_config.width
@@ -904,7 +1047,9 @@ impl WgpuCanvas {
                 // Resize surface
                 self.surface_config.width = current_size.width;
                 self.surface_config.height = current_size.height;
-                self.surface.configure(&ctxt.device, &self.surface_config);
+                if let Some(surface) = &self.surface {
+                    surface.configure(&ctxt.device, &self.surface_config);
+                }
 
                 // Recreate depth texture
                 let (new_depth, new_depth_view) = Self::create_depth_texture(
@@ -965,14 +1110,15 @@ impl WgpuCanvas {
 
     /// Gets the current surface texture for rendering.
     pub fn get_current_texture(&self) -> Option<wgpu::SurfaceTexture> {
-        match self.surface.get_current_texture() {
+        let surface = self.surface.as_ref()?;
+        match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(texture)
             | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 // Reconfigure and retry once
                 let ctxt = Context::get();
-                self.surface.configure(&ctxt.device, &self.surface_config);
-                match self.surface.get_current_texture() {
+                surface.configure(&ctxt.device, &self.surface_config);
+                match surface.get_current_texture() {
                     wgpu::CurrentSurfaceTexture::Success(texture)
                     | wgpu::CurrentSurfaceTexture::Suboptimal(texture) => Some(texture),
                     _ => None,
@@ -1162,12 +1308,14 @@ impl WgpuCanvas {
 
     /// The scale factor.
     pub fn scale_factor(&self) -> f64 {
-        self.window.scale_factor()
+        self.window.as_ref().map_or(1.0, |window| window.scale_factor())
     }
 
     /// Set the window title.
     pub fn set_title(&mut self, title: &str) {
-        self.window.set_title(title)
+        if let Some(window) = &self.window {
+            window.set_title(title);
+        }
     }
 
     /// Set the window icon.
@@ -1178,7 +1326,9 @@ impl WgpuCanvas {
             rgba.extend_from_slice(&pixel.to_rgba().0);
         }
         let icon = Icon::from_rgba(rgba, width, height).unwrap();
-        self.window.set_window_icon(Some(icon))
+        if let Some(window) = &self.window {
+            window.set_window_icon(Some(icon));
+        }
     }
 
     /// Set the cursor grabbing behaviour.
@@ -1189,29 +1339,37 @@ impl WgpuCanvas {
         } else {
             CursorGrabMode::None
         };
-        let _ = self.window.set_cursor_grab(mode);
+        if let Some(window) = &self.window {
+            let _ = window.set_cursor_grab(mode);
+        }
     }
 
     /// Set the cursor position.
     pub fn set_cursor_position(&self, x: f64, y: f64) {
-        let _ = self
-            .window
-            .set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+        if let Some(window) = &self.window {
+            let _ = window.set_cursor_position(winit::dpi::PhysicalPosition::new(x, y));
+        }
     }
 
     /// Toggle the cursor visibility.
     pub fn hide_cursor(&self, hide: bool) {
-        self.window.set_cursor_visible(!hide)
+        if let Some(window) = &self.window {
+            window.set_cursor_visible(!hide);
+        }
     }
 
     /// Hide the window.
     pub fn hide(&mut self) {
-        self.window.set_visible(false)
+        if let Some(window) = &self.window {
+            window.set_visible(false);
+        }
     }
 
     /// Show the window.
     pub fn show(&mut self) {
-        self.window.set_visible(true)
+        if let Some(window) = &self.window {
+            window.set_visible(true);
+        }
     }
 
     /// The state of a mouse button.
