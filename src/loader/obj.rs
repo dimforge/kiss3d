@@ -48,7 +48,7 @@ fn error(line: usize, err: &str) -> ! {
 }
 
 fn warn(line: usize, err: &str) {
-    println!("At line {}: {}", line, err)
+    log::warn!("at line {}: {}", line, err)
 }
 
 /// Parses an OBJ file and returns the meshes it contains.
@@ -189,7 +189,7 @@ pub fn parse(
                             )
                         }
                         _ => {
-                            println!("Warning: unknown line {} ignored: `{}'", l, line);
+                            log::warn!("unknown line {} ignored: `{}'", l, line);
                         }
                     }
                 }
@@ -198,11 +198,11 @@ pub fn parse(
     }
 
     if uvs.is_empty() && ignore_uvs {
-        println!("Warning: some texture coordinates are missing. Dropping texture coordinates infos for every vertex.");
+        log::warn!("some texture coordinates are missing. Dropping texture coordinates infos for every vertex.");
     }
 
     if normals.is_empty() && ignore_normals {
-        println!("Warning: some normals are missing. Dropping normals infos for every vertex.");
+        log::warn!("some normals are missing. Dropping normals infos for every vertex.");
     }
 
     reformat(
