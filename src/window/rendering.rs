@@ -17,6 +17,16 @@ use crate::scene::{SceneNode2d, SceneNode3d};
 
 use super::Window;
 
+/// Grace period during which the first frame keeps retrying surface acquisition
+/// before giving up. A freshly created window — particularly on macOS — may need
+/// the event loop to be pumped a few times before its surface is presentable.
+#[cfg(not(target_arch = "wasm32"))]
+const STARTUP_SURFACE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Delay between surface acquisition attempts while waiting for the first frame.
+#[cfg(not(target_arch = "wasm32"))]
+const SURFACE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
 impl Window {
     /// Renders one frame of a 3D scene.
     ///
@@ -94,6 +104,18 @@ impl Window {
         mut renderer: Option<&mut dyn Renderer3d>,
         mut post_processing: Option<&mut dyn PostProcessingEffect>,
     ) -> bool {
+        // Acquire the surface texture first. A just-created window may not be
+        // presentable yet, so `acquire_next_frame` retries until it is.
+        let frame = match self.acquire_next_frame() {
+            Some(frame) => frame,
+            None => return !self.should_close(),
+        };
+        let frame_view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+
+        // Read the size only now: while retrying, a pending resize event may
+        // have been processed and the surface reconfigured.
         let w = self.width();
         let h = self.height();
 
@@ -104,18 +126,6 @@ impl Window {
 
         // No need to update the light position here - it's computed per-frame
         // in the material's prepare() based on the camera position
-
-        // Get the surface texture
-        let frame = match self.canvas.get_current_texture() {
-            Some(frame) => frame,
-            None => {
-                eprintln!("Failed to acquire surface texture");
-                return !self.should_close();
-            }
-        };
-        let frame_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let ctxt = Context::get();
         let mut encoder = ctxt.create_command_encoder(Some("kiss3d_frame_encoder"));
@@ -415,6 +425,53 @@ impl Window {
         }
 
         !self.should_close()
+    }
+
+    /// Acquires the surface texture for the next frame.
+    ///
+    /// Returns `None` when no frame is available and the caller should skip
+    /// rendering. Until the first frame has been rendered, this retries —
+    /// pumping window events between attempts — for up to a couple of seconds,
+    /// because a freshly created window may need the event loop to run a few
+    /// times before its surface becomes presentable. Once a frame has been
+    /// acquired, a later failure (e.g. a minimized window) skips the frame
+    /// immediately instead of stalling.
+    fn acquire_next_frame(&mut self) -> Option<wgpu::SurfaceTexture> {
+        if let Some(frame) = self.canvas.get_current_texture() {
+            self.first_frame = false;
+            return Some(frame);
+        }
+
+        // The window has rendered before: treat this as a transient failure
+        // and skip the frame without stalling.
+        if !self.first_frame {
+            return None;
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        return None;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let deadline = std::time::Instant::now() + STARTUP_SURFACE_TIMEOUT;
+            loop {
+                std::thread::sleep(SURFACE_RETRY_INTERVAL);
+                self.canvas.poll_events();
+
+                if let Some(frame) = self.canvas.get_current_texture() {
+                    self.first_frame = false;
+                    return Some(frame);
+                }
+
+                if std::time::Instant::now() >= deadline {
+                    log::warn!(
+                        "could not acquire a surface texture within \
+                         {STARTUP_SURFACE_TIMEOUT:?}; the window failed to become ready"
+                    );
+                    return None;
+                }
+            }
+        }
     }
 
     fn render_scene(

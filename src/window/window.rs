@@ -47,6 +47,10 @@ pub struct Window {
     pub(super) framebuffer_manager: FramebufferManager,
     pub(super) post_process_render_target: RenderTarget,
     pub(super) should_close: bool,
+    /// `true` until the first surface texture has been successfully acquired.
+    /// While set, frame acquisition retries (pumping window events) instead of
+    /// skipping, so a freshly created window reliably renders its first frame.
+    pub(super) first_frame: bool,
     pub(super) close_key: Option<Key>,
     pub(super) close_modifiers: Option<Modifiers>,
     #[cfg(feature = "egui")]
@@ -422,6 +426,7 @@ impl Window {
         let framebuffer_manager = FramebufferManager::new();
         let mut usr_window = Window {
             should_close: false,
+            first_frame: true,
             close_key: Some(Key::Escape),
             close_modifiers: None,
             canvas,
