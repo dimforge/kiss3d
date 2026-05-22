@@ -31,56 +31,54 @@ pub fn parse(string: &str) -> Vec<MtlMaterial> {
 
     for (l, line) in string.lines().enumerate() {
         let mut words = obj::split_words(line);
-        let tag = words.next();
+        let Some(w) = words.next() else {
+            continue;
+        };
+        if w.is_empty() || w.as_bytes()[0] == b'#' {
+            continue;
+        }
 
-        match tag {
-            None => {}
-            Some(w) => {
-                if !w.is_empty() && w.as_bytes()[0] != b'#' {
-                    let mut p = obj::split_words(line).peekable();
-                    let _ = p.next();
+        let mut p = obj::split_words(line).peekable();
+        let _ = p.next();
 
-                    if p.peek().is_none() {
-                        continue;
-                    }
+        if p.peek().is_none() {
+            continue;
+        }
 
-                    match w {
-                        // texture name
-                        "newmtl" => {
-                            let old = mem::replace(
-                                &mut curr_material,
-                                MtlMaterial::new_default(parse_name(l, words)),
-                            );
+        match w {
+            // texture name
+            "newmtl" => {
+                let old = mem::replace(
+                    &mut curr_material,
+                    MtlMaterial::new_default(parse_name(l, words)),
+                );
 
-                            if !old.name.is_empty() {
-                                res.push(old);
-                            }
-                        }
-                        // ambient color
-                        "Ka" => curr_material.ambient = parse_color(l, words),
-                        // diffuse color
-                        "Kd" => curr_material.diffuse = parse_color(l, words),
-                        // specular color
-                        "Ks" => curr_material.specular = parse_color(l, words),
-                        // shininess
-                        "Ns" => curr_material.shininess = parse_scalar(l, words),
-                        // alpha
-                        "d" => curr_material.alpha = parse_scalar(l, words),
-                        // ambient map
-                        "map_Ka" => curr_material.ambient_texture = Some(parse_name(l, words)),
-                        // diffuse texture map
-                        "map_Kd" => curr_material.diffuse_texture = Some(parse_name(l, words)),
-                        // specular texture map
-                        "map_Ks" => curr_material.specular_texture = Some(parse_name(l, words)),
-                        // specular texture map
-                        "map_d" | "map_opacity" => {
-                            curr_material.opacity_map = Some(parse_name(l, words))
-                        }
-                        _ => {
-                            log::warn!("unknown line {} ignored: `{}'", l, line);
-                        }
-                    }
+                if !old.name.is_empty() {
+                    res.push(old);
                 }
+            }
+            // ambient color
+            "Ka" => curr_material.ambient = parse_color(l, words),
+            // diffuse color
+            "Kd" => curr_material.diffuse = parse_color(l, words),
+            // specular color
+            "Ks" => curr_material.specular = parse_color(l, words),
+            // shininess
+            "Ns" => curr_material.shininess = parse_scalar(l, words),
+            // alpha
+            "d" => curr_material.alpha = parse_scalar(l, words),
+            // ambient map
+            "map_Ka" => curr_material.ambient_texture = Some(parse_name(l, words)),
+            // diffuse texture map
+            "map_Kd" => curr_material.diffuse_texture = Some(parse_name(l, words)),
+            // specular texture map
+            "map_Ks" => curr_material.specular_texture = Some(parse_name(l, words)),
+            // specular texture map
+            "map_d" | "map_opacity" => {
+                curr_material.opacity_map = Some(parse_name(l, words))
+            }
+            _ => {
+                log::warn!("unknown line {} ignored: `{}'", l, line);
             }
         }
     }
