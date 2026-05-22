@@ -17,6 +17,16 @@ use crate::scene::{SceneNode2d, SceneNode3d};
 
 use super::Window;
 
+/// Grace period during which the first frame keeps retrying surface acquisition
+/// before giving up. A freshly created window — particularly on macOS — may need
+/// the event loop to be pumped a few times before its surface is presentable.
+#[cfg(not(target_arch = "wasm32"))]
+const STARTUP_SURFACE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Delay between surface acquisition attempts while waiting for the first frame.
+#[cfg(not(target_arch = "wasm32"))]
+const SURFACE_RETRY_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
 impl Window {
     /// Renders one frame of a 3D scene.
     ///
@@ -94,6 +104,25 @@ impl Window {
         mut renderer: Option<&mut dyn Renderer3d>,
         mut post_processing: Option<&mut dyn PostProcessingEffect>,
     ) -> bool {
+        // A visible window renders into its surface; a hidden window has no
+        // presentable surface, so it renders into an offscreen texture that
+        // `snap` and recording can still read back.
+        let offscreen = self.hidden;
+
+        // Acquire the surface texture for visible windows. A just-created
+        // window may not be presentable yet, so `acquire_next_frame` retries
+        // until it is.
+        let frame = if offscreen {
+            None
+        } else {
+            match self.acquire_next_frame() {
+                Some(frame) => Some(frame),
+                None => return !self.should_close(),
+            }
+        };
+
+        // Read the size only now: while retrying, a pending resize event may
+        // have been processed and the surface reconfigured.
         let w = self.width();
         let h = self.height();
 
@@ -105,39 +134,69 @@ impl Window {
         // No need to update the light position here - it's computed per-frame
         // in the material's prepare() based on the camera position
 
-        // Get the surface texture
-        let frame = match self.canvas.get_current_texture() {
-            Some(frame) => frame,
-            None => {
-                eprintln!("Failed to acquire surface texture");
-                return !self.should_close();
-            }
+        // `OffscreenBuffers` are never multisampled, so offscreen rendering
+        // always uses a single sample (a hidden window is not antialiased).
+        let sample_count = if offscreen {
+            1
+        } else {
+            self.canvas.sample_count()
         };
-        let frame_view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
 
         let ctxt = Context::get();
         let mut encoder = ctxt.create_command_encoder(Some("kiss3d_frame_encoder"));
 
-        // Resize post-process render target if needed
+        // Resize the offscreen render targets if needed.
         self.post_process_render_target
             .resize(w, h, self.canvas.surface_format());
-
-        // Determine which views to render to
-        let (color_view, depth_view) = if post_processing.is_some() {
-            // Render to offscreen buffer for post-processing
-            match &self.post_process_render_target {
-                RenderTarget::Offscreen(o) => (&o.color_view, &o.depth_view),
-                RenderTarget::Screen => {
-                    // Shouldn't happen, but fallback to main view
-                    (&frame_view, self.canvas.depth_view())
-                }
+        if offscreen {
+            if self.offscreen_output_target.is_none() {
+                self.offscreen_output_target =
+                    Some(self.framebuffer_manager.new_render_target(w, h, true));
             }
-        } else {
-            (&frame_view, self.canvas.depth_view())
+            self.offscreen_output_target.as_mut().unwrap().resize(
+                w,
+                h,
+                self.canvas.surface_format(),
+            );
+        }
+
+        // The view that receives the final composited image: the surface
+        // texture for a visible window, the offscreen color texture otherwise.
+        let frame_view = match &frame {
+            Some(frame) => frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default()),
+            None => self
+                .offscreen_output_target
+                .as_ref()
+                .expect("offscreen render target was just created")
+                .color_view()
+                .expect("offscreen render target is never the screen")
+                .clone(),
         };
-        let (color_view, depth_view) = (color_view.clone(), depth_view.clone());
+
+        // Determine which views the scene is rendered into.
+        let (color_view, depth_view) = if post_processing.is_some() {
+            // Render to the offscreen buffer for post-processing.
+            match &self.post_process_render_target {
+                RenderTarget::Offscreen(o) => (o.color_view.clone(), o.depth_view.clone()),
+                // Shouldn't happen, but fall back to the final view.
+                RenderTarget::Screen => (frame_view.clone(), self.canvas.depth_view().clone()),
+            }
+        } else if offscreen {
+            let o = self
+                .offscreen_output_target
+                .as_ref()
+                .expect("offscreen render target was just created");
+            (
+                frame_view.clone(),
+                o.depth_view()
+                    .expect("offscreen render target is never the screen")
+                    .clone(),
+            )
+        } else {
+            (frame_view.clone(), self.canvas.depth_view().clone())
+        };
 
         // Clear the render target at the start of the frame
         {
@@ -195,7 +254,7 @@ impl Window {
             {
                 let render_context = RenderContext {
                     surface_format: self.canvas.surface_format(),
-                    sample_count: self.canvas.sample_count(),
+                    sample_count,
                     viewport_width: w,
                     viewport_height: h,
                 };
@@ -278,7 +337,7 @@ impl Window {
         {
             let context_2d = RenderContext2d {
                 surface_format: self.canvas.surface_format(),
-                sample_count: self.canvas.sample_count(),
+                sample_count,
                 viewport_width: w,
                 viewport_height: h,
             };
@@ -326,7 +385,7 @@ impl Window {
                     encoder: &mut encoder,
                     color_view: &color_view,
                     surface_format: self.canvas.surface_format(),
-                    sample_count: self.canvas.sample_count(),
+                    sample_count,
                     viewport_width: w,
                     viewport_height: h,
                 };
@@ -364,7 +423,7 @@ impl Window {
                 encoder: &mut encoder,
                 color_view: &frame_view,
                 surface_format: self.canvas.surface_format(),
-                sample_count: self.canvas.sample_count(),
+                sample_count,
                 viewport_width: w,
                 viewport_height: h,
             };
@@ -387,15 +446,31 @@ impl Window {
             );
         }
 
-        // Copy frame to readback texture for snap/snap_rect functionality
-        self.canvas.copy_frame_to_readback(&frame);
+        // Copy the rendered image into the readback texture so `snap`,
+        // `snap_rect` and recording can read it back.
+        match &frame {
+            Some(frame) => self.canvas.copy_frame_to_readback(frame),
+            None => {
+                let color = self
+                    .offscreen_output_target
+                    .as_ref()
+                    .expect("offscreen render target was just created")
+                    .color_texture()
+                    .expect("offscreen render target is never the screen")
+                    .clone();
+                self.canvas.copy_texture_to_readback(&color);
+            }
+        }
 
         // Capture frame for video recording if enabled
         #[cfg(feature = "recording")]
         self.capture_frame_if_recording();
 
-        // Present the frame
-        self.canvas.present(frame);
+        // Present the frame (visible windows only; a hidden window has no
+        // presentable surface).
+        if let Some(frame) = frame {
+            self.canvas.present(frame);
+        }
         #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsCast;
@@ -415,6 +490,53 @@ impl Window {
         }
 
         !self.should_close()
+    }
+
+    /// Acquires the surface texture for the next frame.
+    ///
+    /// Returns `None` when no frame is available and the caller should skip
+    /// rendering. Until the first frame has been rendered, this retries —
+    /// pumping window events between attempts — for up to a couple of seconds,
+    /// because a freshly created window may need the event loop to run a few
+    /// times before its surface becomes presentable. Once a frame has been
+    /// acquired, a later failure (e.g. a minimized window) skips the frame
+    /// immediately instead of stalling.
+    fn acquire_next_frame(&mut self) -> Option<wgpu::SurfaceTexture> {
+        if let Some(frame) = self.canvas.get_current_texture() {
+            self.first_frame = false;
+            return Some(frame);
+        }
+
+        // The window has rendered before: treat this as a transient failure
+        // and skip the frame without stalling.
+        if !self.first_frame {
+            return None;
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        return None;
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let deadline = std::time::Instant::now() + STARTUP_SURFACE_TIMEOUT;
+            loop {
+                std::thread::sleep(SURFACE_RETRY_INTERVAL);
+                self.canvas.poll_events();
+
+                if let Some(frame) = self.canvas.get_current_texture() {
+                    self.first_frame = false;
+                    return Some(frame);
+                }
+
+                if std::time::Instant::now() >= deadline {
+                    log::warn!(
+                        "could not acquire a surface texture within \
+                         {STARTUP_SURFACE_TIMEOUT:?}; the window failed to become ready"
+                    );
+                    return None;
+                }
+            }
+        }
     }
 
     fn render_scene(

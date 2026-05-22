@@ -193,6 +193,14 @@ impl Canvas {
         self.canvas.copy_frame_to_readback(frame)
     }
 
+    /// Copies an arbitrary texture into the readback texture used by `read_pixels`.
+    ///
+    /// The source texture must have `COPY_SRC` usage and the same size and
+    /// format as the surface.
+    pub fn copy_texture_to_readback(&self, src: &wgpu::Texture) {
+        self.canvas.copy_texture_to_readback(src)
+    }
+
     /// Reads pixels from the readback texture into the provided buffer.
     /// Returns RGB data (3 bytes per pixel).
     pub fn read_pixels(&self, out: &mut Vec<u8>, x: usize, y: usize, width: usize, height: usize) {

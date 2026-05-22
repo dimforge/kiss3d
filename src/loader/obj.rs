@@ -48,7 +48,7 @@ fn error(line: usize, err: &str) -> ! {
 }
 
 fn warn(line: usize, err: &str) {
-    println!("At line {}: {}", line, err)
+    log::warn!("at line {}: {}", line, err)
 }
 
 /// Parses an OBJ file and returns the meshes it contains.
@@ -141,68 +141,67 @@ pub fn parse(
 
     for (l, line) in string.lines().enumerate() {
         let mut words = split_words(line);
-        let tag = words.next();
-        match tag {
-            None => {}
-            Some(w) => {
-                if !w.is_empty() && w.as_bytes()[0] != b'#' {
-                    match w {
-                        "v" => coords.push(parse_v_or_vn(l, words)),
-                        "vn" => {
-                            if !ignore_normals {
-                                normals.push(parse_v_or_vn(l, words))
-                            }
-                        }
-                        "f" => parse_f(
-                            l,
-                            words,
-                            &coords[..],
-                            &uvs[..],
-                            &normals[..],
-                            &mut ignore_uvs,
-                            &mut ignore_normals,
-                            &mut groups_ids,
-                            curr_group,
-                        ),
-                        "vt" => {
-                            if !ignore_uvs {
-                                uvs.push(parse_vt(l, words))
-                            }
-                        }
-                        "g" => {
-                            curr_group = parse_g(l, words, basename, &mut groups, &mut groups_ids);
-                            let _ = curr_mtl
-                                .as_ref()
-                                .map(|mtl| group2mtl.insert(curr_group, mtl.clone()));
-                        }
-                        "mtllib" => parse_mtllib(l, words, mtl_base_dir, &mut mtllib),
-                        "usemtl" => {
-                            curr_group = parse_usemtl(
-                                l,
-                                words,
-                                curr_group,
-                                &mtllib,
-                                &mut group2mtl,
-                                &mut groups,
-                                &mut groups_ids,
-                                &mut curr_mtl,
-                            )
-                        }
-                        _ => {
-                            println!("Warning: unknown line {} ignored: `{}'", l, line);
-                        }
-                    }
+        let Some(w) = words.next() else {
+            continue;
+        };
+        if w.is_empty() || w.as_bytes()[0] == b'#' {
+            continue;
+        }
+
+        match w {
+            "v" => coords.push(parse_v_or_vn(l, words)),
+            "vn" => {
+                if !ignore_normals {
+                    normals.push(parse_v_or_vn(l, words))
                 }
+            }
+            "f" => parse_f(
+                l,
+                words,
+                &coords[..],
+                &uvs[..],
+                &normals[..],
+                &mut ignore_uvs,
+                &mut ignore_normals,
+                &mut groups_ids,
+                curr_group,
+            ),
+            "vt" => {
+                if !ignore_uvs {
+                    uvs.push(parse_vt(l, words))
+                }
+            }
+            "g" => {
+                curr_group = parse_g(l, words, basename, &mut groups, &mut groups_ids);
+                let _ = curr_mtl
+                    .as_ref()
+                    .map(|mtl| group2mtl.insert(curr_group, mtl.clone()));
+            }
+            "mtllib" => parse_mtllib(l, words, mtl_base_dir, &mut mtllib),
+            "usemtl" => {
+                curr_group = parse_usemtl(
+                    l,
+                    words,
+                    curr_group,
+                    &mtllib,
+                    &mut group2mtl,
+                    &mut groups,
+                    &mut groups_ids,
+                    &mut curr_mtl,
+                )
+            }
+            _ => {
+                log::warn!("unknown line {} ignored: `{}'", l, line);
             }
         }
     }
 
     if uvs.is_empty() && ignore_uvs {
-        println!("Warning: some texture coordinates are missing. Dropping texture coordinates infos for every vertex.");
+        log::warn!("some texture coordinates are missing. Dropping texture coordinates infos for every vertex.");
     }
 
     if normals.is_empty() && ignore_normals {
-        println!("Warning: some normals are missing. Dropping normals infos for every vertex.");
+        log::warn!("some normals are missing. Dropping normals infos for every vertex.");
     }
 
     reformat(
@@ -532,11 +531,7 @@ fn reformat(
     )));
 
     let mut meshes = Vec::new();
-    for ((fs, name), mtl) in resfs
-        .into_iter()
-        .zip(names.into_iter())
-        .zip(mtls.into_iter())
-    {
+    for ((fs, name), mtl) in resfs.into_iter().zip(names).zip(mtls) {
         if !fs.is_empty() {
             let fs = Arc::new(RwLock::new(GPUVec::new(
                 fs,

@@ -43,10 +43,18 @@ pub struct Window {
     pub(super) point_renderer: PointRenderer3d,
     pub(super) polyline_renderer: PolylineRenderer3d,
     pub(super) text_renderer: TextRenderer,
-    #[allow(dead_code)]
     pub(super) framebuffer_manager: FramebufferManager,
     pub(super) post_process_render_target: RenderTarget,
+    /// Offscreen render target used when the window is hidden, so `snap` and
+    /// recording work without a presentable surface. Created on first use.
+    pub(super) offscreen_output_target: Option<RenderTarget>,
+    /// Whether the window is hidden. Hidden windows render offscreen.
+    pub(super) hidden: bool,
     pub(super) should_close: bool,
+    /// `true` until the first surface texture has been successfully acquired.
+    /// While set, frame acquisition retries (pumping window events) instead of
+    /// skipping, so a freshly created window reliably renders its first frame.
+    pub(super) first_frame: bool,
     pub(super) close_key: Option<Key>,
     pub(super) close_modifiers: Option<Modifiers>,
     #[cfg(feature = "egui")]
@@ -178,6 +186,7 @@ impl Window {
     /// The window continues to exist and can be shown again later.
     #[inline]
     pub fn hide(&mut self) {
+        self.hidden = true;
         self.canvas.hide()
     }
 
@@ -186,6 +195,7 @@ impl Window {
     /// Use [`hide()`](Self::hide) to hide it again.
     #[inline]
     pub fn show(&mut self) {
+        self.hidden = false;
         self.canvas.show()
     }
 
@@ -290,6 +300,11 @@ impl Window {
     /// The window is created but not displayed. Use [`show()`](Self::show) to make it visible.
     /// The default size is 800x600 pixels.
     ///
+    /// While hidden, the window renders off-screen instead of to its surface,
+    /// so [`snap`](Self::snap), [`snap_image`](Self::snap_image) and recording
+    /// work without ever displaying anything — this is how kiss3d does
+    /// offscreen rendering.
+    ///
     /// # Arguments
     /// * `title` - The window title
     ///
@@ -302,6 +317,11 @@ impl Window {
     /// Creates a new hidden window with custom dimensions.
     ///
     /// The window is created but not displayed. Use [`show()`](Self::show) to make it visible.
+    ///
+    /// While hidden, the window renders off-screen instead of to its surface,
+    /// so [`snap`](Self::snap), [`snap_image`](Self::snap_image) and recording
+    /// work without ever displaying anything — this is how kiss3d does
+    /// offscreen rendering.
     ///
     /// # Arguments
     /// * `title` - The window title
@@ -422,6 +442,7 @@ impl Window {
         let framebuffer_manager = FramebufferManager::new();
         let mut usr_window = Window {
             should_close: false,
+            first_frame: true,
             close_key: Some(Key::Escape),
             close_modifiers: None,
             canvas,
@@ -437,6 +458,8 @@ impl Window {
             #[cfg(feature = "egui")]
             egui_context: EguiContext::new(),
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
+            offscreen_output_target: None,
+            hidden: hide,
             framebuffer_manager,
             #[cfg(feature = "recording")]
             recording: None,
