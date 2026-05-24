@@ -42,7 +42,7 @@ thread_local! {
 
 /// Internal event type that stores both the event data and state updates needed.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq)]
 enum PendingEvent {
     WindowEvent(WindowEvent),
     ButtonState(MouseButton, Action),
@@ -927,20 +927,12 @@ impl WgpuCanvas {
                         WinitWindowEvent::KeyboardInput { event, .. } => {
                             let action = translate_action(event.state);
                             let key = translate_key(event.physical_key);
-                            let mut events = vec![
-                                PendingEvent::KeyState(key, action),
-                                PendingEvent::WindowEvent(WindowEvent::Key(
-                                    key,
-                                    action,
-                                    Modifiers::empty(),
-                                )),
-                            ];
-                            if let winit::keyboard::Key::Character(ref c) = event.logical_key {
-                                for ch in c.chars() {
-                                    events.push(PendingEvent::WindowEvent(WindowEvent::Char(ch)));
-                                }
-                            }
-                            events
+                            translate_keyboard_input(
+                                key,
+                                action,
+                                &event.logical_key,
+                                event.text.as_deref(),
+                            )
                         }
                         WinitWindowEvent::ModifiersChanged(new_modifiers) => {
                             vec![PendingEvent::Modifiers(new_modifiers.state())]
@@ -1390,6 +1382,41 @@ impl WgpuCanvas {
     }
 }
 
+// Translate a winit `KeyboardInput` event into the kiss3d-internal stream of
+// pending events. `Char` events are only emitted on key press — emitting them
+// on release as well caused egui textboxes to receive every character twice
+// (see https://github.com/dimforge/kiss3d/issues/380).
+#[cfg(not(target_arch = "wasm32"))]
+fn translate_keyboard_input(
+    key: Key,
+    action: Action,
+    logical_key: &winit::keyboard::Key,
+    text: Option<&str>,
+) -> Vec<PendingEvent> {
+    let mut events = vec![
+        PendingEvent::KeyState(key, action),
+        PendingEvent::WindowEvent(WindowEvent::Key(key, action, Modifiers::empty())),
+    ];
+
+    if action == Action::Press {
+        // Prefer winit's `text` field: it is `None` when the keypress shouldn't
+        // produce text (e.g. Ctrl+A), so it naturally suppresses unwanted text
+        // input from shortcuts. Fall back to the logical key's character form
+        // for platforms or events where `text` is not populated.
+        let chars = text.or_else(|| match logical_key {
+            winit::keyboard::Key::Character(s) => Some(s.as_str()),
+            _ => None,
+        });
+        if let Some(s) = chars {
+            for ch in s.chars() {
+                events.push(PendingEvent::WindowEvent(WindowEvent::Char(ch)));
+            }
+        }
+    }
+
+    events
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn translate_action(action: winit::event::ElementState) -> Action {
     use winit::event::ElementState;
@@ -1695,5 +1722,84 @@ fn translate_web_key(code: &str) -> Key {
         "Slash" => Key::Slash,
         "Tab" => Key::Tab,
         _ => Key::Unknown,
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::*;
+    use winit::keyboard::{Key as WinitKey, NamedKey, SmolStr};
+
+    fn char_events(events: &[PendingEvent]) -> Vec<char> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                PendingEvent::WindowEvent(WindowEvent::Char(c)) => Some(*c),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Regression test for https://github.com/dimforge/kiss3d/issues/380:
+    // a single key press/release cycle must only produce a single Char event,
+    // otherwise egui textboxes (and other text consumers) insert each typed
+    // character twice.
+    #[test]
+    fn issue_380_press_release_emits_single_char() {
+        let logical = WinitKey::Character(SmolStr::new("a"));
+
+        let press = translate_keyboard_input(Key::A, Action::Press, &logical, Some("a"));
+        let release = translate_keyboard_input(Key::A, Action::Release, &logical, Some("a"));
+
+        // Before the fix, both press and release emitted a Char event,
+        // so a single keystroke produced "aa" in egui textboxes.
+        assert_eq!(char_events(&press), vec!['a']);
+        assert_eq!(char_events(&release), Vec::<char>::new());
+
+        // Key + KeyState events must still fire on both press and release,
+        // so consumers that track key state (e.g. cameras) keep working.
+        assert!(press.iter().any(|e| matches!(
+            e,
+            PendingEvent::WindowEvent(WindowEvent::Key(Key::A, Action::Press, _))
+        )));
+        assert!(release.iter().any(|e| matches!(
+            e,
+            PendingEvent::WindowEvent(WindowEvent::Key(Key::A, Action::Release, _))
+        )));
+        assert!(press
+            .iter()
+            .any(|e| matches!(e, PendingEvent::KeyState(Key::A, Action::Press))));
+        assert!(release
+            .iter()
+            .any(|e| matches!(e, PendingEvent::KeyState(Key::A, Action::Release))));
+    }
+
+    // Named keys (Enter, Shift, ...) without text must not generate Char events
+    // on either press or release.
+    #[test]
+    fn named_key_emits_no_char() {
+        let logical = WinitKey::Named(NamedKey::Shift);
+        let press = translate_keyboard_input(Key::LShift, Action::Press, &logical, None);
+        let release = translate_keyboard_input(Key::LShift, Action::Release, &logical, None);
+        assert_eq!(char_events(&press), Vec::<char>::new());
+        assert_eq!(char_events(&release), Vec::<char>::new());
+    }
+
+    // If winit reports `text` (the canonical source), use it verbatim — it
+    // already accounts for shift/altgr layouts.
+    #[test]
+    fn uses_text_field_when_provided() {
+        let logical = WinitKey::Character(SmolStr::new("a"));
+        let press = translate_keyboard_input(Key::A, Action::Press, &logical, Some("A"));
+        assert_eq!(char_events(&press), vec!['A']);
+    }
+
+    // Some platforms may leave `text` empty for a printable key; fall back to
+    // the logical key's character form so users still get text input.
+    #[test]
+    fn falls_back_to_logical_key_when_text_missing() {
+        let logical = WinitKey::Character(SmolStr::new("z"));
+        let press = translate_keyboard_input(Key::Z, Action::Press, &logical, None);
+        assert_eq!(char_events(&press), vec!['z']);
     }
 }
