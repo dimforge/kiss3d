@@ -42,7 +42,7 @@ image        = { version = "0.25", default-features = false, features = ["defaul
 log          = "0.4"
 web-time     = "1"
 kiss3d-macro = { version = "0.36.0", path = "kiss3d-macro" }
-glamx         = { version = "0.2", features = ["bytemuck"] }
+glamx         = { version = "0.3", features = ["bytemuck"] }
 ffmpeg-the-third = { version = "4", optional = true }
 num-traits   = "0.2"
 rgb          = "0.8"
