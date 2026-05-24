@@ -1,3 +1,27 @@
+# v0.42.0
+
+## Breaking Changes
+
+- Bumped `glamx` dependency: 0.2 → 0.3. ([#384](https://github.com/dimforge/kiss3d/pull/384))
+
+## New Features
+
+### Off-screen Rendering ([#382](https://github.com/dimforge/kiss3d/pull/382))
+
+- Added `OffscreenSurface`: a truly headless render target with no window and no event loop — works on CI, servers and other environments without a display server (native only).
+  - `OffscreenSurface::new(width, height)` / `with_setup(width, height, CanvasSetup)`
+  - `render_3d` / `render_2d` / `render` — share the same scene graph, cameras, lights and materials as `Window`
+  - `render_image_3d` — render a frame and capture it in one call
+  - `snap`, `snap_rect`, `snap_image`, `resize`, `size`, `width`, `height`, `set_background_color`
+- Hidden windows (`Window::new_hidden*`) now render into an off-screen texture, so `snap*` and the `recording` feature work on them too. ([#381](https://github.com/dimforge/kiss3d/pull/381))
+- Added the `offscreen` example.
+
+## Bug Fixes
+
+- Fixed the first frame occasionally failing to render. A freshly created window — particularly on macOS — may need the event loop to be pumped a few times before its surface becomes presentable; surface acquisition now retries during a short startup grace period before giving up, then skips transient failures immediately on subsequent frames. ([#381](https://github.com/dimforge/kiss3d/pull/381))
+- Ensured the selected surface format is supported by the device features. ([#379](https://github.com/dimforge/kiss3d/pull/379))
+- Replaced stray `println!` / `eprintln!` calls in the rendering path and the OBJ/MTL loaders with `log` macros. ([#381](https://github.com/dimforge/kiss3d/pull/381))
+
 # v0.41.0
 
 ## Breaking Changes
