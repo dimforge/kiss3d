@@ -28,6 +28,26 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wgpu::ExperimentalFeatures;
 
+/// Computes the device features to request.
+///
+/// With the `raytracing` feature enabled, this opts into wgpu's experimental ray
+/// query + acceleration-structure features when the adapter supports them, so the
+/// path tracer can use the hardware backend. Otherwise no extra features are
+/// requested and the portable compute backend is used.
+fn raytracing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    #[allow(unused_mut)]
+    let mut features = wgpu::Features::empty();
+    #[cfg(feature = "raytracing")]
+    {
+        let supported = adapter.features();
+        if supported.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        }
+    }
+    let _ = adapter;
+    features
+}
+
 // Thread-local EventLoop singleton for native platforms.
 // winit only allows one EventLoop per program, so we store it in thread-local
 // storage and reuse it across window recreations. EventLoop is not Send/Sync,
@@ -235,10 +255,11 @@ impl WgpuCanvas {
             #[cfg(not(target_arch = "wasm32"))]
             let limits = wgpu::Limits::default();
 
+            let required_features = raytracing_features(&adapter);
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kiss3d device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: limits,
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
@@ -641,10 +662,11 @@ impl WgpuCanvas {
                 .await
                 .expect("Failed to find an appropriate adapter");
 
+            let required_features = raytracing_features(&adapter);
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kiss3d headless device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,

@@ -48,7 +48,10 @@ async fn main() {
     let rot = Quat::from_axis_angle(Vec3::Y, 0.01);
     let mut time = 0.0f32;
 
-    while window.render_3d(&mut scene, &mut camera).await {
+    let mut raytracer = RayTracer::new();
+    raytracer.set_max_bounces(8);
+
+    while window.render_raytraced(&mut scene, &mut camera, &mut raytracer).await {
         cube.rotate(rot);
 
         // Animate the lights in a circular pattern

@@ -3,7 +3,7 @@
 use crate::camera::{Camera2d, Camera3d};
 use crate::color::Color;
 use crate::post_processing::PostProcessingEffect;
-use crate::renderer::Renderer3d;
+use crate::renderer::{RayTracer, Renderer3d};
 use crate::scene::{SceneNode2d, SceneNode3d};
 use crate::window::{CanvasSetup, Window};
 use glamx::UVec2;
@@ -91,6 +91,35 @@ impl OffscreenSurface {
             .await;
     }
 
+    /// Renders one path-traced frame into the off-screen texture.
+    ///
+    /// Call repeatedly with the same [`RayTracer`] to accumulate samples (the
+    /// camera is static off-screen, so accumulation only restarts on the first
+    /// frame). See [`Window::render_raytraced`].
+    pub async fn render_raytraced(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+        raytracer: &mut RayTracer,
+    ) {
+        let _ = self.window.render_raytraced(scene, camera, raytracer).await;
+    }
+
+    /// Path-traces a 3D scene for `samples` accumulated frames and returns the
+    /// resulting image, in one call.
+    pub async fn render_image_raytraced(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+        raytracer: &mut RayTracer,
+        samples: u32,
+    ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+        for _ in 0..samples.max(1) {
+            self.render_raytraced(scene, camera, raytracer).await;
+        }
+        self.snap_image()
+    }
+
     /// Renders a 3D scene and returns the resulting image, in one call.
     pub async fn render_image_3d(
         &mut self,
@@ -139,5 +168,21 @@ impl OffscreenSurface {
     /// Sets the background color.
     pub fn set_background_color(&mut self, color: Color) {
         self.window.set_background_color(color);
+    }
+
+    /// Sets the global ambient light intensity (also drives the path tracer's
+    /// sky/environment term).
+    pub fn set_ambient(&mut self, ambient: f32) {
+        self.window.set_ambient(ambient);
+    }
+
+    /// Queues an egui UI to be drawn over the next rendered frame. See
+    /// [`Window::draw_ui`].
+    #[cfg(feature = "egui")]
+    pub fn draw_ui<F>(&mut self, ui_fn: F)
+    where
+        F: FnOnce(&egui::Context),
+    {
+        self.window.draw_ui(ui_fn);
     }
 }

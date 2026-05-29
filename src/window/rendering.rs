@@ -8,7 +8,7 @@ use crate::event::WindowEvent;
 use crate::light::LightCollection;
 use crate::post_processing::{PostProcessingContext, PostProcessingEffect};
 use crate::prelude::FixedView2d;
-use crate::renderer::Renderer3d;
+use crate::renderer::{RayTracer, Renderer3d};
 use crate::resource::{
     MaterialManager2d, MaterialManager3d, RenderContext, RenderContext2d, RenderContext2dEncoder,
     RenderTarget,
@@ -485,6 +485,142 @@ impl Window {
                     .request_animation_frame(closure.as_ref().unchecked_ref())
                     .unwrap();
 
+                r.await.unwrap();
+            }
+        }
+
+        !self.should_close()
+    }
+
+    /// Renders one path-traced frame.
+    ///
+    /// This bypasses the rasterizer entirely: it collects lights and propagates
+    /// world transforms (via the scene's `prepare` pass), then drives the
+    /// [`RayTracer`] to dispatch the path-tracing pass into its HDR accumulation
+    /// buffer and tonemap the result into the frame's output view. Text overlays
+    /// are still rendered on top.
+    pub(super) async fn render_raytraced_frame(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut dyn Camera3d,
+        raytracer: &mut RayTracer,
+    ) -> bool {
+        let offscreen = self.hidden;
+
+        let frame = if offscreen {
+            None
+        } else {
+            match self.acquire_next_frame() {
+                Some(frame) => Some(frame),
+                None => return !self.should_close(),
+            }
+        };
+
+        let w = self.width();
+        let h = self.height();
+
+        camera.handle_event(&self.canvas, &WindowEvent::FramebufferSize(w, h));
+        camera.update(&self.canvas);
+
+        let sample_count = if offscreen { 1 } else { self.canvas.sample_count() };
+
+        let ctxt = Context::get();
+        let mut encoder = ctxt.create_command_encoder(Some("kiss3d_raytrace_encoder"));
+
+        // The path tracer renders single-sampled into an offscreen color texture
+        // when the window is hidden; otherwise straight into the surface.
+        if offscreen {
+            if self.offscreen_output_target.is_none() {
+                self.offscreen_output_target =
+                    Some(self.framebuffer_manager.new_render_target(w, h, true));
+            }
+            self.offscreen_output_target.as_mut().unwrap().resize(
+                w,
+                h,
+                self.canvas.surface_format(),
+            );
+        }
+
+        let frame_view = match &frame {
+            Some(frame) => frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default()),
+            None => self
+                .offscreen_output_target
+                .as_ref()
+                .expect("offscreen render target was just created")
+                .color_view()
+                .expect("offscreen render target is never the screen")
+                .clone(),
+        };
+
+        // Collect lights and propagate world transforms for the path tracer.
+        // (`prepare` does both; the path tracer reads geometry off the CPU side.)
+        let mut lights = LightCollection::with_ambient(self.ambient_intensity);
+        scene.data_mut().prepare(0, camera, &mut lights, w, h);
+
+        raytracer.render_frame(scene, camera, &lights, &mut encoder, &frame_view, w, h);
+
+        // Render text on top of the path-traced image.
+        {
+            let mut context_2d_encoder = RenderContext2dEncoder {
+                encoder: &mut encoder,
+                color_view: &frame_view,
+                surface_format: self.canvas.surface_format(),
+                sample_count,
+                viewport_width: w,
+                viewport_height: h,
+            };
+            self.text_renderer
+                .render(w as f32, h as f32, &mut context_2d_encoder);
+        }
+
+        ctxt.submit(std::iter::once(encoder.finish()));
+
+        // Render egui on top of the path-traced image (uses its own encoder).
+        // The depth view is unused by egui, so the color view is passed twice.
+        #[cfg(feature = "egui")]
+        {
+            self.egui_context.renderer.render(
+                &frame_view,
+                &frame_view,
+                w,
+                h,
+                self.canvas.scale_factor() as f32,
+            );
+        }
+
+        match &frame {
+            Some(frame) => self.canvas.copy_frame_to_readback(frame),
+            None => {
+                let color = self
+                    .offscreen_output_target
+                    .as_ref()
+                    .expect("offscreen render target was just created")
+                    .color_texture()
+                    .expect("offscreen render target is never the screen")
+                    .clone();
+                self.canvas.copy_texture_to_readback(&color);
+            }
+        }
+
+        #[cfg(feature = "recording")]
+        self.capture_frame_if_recording();
+
+        if let Some(frame) = frame {
+            self.canvas.present(frame);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            use web_sys::wasm_bindgen::closure::Closure;
+
+            if let Some(window) = web_sys::window() {
+                let (s, r) = oneshot::channel();
+                let closure = Closure::once(move || s.send(()).unwrap());
+                window
+                    .request_animation_frame(closure.as_ref().unchecked_ref())
+                    .unwrap();
                 r.await.unwrap();
             }
         }

@@ -32,6 +32,10 @@ path = "src/lib.rs"
 egui = ["dep:egui", "dep:egui-wgpu"]
 recording = ["dep:ffmpeg-the-third"]
 serde = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde"]
+# Enables the hardware ray-query backend of the path tracer. Requires a GPU/backend
+# that supports wgpu's experimental ray tracing (Vulkan with VK_KHR_ray_query). The
+# portable compute-shader path tracer is always available and needs no feature.
+raytracing = []
 
 [dependencies]
 bitflags     = "2"

@@ -6,10 +6,14 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
+use crate::camera::{Camera3d, FixedView2d};
 use crate::color::{Color, BLACK};
 use crate::context::Context;
 use crate::event::{Key, Modifiers, WindowEvent};
-use crate::renderer::{PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d};
+use crate::renderer::{
+    PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d, RayTracer,
+};
+use crate::scene::SceneNode3d;
 use crate::resource::{
     FramebufferManager, MaterialManager2d, MeshManager2d, RenderTarget, Texture, TextureManager,
 };
@@ -105,6 +109,41 @@ impl Window {
     #[inline]
     pub fn canvas_mut(&mut self) -> &mut Canvas {
         &mut self.canvas
+    }
+
+    /// Renders one frame of a 3D scene with the GPU path tracer.
+    ///
+    /// This is the ray-traced counterpart of [`render_3d`](Self::render_3d). It
+    /// bypasses the rasterizer and instead path-traces the scene, progressively
+    /// accumulating samples for a photorealistic image. Keep the same
+    /// [`RayTracer`] across frames so accumulation can converge; it restarts
+    /// automatically when the camera moves, the window is resized, or the scene
+    /// changes.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use kiss3d::prelude::*;
+    /// use kiss3d::renderer::RayTracer;
+    ///
+    /// #[kiss3d::main]
+    /// async fn main() {
+    ///     let mut window = Window::new("Ray tracing").await;
+    ///     let mut camera = OrbitCamera3d::default();
+    ///     let mut scene = SceneNode3d::empty();
+    ///     let mut raytracer = RayTracer::new();
+    ///
+    ///     while window.render_raytraced(&mut scene, &mut camera, &mut raytracer).await {}
+    /// }
+    /// ```
+    pub async fn render_raytraced(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+        raytracer: &mut RayTracer,
+    ) -> bool {
+        let mut default_cam2 = FixedView2d::default();
+        self.handle_events(camera, &mut default_cam2);
+        self.render_raytraced_frame(scene, camera, raytracer).await
     }
 
     /// Sets the window title.
