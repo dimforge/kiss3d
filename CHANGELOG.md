@@ -1,5 +1,12 @@
 # Unreleased
 
+## Breaking Changes
+
+- The rasterizer now renders into a linear HDR film that is tonemapped on resolve, with **Khronos PBR Neutral as the default tonemap operator**. Existing scenes therefore look different (more filmic highlight roll-off, less hard clipping). Call `Window::set_tonemap(Tonemap::None)` to restore the previous look.
+- **Shadows are enabled by default.** Lights now cast shadows (`Light::casts_shadows` defaults to `true`) whenever shadows are globally enabled, and the default shadow atlas is 4096² across 16 layers (~1 GB of GPU memory). Use `Window::set_shadows_enabled(false)` and/or `set_shadow_resolution(2048)` to reduce this.
+- **Custom `Material3d` implementations** must target `Context::render_format()` (the `Rgba16Float` HDR film) instead of the surface format for their color attachment, or they fail with a render-pass-incompatibility validation error. A material is only invoked in the new transparent (order-independent-transparency) pass if it returns `true` from the new `Material3d::renders_in_transparent_phase()` (default `false`), so opaque custom materials need no other change.
+- `RenderContext` gained `phase: RenderPhase` and `shadow_bind_group: Option<wgpu::BindGroup>` fields; `Light` gained `radius: f32` and `casts_shadows: bool` fields. Code that builds or exhaustively destructures these structs with a struct literal must be updated (builder usage such as `Light::point(..).with_intensity(..)` is unaffected).
+
 ## New Features
 
 ### GPU path tracer
