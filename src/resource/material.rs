@@ -111,6 +111,17 @@ pub trait Material3d {
     /// in a single batch. The default implementation does nothing.
     fn flush(&mut self) {}
 
+    /// Whether this material draws during the transparent ([`RenderPhase::Transparent`])
+    /// pass — the order-independent-transparency geometry pass, which has different
+    /// (multiple) render targets than the opaque pass.
+    ///
+    /// Defaults to `false`: a material is only invoked in the opaque phase. A custom
+    /// material that does not build a pipeline matching the OIT pass's targets must
+    /// keep this `false`, otherwise its pipeline will be incompatible with that pass.
+    fn renders_in_transparent_phase(&self) -> bool {
+        false
+    }
+
     /// Renders an object using this material (phase 3).
     ///
     /// # Arguments

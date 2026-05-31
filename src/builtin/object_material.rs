@@ -1685,6 +1685,12 @@ impl Material3d for ObjectMaterial {
         }
     }
 
+    fn renders_in_transparent_phase(&self) -> bool {
+        // ObjectMaterial has dedicated OIT pipelines whose targets match the
+        // transparent (weighted-blended) pass, so it draws in both phases.
+        true
+    }
+
     fn flush(&mut self) {
         let ctxt = Context::get();
 

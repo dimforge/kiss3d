@@ -5,7 +5,8 @@ use crate::color::Color;
 use crate::light::LightCollection;
 use crate::resource::vertex_index::{VertexIndex, VERTEX_INDEX_FORMAT};
 use crate::resource::{
-    AllocationType, BufferType, GPUVec, GpuData, GpuMesh3d, Material3d, RenderContext, Texture,
+    AllocationType, BufferType, GPUVec, GpuData, GpuMesh3d, Material3d, RenderContext, RenderPhase,
+    Texture,
     TextureManager,
 };
 use glamx::{Mat3, Pose3, Vec2, Vec3};
@@ -580,6 +581,15 @@ impl Object3d {
         render_pass: &mut wgpu::RenderPass<'_>,
         context: &RenderContext,
     ) {
+        // Skip materials that don't participate in the transparent (OIT) pass — its
+        // render targets differ from the opaque pass, so a material whose pipeline
+        // targets the opaque format would be incompatible there. Built-in materials
+        // that implement OIT opt in via `renders_in_transparent_phase`.
+        if context.phase == RenderPhase::Transparent
+            && !self.data.material.borrow().renders_in_transparent_phase()
+        {
+            return;
+        }
         self.data.material.borrow_mut().render(
             pass,
             transform,
