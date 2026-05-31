@@ -34,3 +34,10 @@ examples/wasm/
 .idea/
 recording.mp4
 screenshot.png
+# Claude Code agent worktrees and session data
+/.claude/
+
+# Generated example output images
+/offscreen.png
+/aov_*.png
+/raytraced_*.png

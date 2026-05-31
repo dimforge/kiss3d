@@ -28,6 +28,46 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 use wgpu::ExperimentalFeatures;
 
+/// Computes the device features to request.
+///
+/// With the `hw_raytracer` feature enabled, this opts into wgpu's experimental ray
+/// query + acceleration-structure features when the adapter supports them, so the
+/// path tracer can use the hardware backend. Otherwise no extra features are
+/// requested and the portable compute backend is used.
+fn raytracing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
+    #[allow(unused_mut)]
+    let mut features = wgpu::Features::empty();
+    #[cfg(feature = "hw_raytracer")]
+    {
+        let supported = adapter.features();
+        if supported.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        }
+    }
+    let _ = adapter;
+    features
+}
+
+/// The experimental-features token to pass to `request_device`.
+///
+/// `EXPERIMENTAL_RAY_QUERY` is gated behind wgpu's separate "I accept experimental
+/// APIs" token in addition to being listed in `required_features`; requesting the
+/// feature without enabling the token makes `request_device` fail. Returns the
+/// enabled token only when ray query is actually being requested.
+fn experimental_features(required: wgpu::Features) -> ExperimentalFeatures {
+    #[cfg(feature = "hw_raytracer")]
+    {
+        if required.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            // SAFETY: we opt into wgpu's experimental hardware ray-query API. It may
+            // still contain bugs; the path tracer's hardware backend accepts that to
+            // use GPU-accelerated ray tracing where available.
+            return unsafe { ExperimentalFeatures::enabled() };
+        }
+    }
+    let _ = required;
+    ExperimentalFeatures::disabled()
+}
+
 // Thread-local EventLoop singleton for native platforms.
 // winit only allows one EventLoop per program, so we store it in thread-local
 // storage and reuse it across window recreations. EventLoop is not Send/Sync,
@@ -228,21 +268,26 @@ impl WgpuCanvas {
                 .await
                 .expect("Failed to find an appropriate adapter");
 
-            // Request device (async on all platforms)
-            // Use downlevel defaults for WebGL2 compatibility
-            #[cfg(target_arch = "wasm32")]
-            let limits = wgpu::Limits::downlevel_webgl2_defaults();
-            #[cfg(not(target_arch = "wasm32"))]
-            let limits = wgpu::Limits::default();
+            // Request the adapter's full limits on every platform. The path tracer,
+            // the shadow-mapped material, and the storage-backed point/wireframe
+            // renderers need more bind groups and per-stage storage buffers (and, for
+            // the path tracer, compute) than wgpu's conservative cross-platform
+            // defaults allow. On native and on WebGPU browsers `adapter.limits()`
+            // grants these. On a WebGL2-only browser the adapter reports the (much
+            // lower) WebGL2 caps, so requesting them is still valid and the basic
+            // rasterizer keeps working — only the storage/compute shaders are
+            // unavailable there, which is an inherent WebGL2 limitation.
+            let limits = adapter.limits();
 
+            let required_features = raytracing_features(&adapter);
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kiss3d device"),
-                    required_features: wgpu::Features::empty(),
+                    required_features,
                     required_limits: limits,
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
-                    experimental_features: ExperimentalFeatures::default(),
+                    experimental_features: experimental_features(required_features),
                 })
                 .await
                 .expect("Failed to create device");
@@ -641,14 +686,18 @@ impl WgpuCanvas {
                 .await
                 .expect("Failed to find an appropriate adapter");
 
+            let required_features = raytracing_features(&adapter);
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kiss3d headless device"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: wgpu::Limits::default(),
+                    required_features,
+                    // See the windowed path: request the adapter's full limits so
+                    // the path tracer and shadow-mapped material have enough bind
+                    // groups and per-stage storage buffers.
+                    required_limits: adapter.limits(),
                     memory_hints: wgpu::MemoryHints::default(),
                     trace: wgpu::Trace::Off,
-                    experimental_features: ExperimentalFeatures::default(),
+                    experimental_features: experimental_features(required_features),
                 })
                 .await
                 .expect("Failed to create device");

@@ -7,8 +7,8 @@ use crate::resource::vertex_index::VertexIndex;
 use crate::resource::{
     GpuMesh3d, Material3d, MaterialManager3d, MeshManager3d, RenderContext, Texture, TextureManager,
 };
-use crate::scene::{InstanceData3d, Object3d};
-use glamx::{Pose3, Quat, Vec2, Vec3};
+use crate::scene::{Bsdf, InstanceData3d, Object3d};
+use glamx::{Mat3, Pose3, Quat, Vec2, Vec3};
 use std::cell::{Ref, RefCell, RefMut};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -137,6 +137,8 @@ impl SceneNodeData3d {
                     intensity: light.intensity,
                     world_position: self.world_transform.translation,
                     world_direction: self.world_transform.rotation * local_direction,
+                    radius: light.radius,
+                    casts_shadows: light.casts_shadows,
                 });
             }
         }
@@ -220,6 +222,151 @@ impl SceneNodeData3d {
             if bc.visible {
                 bc.do_render(pass, camera, lights, render_pass, context)
             }
+        }
+    }
+
+    /// Collects the world transform and scale of every shadow-casting object.
+    ///
+    /// Used by the rasterizer's shadow pre-pass: the callback is invoked once per
+    /// renderable surface object, in the same traversal order [`render_depth_only`]
+    /// uses, so each object maps to a stable per-object uniform slot.
+    ///
+    /// [`render_depth_only`]: Self::render_depth_only
+    #[doc(hidden)]
+    pub fn collect_shadow_models(&self, f: &mut dyn FnMut(Pose3, Vec3)) {
+        if self.visible {
+            if let Some(ref o) = self.object {
+                if o.casts_shadows() {
+                    f(self.world_transform, self.world_scale);
+                }
+            }
+            for c in self.children.iter() {
+                c.data().collect_shadow_models(f);
+            }
+        }
+    }
+
+    /// Computes the world-space axis-aligned bounding box of all shadow-casting
+    /// surface geometry, as `(min, max)`, or `None` if there is none.
+    ///
+    /// The rasterizer's shadow pre-pass uses this to fit the directional cascade
+    /// tightly to the geometry instead of to the (typically much larger) camera
+    /// clip range, so the shadow map's resolution is spent where it matters.
+    ///
+    /// This scans the casters' vertices, so its cost is proportional to the total
+    /// shadow-casting vertex count; it runs once per frame, before the pre-pass.
+    #[doc(hidden)]
+    pub fn shadow_casters_world_aabb(&self) -> Option<(Vec3, Vec3)> {
+        let mut min = Vec3::splat(f32::INFINITY);
+        let mut max = Vec3::splat(f32::NEG_INFINITY);
+        self.accumulate_caster_aabb(&mut min, &mut max);
+        if min.x <= max.x {
+            Some((min, max))
+        } else {
+            None
+        }
+    }
+
+    fn accumulate_caster_aabb(&self, min: &mut Vec3, max: &mut Vec3) {
+        if !self.visible {
+            return;
+        }
+        if let Some(ref o) = self.object {
+            if o.casts_shadows() {
+                let mesh = o.mesh().borrow();
+                let coords_lock = mesh.coords().read().unwrap();
+                if let Some(coords) = coords_lock.data().as_ref() {
+                    // Local AABB of the mesh after the node's own scale. We expand it
+                    // by every instance below, mirroring the vertex transform in
+                    // `shadow_depth.wgsl`:
+                    //   world = inst_tra + world_transform * (inst_def * (scale * local))
+                    // Without this, an instanced node (e.g. the rapier testbed draws
+                    // all identical colliders as instances of one node) would collapse
+                    // to the base mesh at the origin, so the directional shadow frustum
+                    // would miss every actual instance and cast no shadow.
+                    let mut lmin = Vec3::splat(f32::INFINITY);
+                    let mut lmax = Vec3::splat(f32::NEG_INFINITY);
+                    for &local in coords.iter() {
+                        let scaled = local * self.world_scale;
+                        lmin = lmin.min(scaled);
+                        lmax = lmax.max(scaled);
+                    }
+                    if lmin.x <= lmax.x {
+                        // 8 corners of the scaled local AABB. Transforming the corners
+                        // by each instance's affine map and taking their bounds gives a
+                        // conservative world AABB — exact for boxes, a safe over-estimate
+                        // for rotated meshes (only marginally loosening the shadow fit).
+                        let corners = [
+                            Vec3::new(lmin.x, lmin.y, lmin.z),
+                            Vec3::new(lmax.x, lmin.y, lmin.z),
+                            Vec3::new(lmin.x, lmax.y, lmin.z),
+                            Vec3::new(lmax.x, lmax.y, lmin.z),
+                            Vec3::new(lmin.x, lmin.y, lmax.z),
+                            Vec3::new(lmax.x, lmin.y, lmax.z),
+                            Vec3::new(lmin.x, lmax.y, lmax.z),
+                            Vec3::new(lmax.x, lmax.y, lmax.z),
+                        ];
+
+                        let instances = o.instances().borrow();
+                        let positions = instances.positions.data().as_ref();
+                        let deformations = instances.deformations.data().as_ref();
+                        // The deformation buffer stores 3 columns per instance.
+                        let count = positions.map(|p| p.len()).unwrap_or(1).max(1);
+
+                        let rot = self.world_transform.rotation;
+                        let tra = self.world_transform.translation;
+                        for i in 0..count {
+                            let inst_tra =
+                                positions.and_then(|p| p.get(i).copied()).unwrap_or(Vec3::ZERO);
+                            let def = match deformations {
+                                Some(d) if d.len() >= 3 * i + 3 => {
+                                    Mat3::from_cols(d[3 * i], d[3 * i + 1], d[3 * i + 2])
+                                }
+                                _ => Mat3::IDENTITY,
+                            };
+                            for &c in corners.iter() {
+                                let world = rot * (def * c) + tra + inst_tra;
+                                *min = min.min(world);
+                                *max = max.max(world);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for c in self.children.iter() {
+            c.data().accumulate_caster_aabb(min, max);
+        }
+    }
+
+    /// Draws every shadow-casting object's depth into the active shadow pass.
+    ///
+    /// `object_index` is incremented for each drawn object and used to compute the
+    /// per-object model uniform offset; it must match the order used by
+    /// [`collect_shadow_models`](Self::collect_shadow_models).
+    #[doc(hidden)]
+    pub fn render_depth_only(
+        &mut self,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        model_bind_group: &wgpu::BindGroup,
+        model_stride: u32,
+        object_index: &mut u32,
+    ) {
+        if !self.visible {
+            return;
+        }
+
+        if let Some(ref mut o) = self.object {
+            if o.casts_shadows() {
+                let offset = *object_index * model_stride;
+                o.render_depth_only(render_pass, model_bind_group, offset);
+                *object_index += 1;
+            }
+        }
+
+        for c in self.children.iter_mut() {
+            let mut bc = c.data_mut();
+            bc.render_depth_only(render_pass, model_bind_group, model_stride, object_index);
         }
     }
 
@@ -960,6 +1107,22 @@ impl SceneNode3d {
         }
     }
 
+    /// Applies `f` to this node and its descendants, skipping any node that is not
+    /// [`visible`](Self::is_visible) along with its entire subtree.
+    ///
+    /// This mirrors how the rasterizer prunes hidden subtrees, so consumers that
+    /// must honor visibility (e.g. the path tracer's scene gather) match it.
+    pub fn apply_to_visible_scene_nodes_recursive<F: FnMut(&SceneNode3d)>(&self, f: &mut F) {
+        if !self.data().visible {
+            return;
+        }
+        f(self);
+
+        for c in self.data().children.iter() {
+            c.apply_to_visible_scene_nodes_recursive(f)
+        }
+    }
+
     // TODO: for all those set_stuff, would it be more per formant to add a special case for when
     // we are on a leaf? (to avoid the call to a closure required by the apply_to_*).
     /// Sets the material for this node's object only.
@@ -1631,6 +1794,44 @@ impl SceneNode3d {
         self.clone()
     }
 
+    // === Path-tracer BSDF Properties ===
+
+    /// Selects the path-tracer BSDF model for this node's object (rasterizer
+    /// unaffected). See [`Bsdf`].
+    #[inline]
+    pub fn set_bsdf(&mut self, bsdf: Bsdf) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_bsdf(bsdf));
+        self.clone()
+    }
+
+    /// Sets the index of refraction used by the glass/dielectric BSDF.
+    #[inline]
+    pub fn set_ior(&mut self, ior: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_ior(ior));
+        self.clone()
+    }
+
+    /// Sets the transmission (specular-transmittance) factor in `[0, 1]`.
+    #[inline]
+    pub fn set_transmission(&mut self, transmission: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_transmission(transmission));
+        self.clone()
+    }
+
+    /// Sets the specular tint color for the path-tracer specular/conductor lobe.
+    #[inline]
+    pub fn set_specular_tint(&mut self, color: crate::color::Color) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_specular_tint(color));
+        self.clone()
+    }
+
+    /// Sets the cheap subsurface/translucency factor and radius for the path tracer.
+    #[inline]
+    pub fn set_subsurface(&mut self, factor: f32, radius: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_subsurface(factor, radius));
+        self.clone()
+    }
+
     // === PBR Texture Maps ===
 
     /// Sets the normal map for this node's object only.
@@ -1914,6 +2115,33 @@ impl SceneNode3d {
 
         for c in data.children.iter_mut() {
             c.apply_to_objects_mut_recursive(f)
+        }
+    }
+
+    /// Applies a closure to each object and its already-propagated world
+    /// transform/scale, for this node and its descendants.
+    ///
+    /// The world transform and scale passed to the closure are the ones cached
+    /// during the most recent [`Self::prepare`] traversal, so this must be
+    /// called after `prepare` for the same frame. Used by the auxiliary
+    /// (depth/normals/segmentation) render passes, which need each object's
+    /// world placement without re-running the full material prepare phase.
+    #[inline]
+    pub fn apply_to_objects_with_world_mut_recursive<F: FnMut(Pose3, Vec3, &mut Object3d)>(
+        &mut self,
+        f: &mut F,
+    ) {
+        let mut data = self.data_mut();
+        let world_transform = data.world_transform;
+        let world_scale = data.world_scale;
+        if let Some(ref mut o) = data.object {
+            f(world_transform, world_scale, o)
+        }
+
+        for c in data.children.iter_mut() {
+            if c.data().visible {
+                c.apply_to_objects_with_world_mut_recursive(f)
+            }
         }
     }
 

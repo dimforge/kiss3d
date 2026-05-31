@@ -3,7 +3,7 @@
 use crate::camera::Camera3d;
 use crate::color::Color;
 use crate::light::LightCollection;
-use crate::resource::vertex_index::VertexIndex;
+use crate::resource::vertex_index::{VertexIndex, VERTEX_INDEX_FORMAT};
 use crate::resource::{
     AllocationType, BufferType, GPUVec, GpuData, GpuMesh3d, Material3d, RenderContext, Texture,
     TextureManager,
@@ -13,7 +13,47 @@ use std::any::Any;
 use std::cell::RefCell;
 use std::path::Path;
 use std::rc::Rc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+
+/// The shading model used by the path tracer for an object's surface.
+///
+/// The rasterizer always uses its metallic-roughness PBR shader; this only
+/// selects which lobe set the path tracer's unified BSDF evaluates.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum Bsdf {
+    /// Opaque metallic-roughness PBR (the default).
+    Opaque,
+    /// Dielectric glass: smooth or rough refraction governed by `ior`/`roughness`.
+    Glass,
+    /// Pure conductor: reflection only, tinted by `specular_tint`.
+    Metal,
+    /// Emitter; shaded as opaque but contributes light via its emissive color.
+    Emissive,
+}
+
+impl Bsdf {
+    /// The WGSL `bsdf_type` tag for this model.
+    pub(crate) fn tag(self) -> u32 {
+        match self {
+            Bsdf::Opaque => 0,
+            Bsdf::Glass => 1,
+            Bsdf::Metal => 2,
+            Bsdf::Emissive => 3,
+        }
+    }
+}
+
+/// Monotonic counter handing out a unique default segmentation id to each new
+/// object. Starts at 1 so that 0 stays reserved for "background" (empty pixels)
+/// in the segmentation auxiliary render output.
+static NEXT_SEGMENTATION_ID: AtomicU32 = AtomicU32::new(1);
+
+/// Returns a fresh, process-unique segmentation id for a newly created object.
+fn next_segmentation_id() -> u32 {
+    NEXT_SEGMENTATION_ID.fetch_add(1, Ordering::Relaxed)
+}
 
 /// Rendering properties and state for a scene object.
 ///
@@ -31,11 +71,21 @@ pub struct ObjectData3d {
     points_use_perspective: bool,
     draw_surface: bool,
     cull: bool,
+    /// Integer object identifier written to the segmentation auxiliary output.
+    /// Auto-assigned to a process-unique value on creation; user-overridable.
+    segmentation_id: u32,
     user_data: Box<dyn Any + 'static>,
     // PBR material properties
     metallic: f32,
     roughness: f32,
     emissive: Color,
+    // Path-tracer BSDF properties (ignored by the rasterizer).
+    bsdf: Bsdf,
+    ior: f32,
+    transmission: f32,
+    specular_tint: Color,
+    subsurface: f32,
+    subsurface_radius: f32,
     // PBR texture maps
     normal_map: Option<Arc<Texture>>,
     metallic_roughness_map: Option<Arc<Texture>>,
@@ -134,6 +184,17 @@ impl ObjectData3d {
         self.cull
     }
 
+    /// Returns the integer segmentation/object id of this object.
+    ///
+    /// This id is what the segmentation auxiliary render output writes into the
+    /// per-pixel mask. It defaults to a process-unique value and can be changed
+    /// with [`Object3d::set_segmentation_id`]. The value `0` is reserved for the
+    /// background (pixels not covered by any object).
+    #[inline]
+    pub fn segmentation_id(&self) -> u32 {
+        self.segmentation_id
+    }
+
     /// Returns a reference to user-defined data attached to this object.
     ///
     /// Use the `Any` trait's downcasting methods to recover the actual data type.
@@ -170,6 +231,42 @@ impl ObjectData3d {
     #[inline]
     pub fn emissive(&self) -> Color {
         self.emissive
+    }
+
+    /// Returns the path-tracer BSDF model for this object.
+    #[inline]
+    pub fn bsdf(&self) -> Bsdf {
+        self.bsdf
+    }
+
+    /// Returns the index of refraction (used by the glass/dielectric BSDF).
+    #[inline]
+    pub fn ior(&self) -> f32 {
+        self.ior
+    }
+
+    /// Returns the transmission (specular-transmittance) factor in `[0, 1]`.
+    #[inline]
+    pub fn transmission(&self) -> f32 {
+        self.transmission
+    }
+
+    /// Returns the specular tint color (multiplies the specular/conductor lobe).
+    #[inline]
+    pub fn specular_tint(&self) -> Color {
+        self.specular_tint
+    }
+
+    /// Returns the subsurface/translucency factor in `[0, 1]`.
+    #[inline]
+    pub fn subsurface(&self) -> f32 {
+        self.subsurface
+    }
+
+    /// Returns the subsurface scattering radius (world units).
+    #[inline]
+    pub fn subsurface_radius(&self) -> f32 {
+        self.subsurface_radius
     }
 
     /// Returns a reference to this object's normal map texture.
@@ -419,12 +516,20 @@ impl Object3d {
             points_use_perspective: true,
             draw_surface: true,
             cull: true,
+            segmentation_id: next_segmentation_id(),
             material,
             user_data: Box::new(user_data),
             // PBR defaults (backward compatible with Blinn-Phong appearance)
             metallic: 0.0,
             roughness: 0.5,
             emissive: crate::color::BLACK,
+            // Path-tracer BSDF defaults: opaque dielectric.
+            bsdf: Bsdf::Opaque,
+            ior: 1.5,
+            transmission: 0.0,
+            specular_tint: crate::color::WHITE,
+            subsurface: 0.0,
+            subsurface_radius: 0.0,
             normal_map: None,
             metallic_roughness_map: None,
             ao_map: None,
@@ -488,6 +593,66 @@ impl Object3d {
             render_pass,
             context,
         );
+    }
+
+    /// Whether this object contributes surface geometry to the shadow pre-pass.
+    #[doc(hidden)]
+    pub fn casts_shadows(&self) -> bool {
+        self.data.surface_rendering_active()
+    }
+
+    /// Draws this object's surface geometry into the shadow depth pass.
+    ///
+    /// The per-object model bind group (group 1) must already be bound by the
+    /// caller via the supplied dynamic `model_offset`. Only the position and
+    /// instance streams are bound; no material state is touched.
+    #[doc(hidden)]
+    pub fn render_depth_only(
+        &mut self,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        model_bind_group: &wgpu::BindGroup,
+        model_offset: u32,
+    ) {
+        if !self.data.surface_rendering_active() {
+            return;
+        }
+
+        let mesh = self.mesh.borrow_mut();
+        let mut instances = self.instances.borrow_mut();
+
+        let num_instances = instances.len();
+        instances.positions.load_to_gpu();
+        instances.deformations.load_to_gpu();
+
+        mesh.coords().write().unwrap().load_to_gpu();
+        mesh.faces().write().unwrap().load_to_gpu();
+
+        let coords_buffer = mesh.coords().read().unwrap();
+        let faces_buffer = mesh.faces().read().unwrap();
+
+        let coords_buf = match coords_buffer.buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let faces_buf = match faces_buffer.buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let inst_positions_buf = match instances.positions.buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let inst_deformations_buf = match instances.deformations.buffer() {
+            Some(b) => b,
+            None => return,
+        };
+
+        render_pass.set_bind_group(1, model_bind_group, &[model_offset]);
+        render_pass.set_vertex_buffer(0, coords_buf.slice(..));
+        render_pass.set_vertex_buffer(1, inst_positions_buf.slice(..));
+        render_pass.set_vertex_buffer(2, inst_deformations_buf.slice(..));
+        render_pass.set_index_buffer(faces_buf.slice(..), VERTEX_INDEX_FORMAT);
+        render_pass.draw_indexed(0..mesh.num_indices(), 0, 0..num_instances as u32);
     }
 
     /// Gets the data of this object.
@@ -616,6 +781,23 @@ impl Object3d {
     #[inline]
     pub fn set_user_data(&mut self, user_data: Box<dyn Any + 'static>) {
         self.data.user_data = user_data;
+    }
+
+    /// Sets the integer segmentation/object id of this object.
+    ///
+    /// This id is written by the segmentation auxiliary render output. Assigning
+    /// the same id to several objects groups them into a single segmentation
+    /// mask (e.g. all parts of one robot link). Avoid `0`, which is reserved for
+    /// the background.
+    #[inline]
+    pub fn set_segmentation_id(&mut self, id: u32) {
+        self.data.segmentation_id = id;
+    }
+
+    /// Returns the integer segmentation/object id of this object.
+    #[inline]
+    pub fn segmentation_id(&self) -> u32 {
+        self.data.segmentation_id
     }
 
     /// Gets the material of this object.
@@ -862,6 +1044,47 @@ impl Object3d {
     #[inline]
     pub fn set_emissive(&mut self, color: Color) {
         self.data.emissive = color;
+    }
+
+    // === Path-tracer BSDF Properties ===
+
+    /// Selects the path-tracer BSDF model for this object (rasterizer unaffected).
+    #[inline]
+    pub fn set_bsdf(&mut self, bsdf: Bsdf) {
+        self.data.bsdf = bsdf;
+    }
+
+    /// Sets the index of refraction used by the glass/dielectric BSDF.
+    ///
+    /// Typical values: 1.0 (air), 1.33 (water), 1.5 (glass), 2.4 (diamond).
+    #[inline]
+    pub fn set_ior(&mut self, ior: f32) {
+        self.data.ior = ior.max(1.0);
+    }
+
+    /// Sets the transmission (specular-transmittance) factor in `[0, 1]`.
+    ///
+    /// A value above zero lets light pass through the surface (refraction for the
+    /// glass BSDF, diffuse/specular transmission otherwise).
+    #[inline]
+    pub fn set_transmission(&mut self, transmission: f32) {
+        self.data.transmission = transmission.clamp(0.0, 1.0);
+    }
+
+    /// Sets the specular tint color, which multiplies the specular/conductor lobe.
+    #[inline]
+    pub fn set_specular_tint(&mut self, color: Color) {
+        self.data.specular_tint = color;
+    }
+
+    /// Sets a cheap subsurface/translucency factor in `[0, 1]` and its radius.
+    ///
+    /// The factor blends the diffuse lobe toward a wrap-lit translucent look; the
+    /// radius is reserved for a future diffusion approximation.
+    #[inline]
+    pub fn set_subsurface(&mut self, factor: f32, radius: f32) {
+        self.data.subsurface = factor.clamp(0.0, 1.0);
+        self.data.subsurface_radius = radius.max(0.0);
     }
 
     // === PBR Texture Maps ===

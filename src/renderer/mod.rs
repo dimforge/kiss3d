@@ -6,6 +6,7 @@ pub use self::point_renderer2d::PointRenderer2d;
 pub use self::point_renderer3d::PointRenderer3d;
 pub use self::polyline_renderer2d::{Polyline2d, PolylineRenderer2d};
 pub use self::polyline_renderer3d::{Polyline3d, PolylineRenderer3d};
+pub use self::raytracer::{RayBackend, RayTracer};
 pub use self::renderer::Renderer3d;
 
 #[cfg(feature = "egui")]
@@ -14,4 +15,5 @@ pub mod point_renderer2d;
 pub mod point_renderer3d;
 pub mod polyline_renderer2d;
 pub mod polyline_renderer3d;
+pub mod raytracer;
 mod renderer;
