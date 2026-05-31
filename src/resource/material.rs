@@ -8,11 +8,28 @@ use crate::scene::{InstancesBuffer2d, InstancesBuffer3d, ObjectData2d, ObjectDat
 use glamx::{Pose2, Pose3, Vec2, Vec3};
 use std::any::Any;
 
+/// Which transparency pass is being rendered.
+///
+/// The rasterizer draws opaque surfaces first (depth write, into the HDR film),
+/// then transparent surfaces with weighted-blended order-independent transparency
+/// into separate accumulation targets. Materials use this to draw only the
+/// matching surfaces (and to pick the opaque vs. OIT pipeline).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
+pub enum RenderPhase {
+    /// Opaque surfaces (alpha == 1), plus wireframe/point overlays.
+    #[default]
+    Opaque,
+    /// Transparent surfaces (alpha < 1), drawn into the OIT accumulation targets.
+    Transparent,
+}
+
 /// Context passed to materials during rendering.
 ///
 /// This contains metadata about the render target. The actual render pass
 /// is passed separately to enable batching multiple draw calls.
 pub struct RenderContext {
+    /// Which transparency pass is being rendered (opaque vs. OIT transparent).
+    pub phase: RenderPhase,
     /// The surface format.
     pub surface_format: wgpu::TextureFormat,
     /// The sample count for MSAA.
@@ -21,6 +38,12 @@ pub struct RenderContext {
     pub viewport_width: u32,
     /// The viewport height in pixels.
     pub viewport_height: u32,
+    /// Shadow bind group (group 4) supplied by the window's shadow mapper.
+    ///
+    /// When `None`, materials fall back to their own neutral "no shadows" bind
+    /// group so rendering stays correct when shadows are disabled. Cloning a
+    /// `wgpu::BindGroup` is cheap (it is a reference-counted handle).
+    pub shadow_bind_group: Option<wgpu::BindGroup>,
 }
 
 /// Per-object GPU data for a material.

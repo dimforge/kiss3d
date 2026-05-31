@@ -299,4 +299,17 @@ impl Context {
     pub fn depth_format() -> wgpu::TextureFormat {
         wgpu::TextureFormat::Depth32Float
     }
+
+    /// The internal floating-point color format the rasterizer renders into.
+    ///
+    /// The rasterized scene (3D + 2D + points/polylines) is drawn into an HDR
+    /// `Rgba16Float` target so emissive values and bright highlights survive
+    /// `> 1.0`. A final tonemap pass (see [`HdrPipeline`](crate::post_processing::HdrPipeline))
+    /// converts this to the LDR [`surface_format`](Self::surface_format) for
+    /// presentation. Material and renderer color pipelines must use this format,
+    /// while the swapchain, post-processing, text and egui keep using the LDR
+    /// surface format.
+    pub fn render_format() -> wgpu::TextureFormat {
+        crate::post_processing::HDR_FORMAT
+    }
 }

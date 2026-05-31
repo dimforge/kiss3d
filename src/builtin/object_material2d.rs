@@ -484,7 +484,7 @@ impl ObjectMaterial2d {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: ctxt.surface_format,
+                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -646,7 +646,7 @@ impl ObjectMaterial2d {
                 module: &wireframe_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: ctxt.surface_format,
+                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -807,7 +807,7 @@ impl ObjectMaterial2d {
                 module: &points_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: ctxt.surface_format,
+                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

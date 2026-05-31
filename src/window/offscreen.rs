@@ -2,12 +2,12 @@
 
 use crate::camera::{Camera2d, Camera3d};
 use crate::color::Color;
-use crate::post_processing::PostProcessingEffect;
-use crate::renderer::Renderer3d;
+use crate::post_processing::{PostProcessingEffect, Tonemap};
+use crate::renderer::{RayTracer, Renderer3d};
 use crate::scene::{SceneNode2d, SceneNode3d};
 use crate::window::{CanvasSetup, Window};
 use glamx::UVec2;
-use image::{ImageBuffer, Rgb};
+use image::{ImageBuffer, Luma, Rgb};
 
 /// A headless rendering surface.
 ///
@@ -91,6 +91,35 @@ impl OffscreenSurface {
             .await;
     }
 
+    /// Renders one path-traced frame into the off-screen texture.
+    ///
+    /// Call repeatedly with the same [`RayTracer`] to accumulate samples (the
+    /// camera is static off-screen, so accumulation only restarts on the first
+    /// frame). See [`Window::render_raytraced`].
+    pub async fn render_raytraced(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+        raytracer: &mut RayTracer,
+    ) {
+        let _ = self.window.render_raytraced(scene, camera, raytracer).await;
+    }
+
+    /// Path-traces a 3D scene for `samples` accumulated frames and returns the
+    /// resulting image, in one call.
+    pub async fn render_image_raytraced(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+        raytracer: &mut RayTracer,
+        samples: u32,
+    ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+        for _ in 0..samples.max(1) {
+            self.render_raytraced(scene, camera, raytracer).await;
+        }
+        self.snap_image()
+    }
+
     /// Renders a 3D scene and returns the resulting image, in one call.
     pub async fn render_image_3d(
         &mut self,
@@ -116,6 +145,68 @@ impl OffscreenSurface {
         self.window.snap_image()
     }
 
+    // === Auxiliary render outputs (AOVs) ===
+
+    /// Renders the scene and returns per-pixel linear, eye-space depth (in world
+    /// units), row-major with a top-left origin. Background pixels read back as
+    /// `0.0`. See [`Window::snap_depth_raw`].
+    pub fn snap_depth_raw(&mut self, scene: &mut SceneNode3d, camera: &mut impl Camera3d) -> Vec<f32> {
+        self.window.snap_depth_raw(scene, camera)
+    }
+
+    /// Renders the scene and returns its depth as a normalized 8-bit grayscale
+    /// image (nearest surface brightest, background black). See
+    /// [`Window::snap_depth`].
+    pub fn snap_depth(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+    ) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+        self.window.snap_depth(scene, camera)
+    }
+
+    /// Renders the scene and returns its world-space surface normals, encoded
+    /// from `[-1, 1]` to `[0, 255]` per channel. See [`Window::snap_normals`].
+    pub fn snap_normals(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+    ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+        self.window.snap_normals(scene, camera)
+    }
+
+    /// Like [`snap_normals`](Self::snap_normals) but in camera (eye) space. See
+    /// [`Window::snap_camera_normals`].
+    pub fn snap_camera_normals(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+    ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+        self.window.snap_camera_normals(scene, camera)
+    }
+
+    /// Renders the scene and returns the per-pixel segmentation/object id (`0`
+    /// for background), row-major with a top-left origin. See
+    /// [`Window::snap_segmentation`].
+    pub fn snap_segmentation(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+    ) -> Vec<u32> {
+        self.window.snap_segmentation(scene, camera)
+    }
+
+    /// Renders the scene and returns a colorized segmentation image (each id
+    /// mapped to a distinct color, background black). See
+    /// [`Window::snap_segmentation_colored`].
+    pub fn snap_segmentation_colored(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+    ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
+        self.window.snap_segmentation_colored(scene, camera)
+    }
+
     /// Resizes the off-screen surface. The next render uses the new size.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.window.canvas_mut().resize(width, height);
@@ -139,5 +230,50 @@ impl OffscreenSurface {
     /// Sets the background color.
     pub fn set_background_color(&mut self, color: Color) {
         self.window.set_background_color(color);
+    }
+
+    /// Sets the global ambient light intensity (also drives the path tracer's
+    /// sky/environment term).
+    pub fn set_ambient(&mut self, ambient: f32) {
+        self.window.set_ambient(ambient);
+    }
+
+    /// Sets the exposure multiplier applied before tonemapping (`1.0` is neutral).
+    /// See [`Window::set_exposure`].
+    pub fn set_exposure(&mut self, exposure: f32) {
+        self.window.set_exposure(exposure);
+    }
+
+    /// Sets the per-layer resolution of the shadow atlas (higher = sharper shadows,
+    /// more memory). See [`Window::set_shadow_resolution`].
+    pub fn set_shadow_resolution(&mut self, resolution: u32) {
+        self.window.set_shadow_resolution(resolution);
+    }
+
+    /// Selects the tonemapping operator used by the HDR resolve pass.
+    /// See [`Window::set_tonemap`].
+    pub fn set_tonemap(&mut self, tonemap: Tonemap) {
+        self.window.set_tonemap(tonemap);
+    }
+
+    /// Enables or disables bloom. See [`Window::set_bloom_enabled`].
+    pub fn set_bloom_enabled(&mut self, enabled: bool) {
+        self.window.set_bloom_enabled(enabled);
+    }
+
+    /// Sets the bloom brightness threshold and additive intensity.
+    /// See [`Window::set_bloom`].
+    pub fn set_bloom(&mut self, threshold: f32, intensity: f32) {
+        self.window.set_bloom(threshold, intensity);
+    }
+
+    /// Queues an egui UI to be drawn over the next rendered frame. See
+    /// [`Window::draw_ui`].
+    #[cfg(feature = "egui")]
+    pub fn draw_ui<F>(&mut self, ui_fn: F)
+    where
+        F: FnOnce(&egui::Context),
+    {
+        self.window.draw_ui(ui_fn);
     }
 }

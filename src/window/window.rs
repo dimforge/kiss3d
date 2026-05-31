@@ -6,10 +6,16 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 
+use crate::builtin::ShadowMapper;
+use crate::camera::{Camera3d, FixedView2d};
 use crate::color::{Color, BLACK};
 use crate::context::Context;
 use crate::event::{Key, Modifiers, WindowEvent};
-use crate::renderer::{PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d};
+use crate::post_processing::{HdrPipeline, HdrSettings, Tonemap};
+use crate::renderer::{
+    PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d, RayTracer,
+};
+use crate::scene::SceneNode3d;
 use crate::resource::{
     FramebufferManager, MaterialManager2d, MeshManager2d, RenderTarget, Texture, TextureManager,
 };
@@ -30,6 +36,11 @@ use super::window_cache::WindowCache;
 pub(super) static DEFAULT_WIDTH: u32 = 800u32;
 pub(super) static DEFAULT_HEIGHT: u32 = 600u32;
 
+/// Default per-layer resolution of the rasterizer shadow atlas. 4096 keeps shadows
+/// crisp across the cascades; lower it with [`Window::set_shadow_resolution`] to
+/// trade sharpness for memory (the atlas is `resolution² × MAX_SHADOW_VIEWS`).
+pub(super) static DEFAULT_SHADOW_RESOLUTION: u32 = 4096u32;
+
 /// Structure representing a window and a 3D scene.
 ///
 /// This is the main interface with the 3d engine.
@@ -44,10 +55,19 @@ pub struct Window {
     pub(super) polyline_renderer: PolylineRenderer3d,
     pub(super) text_renderer: TextRenderer,
     pub(super) framebuffer_manager: FramebufferManager,
+    /// Real-time shadow mapper for the rasterization pipeline.
+    pub(super) shadow_mapper: ShadowMapper,
+    /// HDR film + tonemap + bloom resolve stage for the rasterizer. The scene is
+    /// rendered into its `Rgba16Float` target, then tonemapped into the LDR
+    /// swapchain/offscreen output. See [`HdrPipeline`].
+    pub(super) hdr: HdrPipeline,
     pub(super) post_process_render_target: RenderTarget,
     /// Offscreen render target used when the window is hidden, so `snap` and
     /// recording work without a presentable surface. Created on first use.
     pub(super) offscreen_output_target: Option<RenderTarget>,
+    /// Renderer for auxiliary outputs (depth, normals, segmentation). Created
+    /// on first use of an AOV-producing method.
+    pub(super) aov_renderer: Option<crate::builtin::AovRenderer>,
     /// Whether the window is hidden. Hidden windows render offscreen.
     pub(super) hidden: bool,
     pub(super) should_close: bool,
@@ -105,6 +125,41 @@ impl Window {
     #[inline]
     pub fn canvas_mut(&mut self) -> &mut Canvas {
         &mut self.canvas
+    }
+
+    /// Renders one frame of a 3D scene with the GPU path tracer.
+    ///
+    /// This is the ray-traced counterpart of [`render_3d`](Self::render_3d). It
+    /// bypasses the rasterizer and instead path-traces the scene, progressively
+    /// accumulating samples for a photorealistic image. Keep the same
+    /// [`RayTracer`] across frames so accumulation can converge; it restarts
+    /// automatically when the camera moves, the window is resized, or the scene
+    /// changes.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use kiss3d::prelude::*;
+    /// use kiss3d::renderer::RayTracer;
+    ///
+    /// #[kiss3d::main]
+    /// async fn main() {
+    ///     let mut window = Window::new("Ray tracing").await;
+    ///     let mut camera = OrbitCamera3d::default();
+    ///     let mut scene = SceneNode3d::empty();
+    ///     let mut raytracer = RayTracer::new();
+    ///
+    ///     while window.render_raytraced(&mut scene, &mut camera, &mut raytracer).await {}
+    /// }
+    /// ```
+    pub async fn render_raytraced(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+        raytracer: &mut RayTracer,
+    ) -> bool {
+        let mut default_cam2 = FixedView2d::default();
+        self.handle_events(camera, &mut default_cam2);
+        self.render_raytraced_frame(scene, camera, raytracer).await
     }
 
     /// Sets the window title.
@@ -273,6 +328,81 @@ impl Window {
         self.ambient_intensity
     }
 
+    /// Enables or disables real-time shadow mapping for the rasterizer.
+    ///
+    /// Shadows are enabled by default. When disabled, no shadow pre-pass runs and
+    /// every light illuminates surfaces as if unobstructed. This has no effect on
+    /// the path tracer, which always computes ray-traced shadows.
+    pub fn set_shadows_enabled(&mut self, enabled: bool) {
+        self.shadow_mapper.set_enabled(enabled);
+    }
+
+    /// Returns whether real-time shadow mapping is enabled for the rasterizer.
+    pub fn shadows_enabled(&self) -> bool {
+        self.shadow_mapper.is_enabled()
+    }
+
+    /// Sets the per-layer resolution of the shadow atlas (square), reallocating it.
+    ///
+    /// Higher values yield crisper shadows at the cost of memory and fill rate.
+    /// The default is 1024.
+    pub fn set_shadow_resolution(&mut self, resolution: u32) {
+        self.shadow_mapper.set_resolution(resolution);
+    }
+
+    /// Returns the current per-layer shadow atlas resolution.
+    pub fn shadow_resolution(&self) -> u32 {
+        self.shadow_mapper.resolution()
+    }
+
+    /// The current HDR finishing settings (exposure, tonemap operator, bloom).
+    ///
+    /// The rasterizer renders into an HDR film and resolves it with these
+    /// settings; see [`HdrSettings`] and [`HdrPipeline`].
+    pub fn hdr_settings(&self) -> &HdrSettings {
+        self.hdr.settings()
+    }
+
+    /// Mutable access to the HDR finishing settings.
+    ///
+    /// ```no_run
+    /// # use kiss3d::window::Window;
+    /// # use kiss3d::post_processing::Tonemap;
+    /// # #[kiss3d::main]
+    /// # async fn main() {
+    /// # let mut window = Window::new("Example").await;
+    /// let s = window.hdr_settings_mut();
+    /// s.exposure = 1.5;
+    /// s.tonemap = Tonemap::Aces;
+    /// s.bloom_enabled = true;
+    /// # }
+    /// ```
+    pub fn hdr_settings_mut(&mut self) -> &mut HdrSettings {
+        self.hdr.settings_mut()
+    }
+
+    /// Sets the exposure multiplier applied before tonemapping (`1.0` is neutral).
+    pub fn set_exposure(&mut self, exposure: f32) {
+        self.hdr.settings_mut().exposure = exposure;
+    }
+
+    /// Selects the tonemapping operator used by the HDR resolve pass.
+    pub fn set_tonemap(&mut self, tonemap: Tonemap) {
+        self.hdr.settings_mut().tonemap = tonemap;
+    }
+
+    /// Enables or disables bloom.
+    pub fn set_bloom_enabled(&mut self, enabled: bool) {
+        self.hdr.settings_mut().bloom_enabled = enabled;
+    }
+
+    /// Sets the bloom brightness threshold and additive intensity.
+    pub fn set_bloom(&mut self, threshold: f32, intensity: f32) {
+        let s = self.hdr.settings_mut();
+        s.bloom_threshold = threshold;
+        s.bloom_intensity = intensity;
+    }
+
     /// Rebinds the key to close the window.
     /// Set to None to disable.
     pub fn rebind_close_key(&mut self, new_close_key: Option<Key>) {
@@ -433,6 +563,10 @@ impl Window {
         let hide = !window_attrs.visible;
         let canvas = Canvas::open(window_attrs, setup, event_send).await;
         let (width, height) = canvas.size();
+        // The HDR resolve pass tonemaps into the LDR swapchain. The rasterizer's
+        // material pipelines are single-sampled, so the HDR film is too (see the
+        // note in `render_single_frame`).
+        let canvas_surface_format = canvas.surface_format();
 
         // Track window count for proper cleanup
         Context::increment_window_count();
@@ -457,9 +591,12 @@ impl Window {
             text_renderer: TextRenderer::new(),
             #[cfg(feature = "egui")]
             egui_context: EguiContext::new(),
+            hdr: HdrPipeline::new(width, height, 1, canvas_surface_format),
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             offscreen_output_target: None,
+            aov_renderer: None,
             hidden: hide,
+            shadow_mapper: ShadowMapper::new(DEFAULT_SHADOW_RESOLUTION),
             framebuffer_manager,
             #[cfg(feature = "recording")]
             recording: None,
@@ -483,6 +620,8 @@ impl Window {
         let (event_send, event_receive) = mpsc::channel();
         let canvas = Canvas::open_headless(width, height, setup, event_send).await;
         let (width, height) = canvas.size();
+        // A headless surface is never multisampled.
+        let canvas_surface_format = canvas.surface_format();
 
         Context::increment_window_count();
         WindowCache::populate();
@@ -505,10 +644,14 @@ impl Window {
             text_renderer: TextRenderer::new(),
             #[cfg(feature = "egui")]
             egui_context: EguiContext::new(),
+            // Offscreen rendering is single-sampled (see `render_single_frame`).
+            hdr: HdrPipeline::new(width, height, 1, canvas_surface_format),
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             offscreen_output_target: None,
+            aov_renderer: None,
             // A headless window has no surface; always render off-screen.
             hidden: true,
+            shadow_mapper: ShadowMapper::new(DEFAULT_SHADOW_RESOLUTION),
             framebuffer_manager,
             #[cfg(feature = "recording")]
             recording: None,
