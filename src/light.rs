@@ -84,8 +84,18 @@ pub struct Light {
     pub color: Color,
     /// The intensity multiplier for the light.
     pub intensity: f32,
+    /// Emitter sphere radius for soft shadows in the path tracer (0 = a hard
+    /// point/spot light). Ignored by the rasterizer and by directional lights.
+    pub radius: f32,
     /// Whether the light is enabled.
     pub enabled: bool,
+    /// Whether this light casts shadows in the rasterization pipeline.
+    ///
+    /// When `true` (the default) and shadows are globally enabled on the window,
+    /// the rasterizer renders a shadow map from this light's point of view and
+    /// attenuates the light contribution of occluded fragments. Has no effect on
+    /// the path tracer, which always computes ray-traced shadows.
+    pub casts_shadows: bool,
 }
 
 impl Default for Light {
@@ -94,7 +104,9 @@ impl Default for Light {
             light_type: LightType::default(),
             color: crate::color::WHITE,
             intensity: 3.0,
+            radius: 0.0,
             enabled: true,
+            casts_shadows: true,
         }
     }
 }
@@ -161,6 +173,25 @@ impl Light {
         self.enabled = enabled;
         self
     }
+
+    /// Sets the emitter sphere radius for soft shadows in the path tracer.
+    ///
+    /// A radius above zero turns a point/spot light into a sphere sampled by the
+    /// path tracer, producing soft shadow penumbrae. The rasterizer ignores it.
+    pub fn with_radius(mut self, radius: f32) -> Self {
+        self.radius = radius.max(0.0);
+        self
+    }
+
+    /// Sets whether this light casts shadows in the rasterization pipeline.
+    ///
+    /// Defaults to `true`. Disabling shadow casting for a light skips its shadow
+    /// map render and makes it light occluded surfaces as if unobstructed, which
+    /// is cheaper and can be useful for fill lights.
+    pub fn with_casts_shadows(mut self, casts_shadows: bool) -> Self {
+        self.casts_shadows = casts_shadows;
+        self
+    }
 }
 
 /// A light that has been collected from the scene tree with its world-space transform.
@@ -176,6 +207,10 @@ pub struct CollectedLight {
     pub world_position: Vec3,
     /// World-space direction of the light (forward vector, -Z in local space).
     pub world_direction: Vec3,
+    /// Emitter sphere radius for soft shadows (path tracer only).
+    pub radius: f32,
+    /// Whether this light should cast shadows in the rasterization pipeline.
+    pub casts_shadows: bool,
 }
 
 /// A collection of lights gathered from the scene tree during the prepare phase.
