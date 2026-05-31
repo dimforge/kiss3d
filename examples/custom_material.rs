@@ -182,7 +182,10 @@ impl NormalMaterial {
                 module: &shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: ctxt.surface_format,
+                    // The scene is rendered into the linear HDR film (resolved to the
+                    // surface by the tonemap pass), so custom materials must target
+                    // the HDR render format, not the surface format.
+                    format: Context::render_format(),
                     blend: Some(wgpu::BlendState::REPLACE),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],

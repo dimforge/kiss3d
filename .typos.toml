@@ -1,0 +1,4 @@
+# Project-specific words the `typos` checker should treat as correct.
+[default.extend-words]
+# Multiple Importance Sampling (a standard path-tracing term).
+MIS = "MIS"

@@ -8,10 +8,10 @@ use crate::event::WindowEvent;
 use crate::light::LightCollection;
 use crate::post_processing::{PostProcessingContext, PostProcessingEffect};
 use crate::prelude::FixedView2d;
-use crate::renderer::Renderer3d;
+use crate::renderer::{RayTracer, Renderer3d};
 use crate::resource::{
     MaterialManager2d, MaterialManager3d, RenderContext, RenderContext2d, RenderContext2dEncoder,
-    RenderTarget,
+    RenderPhase, RenderTarget,
 };
 use crate::scene::{SceneNode2d, SceneNode3d};
 
@@ -145,7 +145,15 @@ impl Window {
         let ctxt = Context::get();
         let mut encoder = ctxt.create_command_encoder(Some("kiss3d_frame_encoder"));
 
-        // Resize the offscreen render targets if needed.
+        // Resize the HDR film + the offscreen render targets if needed.
+        //
+        // NOTE: the rasterizer's material/renderer pipelines are currently built
+        // single-sampled (their `MultisampleState.count` is 1), so the HDR film
+        // is single-sampled too. `sample_count` is still threaded through so that
+        // if MSAA pipelines are enabled later, `HdrPipeline` already supports an
+        // MSAA attachment + resolve (see `resolve_view` below).
+        let hdr_sample_count = 1;
+        self.hdr.resize(w, h, hdr_sample_count);
         self.post_process_render_target
             .resize(w, h, self.canvas.surface_format());
         if offscreen {
@@ -175,27 +183,25 @@ impl Window {
                 .clone(),
         };
 
-        // Determine which views the scene is rendered into.
-        let (color_view, depth_view) = if post_processing.is_some() {
-            // Render to the offscreen buffer for post-processing.
-            match &self.post_process_render_target {
-                RenderTarget::Offscreen(o) => (o.color_view.clone(), o.depth_view.clone()),
-                // Shouldn't happen, but fall back to the final view.
-                RenderTarget::Screen => (frame_view.clone(), self.canvas.depth_view().clone()),
-            }
-        } else if offscreen {
-            let o = self
-                .offscreen_output_target
+        // The rasterized scene always renders into the HDR film. `color_view` is
+        // the MSAA attachment when multisampling is on, the single-sample HDR
+        // texture otherwise; `resolve_view` is the MSAA resolve destination.
+        // A final tonemap pass converts this HDR image to the LDR output below.
+        let color_view = self.hdr.scene_render_view().clone();
+        let resolve_view = self.hdr.scene_resolve_view().cloned();
+
+        // The depth attachment must match the scene target's sample count. The
+        // canvas depth texture is built MSAA-aware; offscreen rendering is always
+        // single-sampled and uses the offscreen target's depth.
+        let depth_view = if offscreen {
+            self.offscreen_output_target
                 .as_ref()
-                .expect("offscreen render target was just created");
-            (
-                frame_view.clone(),
-                o.depth_view()
-                    .expect("offscreen render target is never the screen")
-                    .clone(),
-            )
+                .expect("offscreen render target was just created")
+                .depth_view()
+                .expect("offscreen render target is never the screen")
+                .clone()
         } else {
-            (frame_view.clone(), self.canvas.depth_view().clone())
+            self.canvas.depth_view().clone()
         };
 
         // Clear the render target at the start of the frame
@@ -250,13 +256,26 @@ impl Window {
             // Phase 2: Flush - upload all batched uniforms to GPU
             MaterialManager3d::get_global_manager(|mm| mm.flush());
 
-            // Phase 3: Render - issue draw calls using a SINGLE render pass
+            // Phase 2.5: Shadow pre-pass — render scene depth from each shadow-casting
+            // light into the shadow atlas before the color pass. World transforms are
+            // already propagated and lights collected by `prepare`. Only meaningful
+            // for the first pass; stereo passes reuse the same shadow maps.
+            if let Some(scene) = scene.as_deref_mut() {
+                self.shadow_mapper
+                    .render(scene, &*camera, &lights, &mut encoder);
+            }
+
+            // Phase 3: Render - issue draw calls using a SINGLE render pass.
+            // The scene is rasterized into the HDR film, so the render context
+            // advertises the HDR format.
             {
                 let render_context = RenderContext {
-                    surface_format: self.canvas.surface_format(),
+                    surface_format: Context::render_format(),
                     sample_count,
                     viewport_width: w,
                     viewport_height: h,
+                    shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                    phase: RenderPhase::Opaque,
                 };
 
                 // Create one render pass for all 3D scene objects
@@ -331,12 +350,72 @@ impl Window {
             }
         }
 
+        // === Order-independent transparency ===
+        // Transparent object surfaces are drawn in a separate weighted-blended pass
+        // (McGuire & Bavoil) into the HDR pipeline's accum + revealage targets, then
+        // composited over the opaque HDR scene — so transparency needs no sorting and
+        // is robust to interpenetration. Points/polylines are opaque overlays already
+        // drawn above. Done once (not per stereo pass).
+        if let Some(scene) = scene {
+            let oit_context = RenderContext {
+                surface_format: Context::render_format(),
+                sample_count: 1,
+                viewport_width: w,
+                viewport_height: h,
+                shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                phase: RenderPhase::Transparent,
+            };
+            {
+                let mut oit_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("oit_geometry_pass"),
+                    color_attachments: &[
+                        // accum: cleared to 0 (additive).
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: self.hdr.oit_accum_view(),
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        }),
+                        // revealage: cleared to 1 (nothing occluded yet).
+                        Some(wgpu::RenderPassColorAttachment {
+                            view: self.hdr.oit_reveal_view(),
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                store: wgpu::StoreOp::Store,
+                            },
+                            depth_slice: None,
+                        }),
+                    ],
+                    // Test against the opaque depth (the OIT pipeline does not write it).
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                scene
+                    .data_mut()
+                    .render(0, camera, &lights, &mut oit_pass, &oit_context);
+            }
+            self.hdr.composite_oit(&mut encoder);
+        }
+
         camera.render_complete(&self.canvas);
 
-        // Render the 2D planar scene
+        // Render the 2D planar scene (into the HDR film, like the 3D scene).
         {
             let context_2d = RenderContext2d {
-                surface_format: self.canvas.surface_format(),
+                surface_format: Context::render_format(),
                 sample_count,
                 viewport_width: w,
                 viewport_height: h,
@@ -379,12 +458,12 @@ impl Window {
                 }
             }
 
-            // Polylines and points render on top of surfaces
+            // Polylines and points render on top of surfaces (into the HDR film).
             {
                 let mut context_2d_encoder = RenderContext2dEncoder {
                     encoder: &mut encoder,
                     color_view: &color_view,
-                    surface_format: self.canvas.surface_format(),
+                    surface_format: Context::render_format(),
                     sample_count,
                     viewport_width: w,
                     viewport_height: h,
@@ -404,8 +483,39 @@ impl Window {
 
         let (znear, zfar) = camera.clip_planes();
 
-        // Apply post-processing if enabled
+        // HDR resolve: the scene was rasterized into the HDR film. If MSAA is
+        // active, resolve the multisampled HDR attachment into the single-sample
+        // HDR texture first (a render pass resolves on End even with no draws).
+        if let Some(resolve_view) = &resolve_view {
+            let _resolve_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hdr_msaa_resolve_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &color_view,
+                    resolve_target: Some(resolve_view),
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+        }
+
+        // Tonemap + bloom resolve. Existing post-processing effects run on the
+        // tonemapped LDR image: the HDR film is tonemapped into the LDR
+        // post-process target, then the effect composites it into `frame_view`.
+        // Without an effect, the HDR film is tonemapped straight into `frame_view`.
         if let Some(ref mut p) = post_processing {
+            let pp_ldr_view = match &self.post_process_render_target {
+                RenderTarget::Offscreen(o) => o.color_view.clone(),
+                RenderTarget::Screen => frame_view.clone(),
+            };
+            self.hdr.resolve(&mut encoder, &pp_ldr_view);
+
             // TODO: use the real time value instead of 0.016!
             p.update(0.016, w as f32, h as f32, znear, zfar);
 
@@ -415,6 +525,8 @@ impl Window {
             };
 
             p.draw(&self.post_process_render_target, &mut pp_context);
+        } else {
+            self.hdr.resolve(&mut encoder, &frame_view);
         }
 
         // Render text
@@ -485,6 +597,155 @@ impl Window {
                     .request_animation_frame(closure.as_ref().unchecked_ref())
                     .unwrap();
 
+                r.await.unwrap();
+            }
+        }
+
+        !self.should_close()
+    }
+
+    /// Renders one path-traced frame.
+    ///
+    /// This bypasses the rasterizer entirely: it collects lights and propagates
+    /// world transforms (via the scene's `prepare` pass), then drives the
+    /// [`RayTracer`] to dispatch the path-tracing pass into its HDR accumulation
+    /// buffer and tonemap the result into the frame's output view. Text overlays
+    /// are still rendered on top.
+    pub(super) async fn render_raytraced_frame(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut dyn Camera3d,
+        raytracer: &mut RayTracer,
+    ) -> bool {
+        let offscreen = self.hidden;
+
+        let frame = if offscreen {
+            None
+        } else {
+            match self.acquire_next_frame() {
+                Some(frame) => Some(frame),
+                None => return !self.should_close(),
+            }
+        };
+
+        let w = self.width();
+        let h = self.height();
+
+        camera.handle_event(&self.canvas, &WindowEvent::FramebufferSize(w, h));
+        camera.update(&self.canvas);
+
+        let sample_count = if offscreen {
+            1
+        } else {
+            self.canvas.sample_count()
+        };
+
+        let ctxt = Context::get();
+        let mut encoder = ctxt.create_command_encoder(Some("kiss3d_raytrace_encoder"));
+
+        // The path tracer renders single-sampled into an offscreen color texture
+        // when the window is hidden; otherwise straight into the surface.
+        if offscreen {
+            if self.offscreen_output_target.is_none() {
+                self.offscreen_output_target =
+                    Some(self.framebuffer_manager.new_render_target(w, h, true));
+            }
+            self.offscreen_output_target.as_mut().unwrap().resize(
+                w,
+                h,
+                self.canvas.surface_format(),
+            );
+        }
+
+        let frame_view = match &frame {
+            Some(frame) => frame
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default()),
+            None => self
+                .offscreen_output_target
+                .as_ref()
+                .expect("offscreen render target was just created")
+                .color_view()
+                .expect("offscreen render target is never the screen")
+                .clone(),
+        };
+
+        // Collect lights and propagate world transforms for the path tracer.
+        // (`prepare` does both; the path tracer reads geometry off the CPU side.)
+        let mut lights = LightCollection::with_ambient(self.ambient_intensity);
+        scene.data_mut().prepare(0, camera, &mut lights, w, h);
+
+        raytracer.render_frame(
+            scene,
+            camera,
+            &lights,
+            self.background,
+            &mut encoder,
+            &frame_view,
+            w,
+            h,
+        );
+
+        // Render text on top of the path-traced image.
+        {
+            let mut context_2d_encoder = RenderContext2dEncoder {
+                encoder: &mut encoder,
+                color_view: &frame_view,
+                surface_format: self.canvas.surface_format(),
+                sample_count,
+                viewport_width: w,
+                viewport_height: h,
+            };
+            self.text_renderer
+                .render(w as f32, h as f32, &mut context_2d_encoder);
+        }
+
+        ctxt.submit(std::iter::once(encoder.finish()));
+
+        // Render egui on top of the path-traced image (uses its own encoder).
+        // The depth view is unused by egui, so the color view is passed twice.
+        #[cfg(feature = "egui")]
+        {
+            self.egui_context.renderer.render(
+                &frame_view,
+                &frame_view,
+                w,
+                h,
+                self.canvas.scale_factor() as f32,
+            );
+        }
+
+        match &frame {
+            Some(frame) => self.canvas.copy_frame_to_readback(frame),
+            None => {
+                let color = self
+                    .offscreen_output_target
+                    .as_ref()
+                    .expect("offscreen render target was just created")
+                    .color_texture()
+                    .expect("offscreen render target is never the screen")
+                    .clone();
+                self.canvas.copy_texture_to_readback(&color);
+            }
+        }
+
+        #[cfg(feature = "recording")]
+        self.capture_frame_if_recording();
+
+        if let Some(frame) = frame {
+            self.canvas.present(frame);
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsCast;
+            use web_sys::wasm_bindgen::closure::Closure;
+
+            if let Some(window) = web_sys::window() {
+                let (s, r) = oneshot::channel();
+                let closure = Closure::once(move || s.send(()).unwrap());
+                window
+                    .request_animation_frame(closure.as_ref().unchecked_ref())
+                    .unwrap();
                 r.await.unwrap();
             }
         }

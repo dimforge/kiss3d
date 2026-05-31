@@ -1,6 +1,7 @@
 use crate::camera::Camera3d;
 use crate::context::Context;
 use crate::light::{LightCollection, LightType, MAX_LIGHTS};
+use crate::post_processing::{OIT_ACCUM_FORMAT, OIT_REVEAL_FORMAT};
 use crate::resource::vertex_index::VERTEX_INDEX_FORMAT;
 use crate::resource::{
     DynamicUniformBuffer, GpuData, GpuMesh3d, Material3d, RenderContext, Texture,
@@ -142,13 +143,12 @@ struct GpuVertex {
 /// This struct now only contains wireframe and points rendering data.
 /// The main uniform buffers and shared view uniforms are managed by ObjectMaterial.
 pub struct ObjectMaterialGpuData {
-    // Cached texture bind group with pointer to detect texture changes
+    // Cached combined material-texture bind group (albedo + PBR maps). The cached
+    // pointers below detect when any of the source textures change so it is rebuilt.
     texture_bind_group: Option<wgpu::BindGroup>,
     cached_texture_ptr: usize,
     /// Offset into the dynamic object uniform buffer, set during prepare() phase.
     object_uniform_offset: Option<u32>,
-    // PBR texture bind group (normal, metallic-roughness, ao, emissive maps)
-    pbr_texture_bind_group: Option<wgpu::BindGroup>,
     cached_normal_map_ptr: usize,
     cached_metallic_roughness_map_ptr: usize,
     cached_ao_map_ptr: usize,
@@ -220,8 +220,7 @@ impl ObjectMaterialGpuData {
             texture_bind_group: None,
             cached_texture_ptr: 0,
             object_uniform_offset: None,
-            // PBR texture caching
-            pbr_texture_bind_group: None,
+            // Material-texture caching (albedo + PBR maps)
             cached_normal_map_ptr: 0,
             cached_metallic_roughness_map_ptr: 0,
             cached_ao_map_ptr: 0,
@@ -329,10 +328,14 @@ pub struct ObjectMaterial {
     pipeline_cull: wgpu::RenderPipeline,
     /// Pipeline with backface culling disabled
     pipeline_no_cull: wgpu::RenderPipeline,
+    /// Weighted-blended OIT pipeline (backface culling), writing the accum +
+    /// revealage targets with no depth write. Used in the transparent phase.
+    oit_pipeline_cull: wgpu::RenderPipeline,
+    /// Weighted-blended OIT pipeline (no culling).
+    oit_pipeline_no_cull: wgpu::RenderPipeline,
     object_bind_group_layout: wgpu::BindGroupLayout,
+    /// Combined material-texture bind group layout (albedo + PBR maps, group 2).
     texture_bind_group_layout: wgpu::BindGroupLayout,
-    /// PBR texture bind group layout (normal, metallic-roughness, ao, emissive maps)
-    pbr_texture_bind_group_layout: wgpu::BindGroupLayout,
     /// Default PBR textures for when user hasn't set any
     default_normal_map: std::sync::Arc<crate::resource::Texture>,
     default_metallic_roughness_map: std::sync::Arc<crate::resource::Texture>,
@@ -370,6 +373,22 @@ pub struct ObjectMaterial {
     points_view_uniform_buffer: wgpu::Buffer,
     /// Shared points view bind group
     points_view_bind_group: wgpu::BindGroup,
+
+    // === Shadow mapping (group 4) ===
+    /// Neutral fallback bind group used when no shadow mapper is supplied (or when
+    /// shadows are disabled). It points at a 1x1 dummy atlas with a uniform whose
+    /// `shadows_enabled` flag is `0`, so the shader skips all shadow sampling.
+    default_shadow_bind_group: wgpu::BindGroup,
+    /// Keeps the dummy atlas/sampler/buffer alive for `default_shadow_bind_group`.
+    _default_shadow_resources: DefaultShadowResources,
+}
+
+/// Owns the GPU resources backing [`ObjectMaterial`]'s neutral shadow bind group.
+struct DefaultShadowResources {
+    _atlas: wgpu::Texture,
+    _view: wgpu::TextureView,
+    _sampler: wgpu::Sampler,
+    _uniform: wgpu::Buffer,
 }
 
 impl Default for ObjectMaterial {
@@ -415,103 +434,37 @@ impl ObjectMaterial {
                 }],
             });
 
+        // Material-texture bind group layout (group 2): albedo + the four PBR maps
+        // (normal, metallic-roughness, ao, emissive), each a texture+sampler pair.
+        // Albedo and the PBR maps share one group so the pipeline uses only 4 bind
+        // groups total, within WebGPU's `maxBindGroups` limit of 4. Bindings:
+        // 0/1 albedo, 2/3 normal, 4/5 metallic-roughness, 6/7 ao, 8/9 emissive.
+        let texture_entries: Vec<wgpu::BindGroupLayoutEntry> = (0..5u32)
+            .flat_map(|i| {
+                [
+                    wgpu::BindGroupLayoutEntry {
+                        binding: i * 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: i * 2 + 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ]
+            })
+            .collect();
         let texture_bind_group_layout =
             ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("object_material_texture_bind_group_layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
-            });
-
-        // PBR texture bind group layout (group 3): normal, metallic-roughness, ao, emissive maps
-        let pbr_texture_bind_group_layout =
-            ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("object_material_pbr_texture_bind_group_layout"),
-                entries: &[
-                    // Normal map
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    // Metallic-roughness map
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    // Ambient occlusion map
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 5,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    // Emissive map
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 6,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 7,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                ],
+                entries: &texture_entries,
             });
 
         // Create default PBR textures
@@ -521,13 +474,19 @@ impl ObjectMaterial {
         let default_ao_map = crate::resource::Texture::new_default_ao_map();
         let default_emissive_map = crate::resource::Texture::new_default_emissive_map();
 
+        // Shadow bind group layout (group 3). Structurally identical to the one the
+        // window's `ShadowMapper` builds, so its bind group is compatible here.
+        let shadow_bind_group_layout = crate::builtin::shadow::shadow_bind_group_layout(&ctxt);
+
+        // Four bind groups total (frame, object, textures, shadow) — WebGPU caps
+        // `maxBindGroups` at 4, so this must not grow.
         let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("object_material_pipeline_layout"),
             bind_group_layouts: &[
                 Some(&frame_bind_group_layout),
                 Some(&object_bind_group_layout),
                 Some(&texture_bind_group_layout),
-                Some(&pbr_texture_bind_group_layout),
+                Some(&shadow_bind_group_layout),
             ],
             immediate_size: 0,
         });
@@ -633,7 +592,7 @@ impl ObjectMaterial {
                     module: &shader,
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: ctxt.surface_format,
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
                         blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
@@ -668,6 +627,89 @@ impl ObjectMaterial {
         let pipeline_cull =
             create_pipeline(Some(wgpu::Face::Back), "object_material_pipeline_cull");
         let pipeline_no_cull = create_pipeline(None, "object_material_pipeline_no_cull");
+
+        // Weighted-blended OIT pipelines: same vertex stage and bind groups, but the
+        // `fs_oit` entry point writes two targets — an additive premultiplied-weighted
+        // color accumulator (Rgba16Float) and a multiplicative revealage (R16Float) —
+        // and depth-tests against the opaque depth without writing it.
+        let create_oit_pipeline = |cull_mode: Option<wgpu::Face>, label: &str| {
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &vertex_buffer_layouts,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_oit"),
+                    targets: &[
+                        // accum: additive (One, One).
+                        Some(wgpu::ColorTargetState {
+                            format: OIT_ACCUM_FORMAT,
+                            blend: Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::One,
+                                    dst_factor: wgpu::BlendFactor::One,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                                alpha: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::One,
+                                    dst_factor: wgpu::BlendFactor::One,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                            }),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        }),
+                        // revealage: multiplicative dst *= (1 - src).
+                        Some(wgpu::ColorTargetState {
+                            format: OIT_REVEAL_FORMAT,
+                            blend: Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::Zero,
+                                    dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                                alpha: wgpu::BlendComponent::REPLACE,
+                            }),
+                            write_mask: wgpu::ColorWrites::RED,
+                        }),
+                    ],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Context::depth_format(),
+                    // Test against opaque depth, but do not write (transparent
+                    // fragments must not occlude each other).
+                    depth_write_enabled: Some(false),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let oit_pipeline_cull =
+            create_oit_pipeline(Some(wgpu::Face::Back), "object_material_oit_pipeline_cull");
+        let oit_pipeline_no_cull =
+            create_oit_pipeline(None, "object_material_oit_pipeline_no_cull");
 
         // Create wireframe shader and pipelines for lines/points
         // Note: _wireframe_shader, _wireframe_pipeline_layout, and _wireframe_vertex_buffer_layouts
@@ -890,7 +932,7 @@ impl ObjectMaterial {
                 module: &wireframe_polyline_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: ctxt.surface_format,
+                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1060,7 +1102,7 @@ impl ObjectMaterial {
                 module: &points_shader,
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
-                    format: ctxt.surface_format,
+                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
                     blend: Some(wgpu::BlendState::ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1167,12 +1209,78 @@ impl ObjectMaterial {
             }],
         });
 
+        // === Neutral fallback shadow resources ===
+        // A 1x1xMAX_SHADOW_VIEWS dummy depth atlas plus a zeroed uniform buffer
+        // (`shadows_enabled == 0`). Bound at group 4 whenever no shadow mapper is
+        // active, this keeps the lighting shader correct with shadows disabled.
+        let dummy_atlas = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("object_material_dummy_shadow_atlas"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: crate::builtin::shadow::MAX_SHADOW_VIEWS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Depth32Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let dummy_atlas_view = dummy_atlas.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("object_material_dummy_shadow_atlas_view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+        let dummy_shadow_sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("object_material_dummy_shadow_sampler"),
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+        // Size matches `ShadowUniforms`; zero-initialized means `shadows_enabled == 0`.
+        let dummy_shadow_uniform = ctxt.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("object_material_dummy_shadow_uniform"),
+            size: crate::builtin::shadow::shadow_uniforms_size(),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        ctxt.write_buffer(
+            &dummy_shadow_uniform,
+            0,
+            &vec![0u8; crate::builtin::shadow::shadow_uniforms_size() as usize],
+        );
+        let default_shadow_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("object_material_default_shadow_bind_group"),
+            layout: &shadow_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&dummy_atlas_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&dummy_shadow_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: dummy_shadow_uniform.as_entire_binding(),
+                },
+            ],
+        });
+        let default_shadow_resources = DefaultShadowResources {
+            _atlas: dummy_atlas,
+            _view: dummy_atlas_view,
+            _sampler: dummy_shadow_sampler,
+            _uniform: dummy_shadow_uniform,
+        };
+
         ObjectMaterial {
             pipeline_cull,
             pipeline_no_cull,
+            oit_pipeline_cull,
+            oit_pipeline_no_cull,
             object_bind_group_layout,
             texture_bind_group_layout,
-            pbr_texture_bind_group_layout,
             default_normal_map,
             default_metallic_roughness_map,
             default_ao_map,
@@ -1192,76 +1300,50 @@ impl ObjectMaterial {
             wireframe_view_bind_group,
             points_view_uniform_buffer,
             points_view_bind_group,
+            default_shadow_bind_group,
+            _default_shadow_resources: default_shadow_resources,
         }
     }
 
-    fn create_texture_bind_group(&self, texture: &Texture) -> wgpu::BindGroup {
-        let ctxt = Context::get();
-        ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("object_material_texture_bind_group"),
-            layout: &self.texture_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&texture.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&texture.sampler),
-                },
-            ],
-        })
-    }
-
-    fn create_pbr_texture_bind_group(
+    /// Builds the combined material-texture bind group (group 2): albedo at
+    /// bindings 0/1 followed by the four PBR maps at 2/3, 4/5, 6/7, 8/9.
+    fn create_texture_bind_group(
         &self,
+        albedo: &Texture,
         normal_map: &Texture,
         metallic_roughness_map: &Texture,
         ao_map: &Texture,
         emissive_map: &Texture,
     ) -> wgpu::BindGroup {
         let ctxt = Context::get();
+        let textures = [
+            albedo,
+            normal_map,
+            metallic_roughness_map,
+            ao_map,
+            emissive_map,
+        ];
+        let entries: Vec<wgpu::BindGroupEntry> = textures
+            .iter()
+            .enumerate()
+            .flat_map(|(i, tex)| {
+                let i = i as u32;
+                [
+                    wgpu::BindGroupEntry {
+                        binding: i * 2,
+                        resource: wgpu::BindingResource::TextureView(&tex.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: i * 2 + 1,
+                        resource: wgpu::BindingResource::Sampler(&tex.sampler),
+                    },
+                ]
+            })
+            .collect();
         ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("object_material_pbr_texture_bind_group"),
-            layout: &self.pbr_texture_bind_group_layout,
-            entries: &[
-                // Normal map
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&normal_map.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&normal_map.sampler),
-                },
-                // Metallic-roughness map
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&metallic_roughness_map.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::Sampler(&metallic_roughness_map.sampler),
-                },
-                // Ambient occlusion map
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(&ao_map.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::Sampler(&ao_map.sampler),
-                },
-                // Emissive map
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: wgpu::BindingResource::TextureView(&emissive_map.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 7,
-                    resource: wgpu::BindingResource::Sampler(&emissive_map.sampler),
-                },
-            ],
+            label: Some("object_material_texture_bind_group"),
+            layout: &self.texture_bind_group_layout,
+            entries: &entries,
         })
     }
 
@@ -1603,6 +1685,12 @@ impl Material3d for ObjectMaterial {
         }
     }
 
+    fn renders_in_transparent_phase(&self) -> bool {
+        // ObjectMaterial has dedicated OIT pipelines whose targets match the
+        // transparent (weighted-blended) pass, so it draws in both phases.
+        true
+    }
+
     fn flush(&mut self) {
         let ctxt = Context::get();
 
@@ -1638,13 +1726,24 @@ impl Material3d for ObjectMaterial {
         instances: &mut InstancesBuffer3d,
         gpu_data: &mut dyn GpuData,
         render_pass: &mut wgpu::RenderPass<'_>,
-        _context: &RenderContext,
+        context: &RenderContext,
     ) {
         let ctxt = Context::get();
 
-        let render_surface = data.surface_rendering_active();
-        let render_wireframe = data.lines_width() > 0.0;
-        let render_points = data.points_size() > 0.0;
+        // Order-independent transparency phase split: opaque surfaces (and all
+        // wireframe/point overlays) draw in the opaque phase; surfaces whose color
+        // is translucent draw in the OIT transparent phase. Transparency is keyed
+        // off the object color's alpha (per-instance alpha uses this classification
+        // too).
+        let transparent = data.color().a < 1.0;
+        let render_surface = data.surface_rendering_active()
+            && match context.phase {
+                crate::resource::RenderPhase::Opaque => !transparent,
+                crate::resource::RenderPhase::Transparent => transparent,
+            };
+        let in_opaque_phase = context.phase == crate::resource::RenderPhase::Opaque;
+        let render_wireframe = in_opaque_phase && data.lines_width() > 0.0;
+        let render_points = in_opaque_phase && data.points_size() > 0.0;
 
         // Nothing to render
         if !render_surface && !render_wireframe && !render_points {
@@ -1710,14 +1809,9 @@ impl Material3d for ObjectMaterial {
             None => return,
         };
 
-        // Cache texture bind group, invalidate if texture changed
+        // Cache the combined material-texture bind group (albedo + PBR maps),
+        // rebuilding it whenever any of the source textures change.
         let texture_ptr = std::sync::Arc::as_ptr(data.texture()) as usize;
-        if gpu_data.texture_bind_group.is_none() || gpu_data.cached_texture_ptr != texture_ptr {
-            gpu_data.texture_bind_group = Some(self.create_texture_bind_group(data.texture()));
-            gpu_data.cached_texture_ptr = texture_ptr;
-        }
-
-        // Cache PBR texture bind group, invalidate if any PBR texture changed
         let normal_map = data.normal_map().unwrap_or(&self.default_normal_map);
         let metallic_roughness_map = data
             .metallic_roughness_map()
@@ -1730,19 +1824,22 @@ impl Material3d for ObjectMaterial {
         let ao_ptr = std::sync::Arc::as_ptr(ao_map) as usize;
         let emissive_ptr = std::sync::Arc::as_ptr(emissive_map) as usize;
 
-        let pbr_textures_changed = gpu_data.pbr_texture_bind_group.is_none()
+        let textures_changed = gpu_data.texture_bind_group.is_none()
+            || gpu_data.cached_texture_ptr != texture_ptr
             || gpu_data.cached_normal_map_ptr != normal_ptr
             || gpu_data.cached_metallic_roughness_map_ptr != mr_ptr
             || gpu_data.cached_ao_map_ptr != ao_ptr
             || gpu_data.cached_emissive_map_ptr != emissive_ptr;
 
-        if pbr_textures_changed {
-            gpu_data.pbr_texture_bind_group = Some(self.create_pbr_texture_bind_group(
+        if textures_changed {
+            gpu_data.texture_bind_group = Some(self.create_texture_bind_group(
+                data.texture(),
                 normal_map,
                 metallic_roughness_map,
                 ao_map,
                 emissive_map,
             ));
+            gpu_data.cached_texture_ptr = texture_ptr;
             gpu_data.cached_normal_map_ptr = normal_ptr;
             gpu_data.cached_metallic_roughness_map_ptr = mr_ptr;
             gpu_data.cached_ao_map_ptr = ao_ptr;
@@ -1752,21 +1849,30 @@ impl Material3d for ObjectMaterial {
         // Render surface (filled triangles)
         if render_surface {
             let texture_bind_group = gpu_data.texture_bind_group.as_ref().unwrap();
-            let pbr_texture_bind_group = gpu_data.pbr_texture_bind_group.as_ref().unwrap();
             let object_bind_group = self.object_bind_group.as_ref().unwrap();
 
-            // Select pipeline based on backface culling setting
-            let pipeline = if data.backface_culling_enabled() {
-                &self.pipeline_cull
-            } else {
-                &self.pipeline_no_cull
+            // Select pipeline: OIT (transparent phase) vs. opaque, and cull vs.
+            // no-cull per the object's backface-culling setting.
+            let cull = data.backface_culling_enabled();
+            let pipeline = match (context.phase, cull) {
+                (crate::resource::RenderPhase::Transparent, true) => &self.oit_pipeline_cull,
+                (crate::resource::RenderPhase::Transparent, false) => &self.oit_pipeline_no_cull,
+                (crate::resource::RenderPhase::Opaque, true) => &self.pipeline_cull,
+                (crate::resource::RenderPhase::Opaque, false) => &self.pipeline_no_cull,
             };
             render_pass.set_pipeline(pipeline);
             render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
             // Use dynamic offset for object uniforms!
             render_pass.set_bind_group(1, object_bind_group, &[object_offset]);
+            // Group 2: combined material textures (albedo + PBR maps).
             render_pass.set_bind_group(2, texture_bind_group, &[]);
-            render_pass.set_bind_group(3, pbr_texture_bind_group, &[]);
+            // Group 3: shadow atlas + comparison sampler + shadow uniforms. Use the
+            // window's shadow mapper bind group when present, else the neutral one.
+            let shadow_bind_group = context
+                .shadow_bind_group
+                .as_ref()
+                .unwrap_or(&self.default_shadow_bind_group);
+            render_pass.set_bind_group(3, shadow_bind_group, &[]);
 
             // Set vertex buffers for mesh data
             render_pass.set_vertex_buffer(0, coords_buf.slice(..));

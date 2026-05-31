@@ -36,6 +36,16 @@ EXAMPLES=(
     texturing_mipmaps
     stereo
     post_processing
+    hdr_bloom
+    tonemapping
+    shadows
+    transparency
+    aov
+    raytracing
+    raytracing_bsdf
+    raytracing_denoise
+    raytracing_offscreen
+    raytracing_transparency
     instancing2d
     instancing3d
     polylines

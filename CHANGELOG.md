@@ -1,3 +1,40 @@
+# Unreleased
+
+## New Features
+
+### GPU path tracer
+
+- Added a progressive Monte-Carlo **path tracer** (`RayTracer`) that renders the existing scene graph as an alternative to the rasterizer, via `Window::render_raytraced` and `OffscreenSurface::render_image_raytraced`.
+  - Two backends sharing one WGSL kernel: a software compute-shader BVH traversal (default) and a hardware ray-query path behind the `hw_raytracer` feature, selectable at runtime.
+  - Two-level (instanced) BVH so instanced scene nodes are traced once per mesh.
+  - Unified PBR/BSDF surface model (diffuse / metal / glass), per-object materials and textures, area-light next-event estimation with multiple-importance sampling, thin-lens depth of field, and image-based lighting from an equirectangular HDRI.
+  - Alpha (coverage) transparency; ambient acts as a uniform fill light; the window background color is shown on directly-seen ray misses without lighting the scene.
+  - Edge-aware à-trous denoiser with first-hit albedo/normal guides (`RayTracer::set_denoise`).
+  - BSDF setters on `SceneNode3d` (`set_metallic`, `set_roughness`, `set_emissive`, …).
+  - Examples: `raytracing`, `raytracing_bsdf`, `raytracing_denoise`, `raytracing_offscreen`, `raytracing_transparency`.
+
+### HDR rendering pipeline
+
+- The rasterizer now renders into a linear `Rgba16Float` **HDR film** and resolves it with a configurable tonemap operator (`Window::set_tonemap` / `set_exposure`).
+  - Operators: `None`, `Aces`, `Reinhard`, `AgX`, `Neutral` (Khronos PBR Neutral, the default), and `TonyMcMapface` (baked CC0 LUT). The same operator applies to the path tracer's resolve.
+  - Physically-weighted **bloom** on the HDR film (`Window::set_bloom_enabled` and related settings).
+  - Weighted-blended **order-independent transparency** for the rasterizer (correct blending of overlapping transparent surfaces without sorting).
+  - Examples: `hdr_bloom`, `tonemapping`, `transparency`.
+
+### Real-time shadows
+
+- Added real-time **shadow mapping** for directional, spot and point lights, applied in the PBR lighting pass.
+  - Directional lights use **cascaded shadow maps** (the camera frustum is split logarithmically, each cascade fit with a rotation-invariant, texel-snapped projection derived from the camera so shadows don't shimmer or degrade with scene size, and cascades are cross-faded across boundaries) for crisp near shadows with bounded far coverage.
+  - Spot lights use a perspective map; point lights an unrolled cube map.
+  - Castaño 2013 optimized PCF (tent-weighted 9-tap) for smooth, crisp edges.
+  - Configurable: `Window::set_shadows_enabled` / `set_shadow_resolution`, plus cascade count, shadow distance, first-cascade bound and depth bias on the shadow mapper. Per-light `Light::with_casts_shadows`.
+  - Example: `shadows`.
+
+### Auxiliary render outputs (AOVs)
+
+- Added auxiliary render outputs produced by re-rendering the scene with dedicated materials (no path tracer required): linear **depth**, surface **normals**, and per-object **segmentation** ids (with a colorized variant).
+  - `Window::snap_depth` / `snap_normals` / `snap_segmentation` / `snap_segmentation_colored`, a per-object segmentation id on `Object3d`, and an `aov` example.
+
 # v0.42.0
 
 ## Breaking Changes

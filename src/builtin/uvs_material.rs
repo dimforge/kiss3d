@@ -180,7 +180,7 @@ impl UvsMaterial {
                     module: &shader,
                     entry_point: Some("fs_main"),
                     targets: &[Some(wgpu::ColorTargetState {
-                        format: ctxt.surface_format,
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
                         blend: Some(wgpu::BlendState::REPLACE),
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
