@@ -15,6 +15,7 @@ include = [
     "src/**/*.rs",
     "src/**/*.wgsl",
     "src/text/*.ttf",
+    "src/builtin/tony_mc_mapface.bin",
     "examples/**/*.rs",
     "examples/media",
     "examples/Cargo.toml",
