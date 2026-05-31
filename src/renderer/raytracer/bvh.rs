@@ -54,7 +54,10 @@ fn tri_bounds(v: &[RtVertex], t: &RtTriangle) -> (Vec3, Vec3) {
 /// node array. An empty input yields a single empty leaf so the GPU buffers
 /// remain bindable.
 pub fn build(vertices: &[RtVertex], triangles: &[RtTriangle]) -> (Vec<BvhNode>, Vec<RtTriangle>) {
-    let centroids: Vec<Vec3> = triangles.iter().map(|t| tri_centroid(vertices, t)).collect();
+    let centroids: Vec<Vec3> = triangles
+        .iter()
+        .map(|t| tri_centroid(vertices, t))
+        .collect();
     let bounds: Vec<(Vec3, Vec3)> = triangles.iter().map(|t| tri_bounds(vertices, t)).collect();
     let (nodes, indices) = build_from_bounds(&centroids, &bounds);
     let ordered: Vec<RtTriangle> = indices.iter().map(|&i| triangles[i as usize]).collect();
@@ -89,7 +92,14 @@ pub fn build_from_bounds(centroids: &[Vec3], bounds: &[(Vec3, Vec3)]) -> (Vec<Bv
 
     let mut indices: Vec<u32> = (0..centroids.len() as u32).collect();
     let mut nodes: Vec<BvhNode> = Vec::with_capacity(centroids.len() * 2);
-    build_recursive(&mut nodes, &mut indices, centroids, bounds, 0, centroids.len());
+    build_recursive(
+        &mut nodes,
+        &mut indices,
+        centroids,
+        bounds,
+        0,
+        centroids.len(),
+    );
     (nodes, indices)
 }
 
@@ -182,7 +192,11 @@ fn build_recursive(
                 lmin = lmin.min(bin_min[s]);
                 lmax = lmax.max(bin_max[s]);
                 left_count[s] = lcount;
-                left_area[s] = if lcount > 0 { surface_area(lmin, lmax) } else { 0.0 };
+                left_area[s] = if lcount > 0 {
+                    surface_area(lmin, lmax)
+                } else {
+                    0.0
+                };
             }
             let mut rmin = Vec3::splat(f32::INFINITY);
             let mut rmax = Vec3::splat(f32::NEG_INFINITY);
@@ -192,7 +206,11 @@ fn build_recursive(
                 rmin = rmin.min(bin_min[s + 1]);
                 rmax = rmax.max(bin_max[s + 1]);
                 right_count[s] = rcount;
-                right_area[s] = if rcount > 0 { surface_area(rmin, rmax) } else { 0.0 };
+                right_area[s] = if rcount > 0 {
+                    surface_area(rmin, rmax)
+                } else {
+                    0.0
+                };
             }
         }
 
@@ -200,8 +218,7 @@ fn build_recursive(
             if left_count[s] == 0 || right_count[s] == 0 {
                 continue;
             }
-            let cost =
-                left_area[s] * left_count[s] as f32 + right_area[s] * right_count[s] as f32;
+            let cost = left_area[s] * left_count[s] as f32 + right_area[s] * right_count[s] as f32;
             if cost < best_cost {
                 best_cost = cost;
                 best_axis = axis;

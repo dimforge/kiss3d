@@ -433,7 +433,10 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
             let vert_start = out.mesh_vertices.len() as u32;
             for (i, &local_pos) in coords.iter().enumerate() {
                 let local_n = normals.and_then(|n| n.get(i)).copied().unwrap_or(Vec3::Y);
-                let uv = uvs.and_then(|u| u.get(i)).copied().unwrap_or(glamx::Vec2::ZERO);
+                let uv = uvs
+                    .and_then(|u| u.get(i))
+                    .copied()
+                    .unwrap_or(glamx::Vec2::ZERO);
                 out.mesh_vertices.push(RtVertex {
                     position: [local_pos.x, local_pos.y, local_pos.z],
                     u: uv.x,
@@ -594,7 +597,9 @@ fn hash_object(
     let color = odata.color();
     let emissive = odata.emissive();
     let tint = odata.specular_tint();
-    for c in [color.r, color.g, color.b, color.a, emissive.r, emissive.g, emissive.b] {
+    for c in [
+        color.r, color.g, color.b, color.a, emissive.r, emissive.g, emissive.b,
+    ] {
         h.write_f32(c);
     }
     // Path-tracer BSDF fields: a change must trigger a GPU rebuild (and reset).
@@ -608,7 +613,8 @@ fn hash_object(
     h.write_f32(odata.subsurface_radius());
     // Texture-map presence (pointers) so attaching/detaching a map rebuilds.
     let tex_id = |t: Option<&std::sync::Arc<crate::resource::Texture>>| -> u32 {
-        t.map(|a| std::sync::Arc::as_ptr(a) as usize as u32).unwrap_or(0)
+        t.map(|a| std::sync::Arc::as_ptr(a) as usize as u32)
+            .unwrap_or(0)
     };
     h.write_u32(std::sync::Arc::as_ptr(odata.texture()) as usize as u32);
     h.write_u32(tex_id(odata.normal_map()));
@@ -643,9 +649,17 @@ fn collected_to_rt(cl: &CollectedLight) -> RtLight {
     };
 
     RtLight {
-        position: [cl.world_position.x, cl.world_position.y, cl.world_position.z],
+        position: [
+            cl.world_position.x,
+            cl.world_position.y,
+            cl.world_position.z,
+        ],
         light_type,
-        direction: [cl.world_direction.x, cl.world_direction.y, cl.world_direction.z],
+        direction: [
+            cl.world_direction.x,
+            cl.world_direction.y,
+            cl.world_direction.z,
+        ],
         intensity: cl.intensity,
         color: [cl.color.x, cl.color.y, cl.color.z],
         attenuation_radius,

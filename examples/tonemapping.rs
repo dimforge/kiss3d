@@ -120,11 +120,18 @@ async fn main() {
                     ui.radio_value(&mut tonemap, Tonemap::Aces, "ACES");
                     ui.radio_value(&mut tonemap, Tonemap::Reinhard, "Reinhard");
                     ui.radio_value(&mut tonemap, Tonemap::AgX, "AgX  (neutral filmic)");
-                    ui.radio_value(&mut tonemap, Tonemap::Neutral, "Khronos PBR Neutral (default)");
+                    ui.radio_value(
+                        &mut tonemap,
+                        Tonemap::Neutral,
+                        "Khronos PBR Neutral (default)",
+                    );
                     ui.radio_value(&mut tonemap, Tonemap::TonyMcMapface, "Tony McMapface (LUT)");
                     ui.separator();
                     ui.add(egui::Slider::new(&mut exposure, 0.1..=4.0).text("Exposure"));
-                    ui.add_enabled(!pathtrace, egui::Checkbox::new(&mut bloom, "Bloom (rasterizer only)"));
+                    ui.add_enabled(
+                        !pathtrace,
+                        egui::Checkbox::new(&mut bloom, "Bloom (rasterizer only)"),
+                    );
                 });
         });
     }

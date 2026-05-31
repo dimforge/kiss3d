@@ -24,7 +24,9 @@ async fn main() {
     cube.apply_to_object_mut(&mut |o| o.set_segmentation_id(1));
 
     let mut sphere = scene.add_sphere(0.2);
-    sphere.set_color(LIME).set_position(Vec3::new(0.5, 0.0, 0.0));
+    sphere
+        .set_color(LIME)
+        .set_position(Vec3::new(0.5, 0.0, 0.0));
     sphere.apply_to_object_mut(&mut |o| o.set_segmentation_id(2));
 
     // Beauty pass (regular RGB), unchanged from normal rendering.

@@ -203,7 +203,12 @@ pub struct HdrPipeline {
 impl HdrPipeline {
     /// Creates the HDR pipeline for the given size, sample count and output
     /// (LDR) format.
-    pub fn new(width: u32, height: u32, sample_count: u32, output_format: wgpu::TextureFormat) -> Self {
+    pub fn new(
+        width: u32,
+        height: u32,
+        sample_count: u32,
+        output_format: wgpu::TextureFormat,
+    ) -> Self {
         let ctxt = Context::get();
 
         let sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
@@ -265,12 +270,11 @@ impl HdrPipeline {
             }],
         };
 
-        let bloom_pipeline_layout =
-            ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("hdr_bloom_pipeline_layout"),
-                bind_group_layouts: &[Some(&bloom_layout)],
-                immediate_size: 0,
-            });
+        let bloom_pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hdr_bloom_pipeline_layout"),
+            bind_group_layouts: &[Some(&bloom_layout)],
+            immediate_size: 0,
+        });
 
         let make_bloom_pipeline = |label: &str, fs_entry: &str, blend: Option<wgpu::BlendState>| {
             ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -313,7 +317,8 @@ impl HdrPipeline {
         };
 
         let prefilter_pipeline = make_bloom_pipeline("hdr_bloom_prefilter", "fs_prefilter", None);
-        let downsample_pipeline = make_bloom_pipeline("hdr_bloom_downsample", "fs_downsample", None);
+        let downsample_pipeline =
+            make_bloom_pipeline("hdr_bloom_downsample", "fs_downsample", None);
         // The upsample pass additively blends into the larger mip.
         let upsample_pipeline = make_bloom_pipeline(
             "hdr_bloom_upsample",
@@ -549,10 +554,18 @@ impl HdrPipeline {
         });
 
         let vertices = [
-            QuadVertex { position: [-1.0, -1.0] },
-            QuadVertex { position: [1.0, -1.0] },
-            QuadVertex { position: [-1.0, 1.0] },
-            QuadVertex { position: [1.0, 1.0] },
+            QuadVertex {
+                position: [-1.0, -1.0],
+            },
+            QuadVertex {
+                position: [1.0, -1.0],
+            },
+            QuadVertex {
+                position: [-1.0, 1.0],
+            },
+            QuadVertex {
+                position: [1.0, 1.0],
+            },
         ];
         let vertex_buffer = ctxt.create_buffer_init(
             Some("hdr_vertex_buffer"),
@@ -739,7 +752,8 @@ impl HdrPipeline {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());

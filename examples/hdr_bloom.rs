@@ -34,12 +34,7 @@ async fn main() {
         sphere.translate(Vec3::new(x, 0.0, 0.0));
         // Warm emissive color scaled past 1.0 for the bright ones.
         sphere.set_color(Color::new(0.02, 0.02, 0.02, 1.0));
-        sphere.set_emissive(Color::new(
-            intensity,
-            intensity * 0.7,
-            intensity * 0.3,
-            1.0,
-        ));
+        sphere.set_emissive(Color::new(intensity, intensity * 0.7, intensity * 0.3, 1.0));
     }
 
     // A non-emissive floor so the lit, sub-1.0 part of the image is visible too.

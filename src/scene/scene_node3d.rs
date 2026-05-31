@@ -316,8 +316,9 @@ impl SceneNodeData3d {
                         let rot = self.world_transform.rotation;
                         let tra = self.world_transform.translation;
                         for i in 0..count {
-                            let inst_tra =
-                                positions.and_then(|p| p.get(i).copied()).unwrap_or(Vec3::ZERO);
+                            let inst_tra = positions
+                                .and_then(|p| p.get(i).copied())
+                                .unwrap_or(Vec3::ZERO);
                             let def = match deformations {
                                 Some(d) if d.len() >= 3 * i + 3 => {
                                     Mat3::from_cols(d[3 * i], d[3 * i + 1], d[3 * i + 2])

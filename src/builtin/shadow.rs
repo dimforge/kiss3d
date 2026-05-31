@@ -231,9 +231,10 @@ impl ShadowMapper {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: std::num::NonZeroU64::new(
-                            std::mem::size_of::<ShadowViewUniforms>() as u64,
-                        ),
+                        min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<
+                            ShadowViewUniforms,
+                        >()
+                            as u64),
                     },
                     count: None,
                 }],
@@ -248,19 +249,17 @@ impl ShadowMapper {
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
-                        min_binding_size: std::num::NonZeroU64::new(
-                            std::mem::size_of::<ShadowModelUniforms>() as u64,
-                        ),
+                        min_binding_size: std::num::NonZeroU64::new(std::mem::size_of::<
+                            ShadowModelUniforms,
+                        >()
+                            as u64),
                     },
                     count: None,
                 }],
             });
 
-        let depth_pipeline = Self::create_depth_pipeline(
-            &ctxt,
-            &view_bind_group_layout,
-            &model_bind_group_layout,
-        );
+        let depth_pipeline =
+            Self::create_depth_pipeline(&ctxt, &view_bind_group_layout, &model_bind_group_layout);
 
         let view_capacity = MAX_SHADOW_VIEWS as u64;
         let view_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
@@ -406,15 +405,14 @@ impl ShadowMapper {
         view_bind_group_layout: &wgpu::BindGroupLayout,
         model_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> wgpu::RenderPipeline {
-        let shader =
-            ctxt.create_shader_module(Some("shadow_depth_shader"), include_str!("shadow_depth.wgsl"));
+        let shader = ctxt.create_shader_module(
+            Some("shadow_depth_shader"),
+            include_str!("shadow_depth.wgsl"),
+        );
 
         let layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("shadow_depth_pipeline_layout"),
-            bind_group_layouts: &[
-                Some(view_bind_group_layout),
-                Some(model_bind_group_layout),
-            ],
+            bind_group_layouts: &[Some(view_bind_group_layout), Some(model_bind_group_layout)],
             immediate_size: 0,
         });
 
@@ -703,9 +701,7 @@ impl ShadowMapper {
                         view_proj: vp,
                     });
                 }
-                LightType::Point {
-                    attenuation_radius,
-                } => {
+                LightType::Point { attenuation_radius } => {
                     light_type = 0;
                     far_plane = attenuation_radius.max(1.0);
                     // Six perspective views unrolling a cube map: +X,-X,+Y,-Y,+Z,-Z.

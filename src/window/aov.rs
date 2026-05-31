@@ -29,7 +29,11 @@ impl Window {
     ///
     /// Use [`depth_to_luma8`](Self::depth_to_luma8) to turn this into a
     /// normalized 8-bit grayscale image for visualization or saving as PNG.
-    pub fn snap_depth_raw(&mut self, scene: &mut SceneNode3d, camera: &mut dyn Camera3d) -> Vec<f32> {
+    pub fn snap_depth_raw(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut dyn Camera3d,
+    ) -> Vec<f32> {
         self.render_aov::<f32>(AovKind::Depth, scene, camera, 1)
     }
 
@@ -130,7 +134,11 @@ impl Window {
 
     /// Linearly normalizes a raw linear-depth buffer into an 8-bit grayscale
     /// image (nearest surface brightest, background black).
-    pub fn depth_to_luma8(depth: &[f32], width: u32, height: u32) -> ImageBuffer<Luma<u8>, Vec<u8>> {
+    pub fn depth_to_luma8(
+        depth: &[f32],
+        width: u32,
+        height: u32,
+    ) -> ImageBuffer<Luma<u8>, Vec<u8>> {
         // Find the finite, non-background depth range.
         let mut min = f32::INFINITY;
         let mut max = f32::NEG_INFINITY;

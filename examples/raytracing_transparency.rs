@@ -97,5 +97,8 @@ async fn main() {
     // the paths plenty of room to reach the background through stacked surfaces.
     raytracer.set_max_bounces(16);
 
-    while window.render_raytraced(&mut scene, &mut camera, &mut raytracer).await {}
+    while window
+        .render_raytraced(&mut scene, &mut camera, &mut raytracer)
+        .await
+    {}
 }

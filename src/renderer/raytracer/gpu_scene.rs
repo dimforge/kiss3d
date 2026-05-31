@@ -67,7 +67,11 @@ pub struct GpuScene {
 
 /// Uploads a slice as a buffer with the given usage, padding empty slices to one
 /// element so the buffer is always bindable.
-fn buffer_from<T: Pod + Zeroable>(label: &str, data: &[T], usage: wgpu::BufferUsages) -> wgpu::Buffer {
+fn buffer_from<T: Pod + Zeroable>(
+    label: &str,
+    data: &[T],
+    usage: wgpu::BufferUsages,
+) -> wgpu::Buffer {
     let ctxt = Context::get();
     let fallback = [T::zeroed()];
     let slice = if data.is_empty() { &fallback[..] } else { data };
@@ -128,7 +132,8 @@ impl GpuScene {
         let mut ordered_tris: Vec<RtTriangle> = Vec::new();
         let mut mesh_descs: Vec<RtMeshDesc> = Vec::with_capacity(scene.mesh_ranges.len());
         for r in &scene.mesh_ranges {
-            let tris = &scene.mesh_triangles[r.tri_start as usize..(r.tri_start + r.tri_count) as usize];
+            let tris =
+                &scene.mesh_triangles[r.tri_start as usize..(r.tri_start + r.tri_count) as usize];
             let (nodes, ordered) = bvh::build(&scene.mesh_vertices, tris);
             mesh_descs.push(RtMeshDesc {
                 node_offset: blas_nodes.len() as u32,
@@ -176,17 +181,41 @@ impl GpuScene {
             .collect();
 
         GpuScene {
-            vertices: buffer_from::<RtVertex>("rt_mesh_vertices", &scene.mesh_vertices, wgpu::BufferUsages::STORAGE),
-            triangles: buffer_from::<RtTriangle>("rt_mesh_triangles", &ordered_tris, wgpu::BufferUsages::STORAGE),
-            materials: buffer_from::<RtMaterial>("rt_materials", &scene.materials, wgpu::BufferUsages::STORAGE),
+            vertices: buffer_from::<RtVertex>(
+                "rt_mesh_vertices",
+                &scene.mesh_vertices,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            triangles: buffer_from::<RtTriangle>(
+                "rt_mesh_triangles",
+                &ordered_tris,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            materials: buffer_from::<RtMaterial>(
+                "rt_materials",
+                &scene.materials,
+                wgpu::BufferUsages::STORAGE,
+            ),
             lights: buffer_from::<RtLight>("rt_lights", &scene.lights, wgpu::BufferUsages::STORAGE),
-            emitters: buffer_from::<RtEmitter>("rt_emitters", &scene.emitters, wgpu::BufferUsages::STORAGE),
+            emitters: buffer_from::<RtEmitter>(
+                "rt_emitters",
+                &scene.emitters,
+                wgpu::BufferUsages::STORAGE,
+            ),
             bvh: buffer_from::<BvhNode>("rt_bvh", &bvh_nodes, wgpu::BufferUsages::STORAGE),
             // The compute backend inlines the per-mesh node/tri bases into instances
             // and does not bind this buffer; it is kept only for the hardware backend.
             #[cfg(feature = "hw_raytracer")]
-            meshes: buffer_from::<RtMeshDesc>("rt_meshes", &mesh_descs, wgpu::BufferUsages::STORAGE),
-            instances: buffer_from::<RtInstance>("rt_instances", &instances, wgpu::BufferUsages::STORAGE),
+            meshes: buffer_from::<RtMeshDesc>(
+                "rt_meshes",
+                &mesh_descs,
+                wgpu::BufferUsages::STORAGE,
+            ),
+            instances: buffer_from::<RtInstance>(
+                "rt_instances",
+                &instances,
+                wgpu::BufferUsages::STORAGE,
+            ),
             tex_array: TexArray::build(&scene.textures),
             num_triangles: scene.mesh_triangles.len() as u32,
             num_lights: scene.lights.len() as u32,
@@ -226,7 +255,11 @@ impl GpuScene {
         let mesh_descs: Vec<RtMeshDesc> = scene
             .mesh_ranges
             .iter()
-            .map(|r| RtMeshDesc { node_offset: 0, tri_offset: r.tri_start, _pad: [0; 2] })
+            .map(|r| RtMeshDesc {
+                node_offset: 0,
+                tri_offset: r.tri_start,
+                _pad: [0; 2],
+            })
             .collect();
         // BLAS index buffer: every mesh triangle's 3 vertex indices (global into
         // `verts`), concatenated in gather order. Each mesh's BLAS reads its own
@@ -236,7 +269,11 @@ impl GpuScene {
             .iter()
             .flat_map(|t| [t.v0, t.v1, t.v2])
             .collect();
-        let indices = if indices.is_empty() { vec![0u32, 0, 0] } else { indices };
+        let indices = if indices.is_empty() {
+            vec![0u32, 0, 0]
+        } else {
+            indices
+        };
         let vertex_count = verts.len() as u32;
 
         let vertices = buffer_from::<RtVertex>(
@@ -249,16 +286,35 @@ impl GpuScene {
             &indices,
             wgpu::BufferUsages::INDEX | wgpu::BufferUsages::BLAS_INPUT,
         );
-        let triangles = buffer_from::<RtTriangle>("rt_mesh_triangles", &scene.mesh_triangles, wgpu::BufferUsages::STORAGE);
-        let materials = buffer_from::<RtMaterial>("rt_materials", &scene.materials, wgpu::BufferUsages::STORAGE);
-        let lights = buffer_from::<RtLight>("rt_lights", &scene.lights, wgpu::BufferUsages::STORAGE);
-        let emitters = buffer_from::<RtEmitter>("rt_emitters", &scene.emitters, wgpu::BufferUsages::STORAGE);
-        let meshes = buffer_from::<RtMeshDesc>("rt_meshes", &mesh_descs, wgpu::BufferUsages::STORAGE);
-        let instances_buf = buffer_from::<RtInstance>("rt_instances", &scene.instances, wgpu::BufferUsages::STORAGE);
+        let triangles = buffer_from::<RtTriangle>(
+            "rt_mesh_triangles",
+            &scene.mesh_triangles,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let materials = buffer_from::<RtMaterial>(
+            "rt_materials",
+            &scene.materials,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let lights =
+            buffer_from::<RtLight>("rt_lights", &scene.lights, wgpu::BufferUsages::STORAGE);
+        let emitters =
+            buffer_from::<RtEmitter>("rt_emitters", &scene.emitters, wgpu::BufferUsages::STORAGE);
+        let meshes =
+            buffer_from::<RtMeshDesc>("rt_meshes", &mesh_descs, wgpu::BufferUsages::STORAGE);
+        let instances_buf = buffer_from::<RtInstance>(
+            "rt_instances",
+            &scene.instances,
+            wgpu::BufferUsages::STORAGE,
+        );
         let tex_array = TexArray::build(&scene.textures);
         // Unused by the hardware pipeline (it traverses the TLAS/BLAS objects), but
         // the storage-buffer fields are always present.
-        let bvh = buffer_from::<BvhNode>("rt_bvh_unused", &[BvhNode::default()], wgpu::BufferUsages::STORAGE);
+        let bvh = buffer_from::<BvhNode>(
+            "rt_bvh_unused",
+            &[BvhNode::default()],
+            wgpu::BufferUsages::STORAGE,
+        );
 
         // One BLAS per mesh. A mesh with `tri_count` triangles reads index range
         // [tri_start*3, (tri_start+tri_count)*3) from the shared index buffer.
@@ -300,7 +356,9 @@ impl GpuScene {
                         flags: AccelerationStructureFlags::PREFER_FAST_TRACE,
                         update_mode: AccelerationStructureUpdateMode::Build,
                     },
-                    BlasGeometrySizeDescriptors::Triangles { descriptors: vec![sz.clone()] },
+                    BlasGeometrySizeDescriptors::Triangles {
+                        descriptors: vec![sz.clone()],
+                    },
                 )
             })
             .collect();
@@ -319,7 +377,12 @@ impl GpuScene {
         } else {
             for (i, inst) in scene.instances.iter().enumerate() {
                 let blas = &blases[inst.mesh_id as usize];
-                tlas[i] = Some(TlasInstance::new(blas, transform_3x4(&inst.object_to_world), i as u32, 0xFF));
+                tlas[i] = Some(TlasInstance::new(
+                    blas,
+                    transform_3x4(&inst.object_to_world),
+                    i as u32,
+                    0xFF,
+                ));
             }
         }
 

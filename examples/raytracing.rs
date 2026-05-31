@@ -89,7 +89,10 @@ async fn main() {
         RayBackend::Hardware => println!("Path tracer backend: hardware ray queries"),
     }
 
-    while window.render_raytraced(&mut scene, &mut camera, &mut raytracer).await {
+    while window
+        .render_raytraced(&mut scene, &mut camera, &mut raytracer)
+        .await
+    {
         window.draw_text(
             &format!("Samples: {}", raytracer.samples_accumulated()),
             Vec2::new(10.0, 10.0),

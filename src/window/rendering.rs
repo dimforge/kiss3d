@@ -634,7 +634,11 @@ impl Window {
         camera.handle_event(&self.canvas, &WindowEvent::FramebufferSize(w, h));
         camera.update(&self.canvas);
 
-        let sample_count = if offscreen { 1 } else { self.canvas.sample_count() };
+        let sample_count = if offscreen {
+            1
+        } else {
+            self.canvas.sample_count()
+        };
 
         let ctxt = Context::get();
         let mut encoder = ctxt.create_command_encoder(Some("kiss3d_raytrace_encoder"));
@@ -671,7 +675,16 @@ impl Window {
         let mut lights = LightCollection::with_ambient(self.ambient_intensity);
         scene.data_mut().prepare(0, camera, &mut lights, w, h);
 
-        raytracer.render_frame(scene, camera, &lights, self.background, &mut encoder, &frame_view, w, h);
+        raytracer.render_frame(
+            scene,
+            camera,
+            &lights,
+            self.background,
+            &mut encoder,
+            &frame_view,
+            w,
+            h,
+        );
 
         // Render text on top of the path-traced image.
         {

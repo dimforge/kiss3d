@@ -150,7 +150,11 @@ impl OffscreenSurface {
     /// Renders the scene and returns per-pixel linear, eye-space depth (in world
     /// units), row-major with a top-left origin. Background pixels read back as
     /// `0.0`. See [`Window::snap_depth_raw`].
-    pub fn snap_depth_raw(&mut self, scene: &mut SceneNode3d, camera: &mut impl Camera3d) -> Vec<f32> {
+    pub fn snap_depth_raw(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+    ) -> Vec<f32> {
         self.window.snap_depth_raw(scene, camera)
     }
 

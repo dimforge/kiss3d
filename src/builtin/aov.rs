@@ -306,8 +306,10 @@ impl AovRenderer {
         Self::gather(scene, &mut self.object_uniform_buffer, &mut draws);
 
         if self.object_uniform_buffer.flush() {
-            self.object_bind_group =
-                Self::make_object_bind_group(&self.object_bind_group_layout, &self.object_uniform_buffer);
+            self.object_bind_group = Self::make_object_bind_group(
+                &self.object_bind_group_layout,
+                &self.object_uniform_buffer,
+            );
         }
 
         // Depth and segmentation are integer/scalar; clear depth color to 0

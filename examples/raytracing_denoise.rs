@@ -63,42 +63,18 @@ fn build_scene(scene: &mut SceneNode3d) {
 
 #[kiss3d::main]
 async fn main() {
-    env_logger::init();
-
-    let mut surface = OffscreenSurface::new(800, 600).await;
-    surface.set_background_color(BLACK);
-
+    let mut window = Window::new("Kiss3d: ray tracing denoise").await;
     let mut camera = OrbitCamera3d::new(Vec3::new(0.0, 1.0, 6.0), Vec3::new(0.0, 1.0, 0.0));
-
-    // A low sample count on purpose: the raw image stays noisy so the denoiser's
-    // effect is obvious.
-    let samples = 16;
-
-    // 1) Noisy reference: denoiser off (the default).
     let mut scene = SceneNode3d::empty();
     build_scene(&mut scene);
-    let mut raytracer = RayTracer::new();
-    raytracer.set_max_bounces(8);
-    let noisy = surface
-        .render_image_raytraced(&mut scene, &mut camera, &mut raytracer, samples)
-        .await;
-    noisy.save(Path::new("raytraced_noisy.png")).unwrap();
 
-    // 2) Denoised: same scene, same sample count, à-trous denoiser enabled.
-    let mut scene = SceneNode3d::empty();
-    build_scene(&mut scene);
     let mut raytracer = RayTracer::new();
     raytracer.set_max_bounces(8);
     raytracer.set_denoise(true);
     raytracer.set_denoise_iterations(5);
-    let denoised = surface
-        .render_image_raytraced(&mut scene, &mut camera, &mut raytracer, samples)
-        .await;
-    denoised.save(Path::new("raytraced_denoised.png")).unwrap();
 
-    println!(
-        "Rendered {} samples to `raytraced_noisy.png` and `raytraced_denoised.png` ({:?})",
-        samples,
-        surface.size()
-    );
+    while window
+        .render_raytraced(&mut scene, &mut camera, &mut raytracer)
+        .await
+    {}
 }

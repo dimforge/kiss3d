@@ -151,10 +151,18 @@ impl Tonemap {
         });
 
         let vertices = [
-            QuadVertex { position: [-1.0, -1.0] },
-            QuadVertex { position: [1.0, -1.0] },
-            QuadVertex { position: [-1.0, 1.0] },
-            QuadVertex { position: [1.0, 1.0] },
+            QuadVertex {
+                position: [-1.0, -1.0],
+            },
+            QuadVertex {
+                position: [1.0, -1.0],
+            },
+            QuadVertex {
+                position: [-1.0, 1.0],
+            },
+            QuadVertex {
+                position: [1.0, 1.0],
+            },
         ];
         let vertex_buffer = ctxt.create_buffer_init(
             Some("rt_tonemap_vertex_buffer"),

@@ -15,10 +15,10 @@ use crate::post_processing::{HdrPipeline, HdrSettings, Tonemap};
 use crate::renderer::{
     PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d, RayTracer,
 };
-use crate::scene::SceneNode3d;
 use crate::resource::{
     FramebufferManager, MaterialManager2d, MeshManager2d, RenderTarget, Texture, TextureManager,
 };
+use crate::scene::SceneNode3d;
 use crate::text::TextRenderer;
 use crate::window::canvas::CanvasSetup;
 use crate::window::Canvas;

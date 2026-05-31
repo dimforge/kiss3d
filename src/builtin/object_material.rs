@@ -708,7 +708,8 @@ impl ObjectMaterial {
         };
         let oit_pipeline_cull =
             create_oit_pipeline(Some(wgpu::Face::Back), "object_material_oit_pipeline_cull");
-        let oit_pipeline_no_cull = create_oit_pipeline(None, "object_material_oit_pipeline_no_cull");
+        let oit_pipeline_no_cull =
+            create_oit_pipeline(None, "object_material_oit_pipeline_no_cull");
 
         // Create wireframe shader and pipelines for lines/points
         // Note: _wireframe_shader, _wireframe_pipeline_layout, and _wireframe_vertex_buffer_layouts
