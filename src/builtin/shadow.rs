@@ -593,7 +593,7 @@ impl ShadowMapper {
     ///
     /// For every shadow-casting light this assigns a run of atlas layers, computes
     /// the light-space matrices, renders the scene depth into those layers with the
-    /// depth-only pipeline, and writes [`ShadowUniforms`] for the lighting shader.
+    /// depth-only pipeline, and writes `ShadowUniforms` for the lighting shader.
     ///
     /// When shadows are disabled or no light casts shadows this still writes a
     /// uniform with `shadows_enabled = 0`, so the lighting shader behaves exactly

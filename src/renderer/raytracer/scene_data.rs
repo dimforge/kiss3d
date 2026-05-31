@@ -192,7 +192,7 @@ pub struct RtMeshDesc {
 }
 
 /// CPU-side per-mesh ranges produced by [`gather`] and consumed by
-/// [`super::gpu_scene`] to build each mesh's bottom-level BVH.
+/// `gpu_scene` to build each mesh's bottom-level BVH.
 #[derive(Copy, Clone, Debug, Default)]
 pub struct RtMeshRange {
     /// First vertex of this mesh in `mesh_vertices`.
@@ -230,7 +230,7 @@ pub struct RtScene {
     /// Emissive triangles baked into world space, for next-event estimation toward
     /// area lights (built per emissive instance in [`gather`]).
     pub emitters: Vec<RtEmitter>,
-    /// Source GPU textures, one per material-array layer, that [`super::gpu_scene`]
+    /// Source GPU textures, one per material-array layer, that `gpu_scene`
     /// blits into the path tracer's `texture_2d_array`. Layer index matches the
     /// `*_tex` fields of [`RtMaterial`].
     pub textures: Vec<std::sync::Arc<crate::resource::Texture>>,

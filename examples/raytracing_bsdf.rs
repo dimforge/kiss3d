@@ -9,7 +9,6 @@
 use kiss3d::prelude::*;
 use kiss3d::renderer::RayTracer;
 use std::path::Path;
-use std::time::Instant;
 
 #[kiss3d::main]
 async fn main() {

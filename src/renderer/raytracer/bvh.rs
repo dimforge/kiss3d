@@ -173,9 +173,9 @@ fn build_recursive(
         for &i in &indices[start..end] {
             let b = (((centroids[i as usize][axis] - lo) * scale) as usize).min(NUM_BINS - 1);
             bin_count[b] += 1;
-            let (tlo, thi) = bounds[i as usize];
-            bin_min[b] = bin_min[b].min(tlo);
-            bin_max[b] = bin_max[b].max(thi);
+            let (t_lo, t_hi) = bounds[i as usize];
+            bin_min[b] = bin_min[b].min(t_lo);
+            bin_max[b] = bin_max[b].max(t_hi);
         }
 
         // Prefix (left) and suffix (right) sweeps over the NUM_BINS-1 planes.

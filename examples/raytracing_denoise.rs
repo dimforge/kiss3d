@@ -8,7 +8,6 @@
 
 use kiss3d::prelude::*;
 use kiss3d::renderer::RayTracer;
-use std::path::Path;
 
 /// Builds the demo scene (a small Cornell box with two spheres and a ceiling
 /// light) into `scene`.

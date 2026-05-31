@@ -1003,7 +1003,7 @@ impl HdrPipeline {
     /// Runs the full HDR resolve: optional bloom, then the tonemap+composite pass
     /// that writes the LDR result into `output_view`.
     ///
-    /// The scene must already have been rendered into [`scene_render_view`] (and,
+    /// The scene must already have been rendered into `scene_render_view` (and,
     /// if MSAA is active, resolved into the single-sample scene texture by the
     /// scene render pass's `resolve_target`).
     pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder, output_view: &wgpu::TextureView) {

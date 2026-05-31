@@ -6,8 +6,7 @@ use crate::light::LightCollection;
 use crate::resource::vertex_index::{VertexIndex, VERTEX_INDEX_FORMAT};
 use crate::resource::{
     AllocationType, BufferType, GPUVec, GpuData, GpuMesh3d, Material3d, RenderContext, RenderPhase,
-    Texture,
-    TextureManager,
+    Texture, TextureManager,
 };
 use glamx::{Mat3, Pose3, Vec2, Vec3};
 use std::any::Any;

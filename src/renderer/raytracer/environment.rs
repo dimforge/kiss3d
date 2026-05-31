@@ -48,7 +48,7 @@ impl Environment {
         let ctxt = Context::get();
 
         // Convert f32 -> f16 bits for upload.
-        let halfs: Vec<u16> = rgba.iter().map(|&v| f32_to_f16(v)).collect();
+        let halves: Vec<u16> = rgba.iter().map(|&v| f32_to_f16(v)).collect();
 
         let texture = ctxt.create_texture(&wgpu::TextureDescriptor {
             label: Some("rt_environment"),
@@ -72,7 +72,7 @@ impl Environment {
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
             },
-            bytemuck::cast_slice(&halfs),
+            bytemuck::cast_slice(&halves),
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 bytes_per_row: Some(width * 8), // 4 channels * 2 bytes
