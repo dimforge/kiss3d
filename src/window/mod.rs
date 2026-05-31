@@ -1,5 +1,6 @@
 //! The window, and things to handle the rendering loop and events.
 
+mod aov;
 mod canvas;
 mod drawing;
 #[cfg(feature = "egui")]
