@@ -43,12 +43,17 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let uv = in.uv;
     let inv = u.inv_resolution;
 
-    let rgb_m = textureSample(t_color, s_color, uv).rgb;
+    // Use `textureSampleLevel` (explicit LOD 0), not `textureSample`: the latter
+    // computes implicit derivatives and so is only valid in uniform control flow,
+    // but the early `return` below makes the later taps non-uniform. WebGPU (Tint)
+    // rejects that as a uniformity violation even though native naga tolerates it.
+    // The post-process target has no mips, so LOD 0 is exactly equivalent.
+    let rgb_m = textureSampleLevel(t_color, s_color, uv, 0.0).rgb;
     let l_m = luma(rgb_m);
-    let l_nw = luma(textureSample(t_color, s_color, uv + vec2<f32>(-inv.x, -inv.y)).rgb);
-    let l_ne = luma(textureSample(t_color, s_color, uv + vec2<f32>(inv.x, -inv.y)).rgb);
-    let l_sw = luma(textureSample(t_color, s_color, uv + vec2<f32>(-inv.x, inv.y)).rgb);
-    let l_se = luma(textureSample(t_color, s_color, uv + vec2<f32>(inv.x, inv.y)).rgb);
+    let l_nw = luma(textureSampleLevel(t_color, s_color, uv + vec2<f32>(-inv.x, -inv.y), 0.0).rgb);
+    let l_ne = luma(textureSampleLevel(t_color, s_color, uv + vec2<f32>(inv.x, -inv.y), 0.0).rgb);
+    let l_sw = luma(textureSampleLevel(t_color, s_color, uv + vec2<f32>(-inv.x, inv.y), 0.0).rgb);
+    let l_se = luma(textureSampleLevel(t_color, s_color, uv + vec2<f32>(inv.x, inv.y), 0.0).rgb);
 
     let range_min = min(l_m, min(min(l_nw, l_ne), min(l_sw, l_se)));
     let range_max = max(l_m, max(max(l_nw, l_ne), max(l_sw, l_se)));
@@ -69,12 +74,12 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     dir = clamp(dir * rcp_dir_min, vec2<f32>(-SPAN_MAX), vec2<f32>(SPAN_MAX)) * inv;
 
     let rgb_a = 0.5 * (
-        textureSample(t_color, s_color, uv + dir * (1.0 / 3.0 - 0.5)).rgb
-        + textureSample(t_color, s_color, uv + dir * (2.0 / 3.0 - 0.5)).rgb
+        textureSampleLevel(t_color, s_color, uv + dir * (1.0 / 3.0 - 0.5), 0.0).rgb
+        + textureSampleLevel(t_color, s_color, uv + dir * (2.0 / 3.0 - 0.5), 0.0).rgb
     );
     let rgb_b = rgb_a * 0.5 + 0.25 * (
-        textureSample(t_color, s_color, uv + dir * -0.5).rgb
-        + textureSample(t_color, s_color, uv + dir * 0.5).rgb
+        textureSampleLevel(t_color, s_color, uv + dir * -0.5, 0.0).rgb
+        + textureSampleLevel(t_color, s_color, uv + dir * 0.5, 0.0).rgb
     );
 
     let l_b = luma(rgb_b);

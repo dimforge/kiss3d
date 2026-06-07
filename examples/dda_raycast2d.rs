@@ -1,6 +1,9 @@
 use std::collections::HashSet;
 
 use kiss3d::prelude::*;
+// `web_time::Instant` is `std::time::Instant` on native but a working shim on
+// wasm, where the std `Instant::now()` panics ("time not implemented").
+use web_time::Instant;
 
 const SCREEN_WIDTH: u32 = 1024;
 const SCREEN_HEIGHT: u32 = 768;
@@ -28,9 +31,9 @@ async fn main() {
     let mut mouse_pos = Vec2::ZERO;
 
     // timing
-    let mut last_time = std::time::Instant::now();
+    let mut last_time = Instant::now();
     let mut frame_count = 0;
-    let mut fps_timer = std::time::Instant::now();
+    let mut fps_timer = Instant::now();
     let mut fps = 0.0;
 
     // window, cam, scene setup
@@ -89,7 +92,7 @@ async fn main() {
         .set_instances(&circle_instances);
 
     while window.render_2d(&mut scene, &mut camera).await {
-        let now = std::time::Instant::now();
+        let now = Instant::now();
         let dt = now.duration_since(last_time).as_secs_f32();
         last_time = now;
 

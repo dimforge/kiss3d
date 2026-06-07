@@ -1,7 +1,9 @@
 use kiss3d::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
-use std::time::Instant;
+// `web_time::Instant` is `std::time::Instant` on native but a working shim on
+// wasm, where `std::time::Instant::now()` panics ("time not implemented").
+use web_time::Instant;
 
 #[kiss3d::main]
 async fn main() {
