@@ -4,8 +4,13 @@ import styles from './examples.module.css';
 
 // Example categories and files
 const examples = {
-  '2D': [
+  'Basics': [
+    { name: 'cube', title: 'Cube', description: 'Simple rotating cube' },
+    { name: 'group', title: 'Groups', description: 'Hierarchical transforms' },
+    { name: 'camera_modes', title: 'Camera Modes', description: 'Orbit, first-person & more' },
     { name: 'window', title: 'Window', description: 'Basic window creation' },
+  ],
+  '2D': [
     { name: 'rectangle', title: 'Rectangle', description: '2D rectangle' },
     { name: 'primitives2d', title: 'Primitives 2D', description: '2D shapes rendering' },
     { name: 'lines2d', title: 'Lines 2D', description: '2D line rendering' },
@@ -13,10 +18,9 @@ const examples = {
     { name: 'polylines2d', title: 'Polylines 2D', description: '2D polylines' },
     { name: 'instancing2d', title: 'Instancing 2D', description: '2D instancing' },
     { name: 'mouse_events', title: 'Mouse Events', description: 'Mouse interaction' },
+    { name: 'dda_raycast2d', title: 'DDA Raycast', description: '2D grid ray casting' },
   ],
-  '3D': [
-    { name: 'ui', title: 'UI', description: 'Simple widgets' },
-    { name: 'cube', title: 'Cube', description: 'Simple rotating cube' },
+  'Geometry & Meshes': [
     { name: 'primitives', title: 'Primitives 3D', description: 'All 3D primitive shapes' },
     { name: 'primitives_scale', title: 'Scaled Primitives', description: 'Primitives with scaling' },
     { name: 'quad', title: 'Quad', description: 'Quad rendering' },
@@ -25,15 +29,53 @@ const examples = {
     { name: 'polylines', title: 'Polylines', description: 'Polyline physics simulation' },
     { name: 'polyline_strip', title: 'Polyline Strip', description: 'Connected polylines' },
     { name: 'wireframe', title: 'Wireframe', description: 'Wireframe rendering' },
-    { name: 'multi_light', title: 'Multiple Lights', description: 'Multiple light sources' },
     { name: 'custom_mesh', title: 'Custom Mesh', description: 'Custom geometry' },
     { name: 'custom_mesh_shared', title: 'Shared Mesh', description: 'Shared mesh instances' },
     { name: 'procedural', title: 'Procedural', description: 'Procedural mesh generation' },
-    { name: 'group', title: 'Groups', description: 'Hierarchical transforms' },
-    { name: 'post_processing', title: 'Post Processing', description: 'Visual effects' },
     { name: 'instancing3d', title: 'Instancing 3D', description: '3D instancing' },
+  ],
+  'Materials & Textures': [
+    { name: 'material_pbr', title: 'PBR Materials', description: 'Metallic/roughness PBR' },
+    { name: 'texturing', title: 'Texturing', description: 'Textured surfaces' },
+    { name: 'texturing_mipmaps', title: 'Mipmaps', description: 'Mipmapped textures' },
+    { name: 'parallax', title: 'Parallax Mapping', description: 'Parallax occlusion mapping' },
     { name: 'custom_material', title: 'Custom Material', description: 'Custom shaders' },
-  ]
+  ],
+  'Lighting & Shadows': [
+    { name: 'shadows', title: 'Shadows', description: 'Shadow mapping' },
+    { name: 'clustered_lights', title: 'Clustered Lights', description: 'Hundreds of point lights' },
+    { name: 'skybox', title: 'Skybox', description: 'Image-based lighting' },
+    { name: 'fog', title: 'Fog', description: 'Distance fog' },
+  ],
+  'Reflections & Refraction': [
+    { name: 'reflections', title: 'Reflections', description: 'Probes & screen-space reflections' },
+    { name: 'mirror', title: 'Mirror', description: 'Planar mirror reflector' },
+    { name: 'mirror_sphere', title: 'Mirror Sphere', description: 'Reflective sphere' },
+    { name: 'transmission', title: 'Transmission', description: 'Refractive glass' },
+    { name: 'transparency', title: 'Transparency', description: 'Order-independent blending' },
+  ],
+  'Post-processing': [
+    { name: 'post_processing', title: 'Post Processing', description: 'Visual effects pipeline' },
+    { name: 'hdr_bloom', title: 'HDR Bloom', description: 'HDR rendering with bloom' },
+    { name: 'tonemapping', title: 'Tone Mapping', description: 'HDR tone mapping operators' },
+    { name: 'color_grading', title: 'Color Grading', description: 'Color grading & LUTs' },
+    { name: 'antialiasing', title: 'Anti-aliasing', description: 'MSAA & FXAA' },
+    { name: 'depth_of_field', title: 'Depth of Field', description: 'Thin-lens bokeh blur' },
+  ],
+  'Ray Tracing': [
+    { name: 'raytracing', title: 'Path Tracing', description: 'Progressive GPU path tracer' },
+    { name: 'raytracing_bsdf', title: 'BSDF', description: 'Physically-based BSDF materials' },
+    { name: 'raytracing_denoise', title: 'Denoising', description: 'Path-traced denoiser' },
+    { name: 'raytracing_transparency', title: 'RT Transparency', description: 'Ray-traced transparency' },
+  ],
+  'Loading & Animation': [
+    { name: 'gltf', title: 'glTF', description: 'glTF/GLB loading & skeletal animation' },
+  ],
+  'UI & Tools': [
+    { name: 'ui', title: 'UI', description: 'Simple widgets' },
+    { name: 'inspector', title: 'Inspector', description: 'Scene inspector panel' },
+    { name: 'text', title: 'Text', description: 'Text rendering' },
+  ],
 };
 
 type Example = {

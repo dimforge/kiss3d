@@ -7,6 +7,7 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")"  # absolute path for xargs re-invocation
 WEBSITE_DIR="$(dirname "$SCRIPT_DIR")"
 KISS3D_DIR="$(dirname "$WEBSITE_DIR")"
 DEMOS_DIR="$WEBSITE_DIR/static/demos"
@@ -20,14 +21,21 @@ NC='\033[0m' # No Color
 
 # All examples to build (excluding ones that won't work in WASM or that are not interesting at all)
 EXAMPLES=(
+  # Basics
+  cube
+  group
+  camera_modes
   window
+  # 2D
   rectangle
   primitives2d
   lines2d
   points2d
   polylines2d
   instancing2d
-  cube
+  mouse_events
+  dda_raycast2d
+  # Geometry & meshes
   primitives
   primitives_scale
   quad
@@ -36,16 +44,45 @@ EXAMPLES=(
   polylines
   polyline_strip
   wireframe
-  multi_light
   custom_mesh
   custom_mesh_shared
   procedural
-  group
-  post_processing
-  mouse_events
   instancing3d
+  # Materials & textures
+  material_pbr
+  texturing
+  texturing_mipmaps
+  parallax
   custom_material
+  # Lighting & shadows
+  shadows
+  clustered_lights
+  skybox
+  fog
+  # Reflections & refraction
+  reflections
+  mirror
+  mirror_sphere
+  transmission
+  transparency
+  # Post-processing
+  post_processing
+  hdr_bloom
+  tonemapping
+  color_grading
+  antialiasing
+  depth_of_field
+  # Ray tracing
+  raytracing
+  raytracing_bsdf
+  raytracing_denoise
+  raytracing_transparency
+  # Loading & animation
+  gltf
+  # UI & tools
   ui
+  inspector
+  text
 )
 # Check for required tools
 check_requirements() {
@@ -72,24 +109,52 @@ check_requirements() {
     fi
 }
 
-build_example() {
+# Tunables (override via environment):
+#   JOBS=N            parallel post-processing jobs   (default: CPU cores)
+#   WASM_OPT_FLAGS=…  wasm-opt optimization flags      (default: -O3)
+#   SKIP_WASM_OPT=1   skip wasm-opt entirely (fast iteration; larger .wasm)
+#   FEATURES=…        cargo features                   (default: egui,rt_switcher)
+detect_cores() {
+    if command -v nproc &> /dev/null; then
+        nproc
+    elif command -v sysctl &> /dev/null; then
+        sysctl -n hw.logicalcpu 2>/dev/null || echo 4
+    else
+        echo 4
+    fi
+}
+JOBS="${JOBS:-$(detect_cores)}"
+WASM_OPT_FLAGS="${WASM_OPT_FLAGS:--O3}"
+FEATURES="${FEATURES:-egui,rt_switcher}"
+
+# Compile every example in a SINGLE cargo invocation. Cargo compiles the kiss3d
+# library once and parallelizes codegen of all the example crates across cores —
+# far faster than re-launching cargo once per example in a serial loop.
+cargo_build_all() {
+    local args=(build
+        --manifest-path "$KISS3D_DIR/Cargo.toml"
+        --target wasm32-unknown-unknown
+        --features "$FEATURES"
+        --release)
+    local e
+    for e in "$@"; do
+        args+=(--example "$e")
+    done
+    cargo "${args[@]}"
+}
+
+# Post-process one already-compiled example: wasm-bindgen + wasm-opt + index.html.
+# These steps are independent per example and CPU-bound, so they are run in
+# parallel across examples (see the xargs pool below).
+postprocess_example() {
     local example=$1
     local demo_dir="$DEMOS_DIR/$example"
     local target_dir="$KISS3D_DIR/target/wasm32-unknown-unknown/release/examples"
 
-    echo -e "${YELLOW}Building${NC} $example..."
-
-    # Create demo directory
     mkdir -p "$demo_dir/pkg"
 
-    # Build with cargo
-    if ! cargo build \
-        --manifest-path "$KISS3D_DIR/Cargo.toml" \
-        --example "$example" \
-        --target wasm32-unknown-unknown \
-        --features egui \
-        --release 2>&1; then
-        echo -e "${RED}✗${NC} $example (cargo build failed)"
+    if [ ! -f "$target_dir/$example.wasm" ]; then
+        echo -e "${RED}✗${NC} $example (no .wasm — cargo build failed?)"
         return 1
     fi
 
@@ -104,11 +169,19 @@ build_example() {
         return 1
     fi
 
-    # Optimize with wasm-opt if available
-    if command -v wasm-opt &> /dev/null; then
-        wasm-opt -O3 "$demo_dir/pkg/example_bg.wasm" -o "$demo_dir/pkg/example_bg.wasm" 2>/dev/null || true
+    # Optimize with wasm-opt if available (skippable for fast iteration)
+    if [ -z "$SKIP_WASM_OPT" ] && command -v wasm-opt &> /dev/null; then
+        wasm-opt $WASM_OPT_FLAGS "$demo_dir/pkg/example_bg.wasm" -o "$demo_dir/pkg/example_bg.wasm" 2>/dev/null || true
     fi
 
+    write_index_html "$demo_dir"
+
+    echo -e "${GREEN}✓${NC} $example"
+    return 0
+}
+
+write_index_html() {
+    local demo_dir=$1
     # Create index.html for the demo
     cat > "$demo_dir/index.html" << 'HTMLEOF'
 <!DOCTYPE html>
@@ -177,10 +250,14 @@ build_example() {
 </body>
 </html>
 HTMLEOF
-
-    echo -e "${GREEN}✓${NC} $example"
-    return 0
 }
+
+# Internal entry point used by the parallel xargs pool: post-process a single
+# example that has already been compiled. Short-circuits before the main flow.
+if [ "$1" = "__postprocess_one" ]; then
+    postprocess_example "$2"
+    exit $?
+fi
 
 # Main logic
 check_requirements
@@ -188,27 +265,44 @@ check_requirements
 cd "$KISS3D_DIR"
 
 if [ -n "$1" ]; then
-    # Build single example
-    build_example "$1"
+    # Build a single example (compile + post-process).
+    echo -e "${BLUE}Building${NC} $1..."
+    if cargo_build_all "$1"; then
+        postprocess_example "$1"
+    else
+        echo -e "${RED}✗${NC} $1 (cargo build failed)"
+        exit 1
+    fi
 else
-    # Build all examples
-    echo -e "${BLUE}Building ${#EXAMPLES[@]} examples to WASM...${NC}"
+    # Build all examples.
+    echo -e "${BLUE}Compiling ${#EXAMPLES[@]} examples to WASM (single cargo build)...${NC}"
+    if ! cargo_build_all "${EXAMPLES[@]}"; then
+        echo -e "${RED}cargo build failed.${NC} Post-processing the examples that did compile..."
+    fi
     echo ""
 
+    echo -e "${BLUE}Post-processing with up to ${JOBS} parallel jobs...${NC}"
+    echo ""
+
+    # Run wasm-bindgen + wasm-opt for every example in parallel across cores by
+    # re-invoking this script via the __postprocess_one entry point.
+    printf '%s\n' "${EXAMPLES[@]}" \
+        | xargs -P "$JOBS" -I {} bash "$SELF" __postprocess_one {} || true
+
+    # Tally results from what actually landed on disk.
     success=0
     failed=0
     failed_examples=()
-
     for example in "${EXAMPLES[@]}"; do
-        if build_example "$example"; then
-            ((success++))
+        if [ -f "$DEMOS_DIR/$example/pkg/example_bg.wasm" ]; then
+            success=$((success + 1))
         else
-            ((failed++))
+            failed=$((failed + 1))
             failed_examples+=("$example")
         fi
-        echo ""
     done
 
+    echo ""
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo -e "${GREEN}Success:${NC} $success"
     if [ $failed -gt 0 ]; then
@@ -216,4 +310,5 @@ else
         echo "Failed examples: ${failed_examples[*]}"
     fi
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    [ $failed -eq 0 ] || exit 1
 fi

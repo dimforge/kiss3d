@@ -4,6 +4,9 @@ use kiss3d::prelude::*;
 async fn main() {
     env_logger::init();
     let mut window = Window::new("Kiss3d: instancing 3D").await;
+    window.set_shadows_enabled(false);
+    window.set_samples(NumSamples::One);
+
     let mut camera =
         OrbitCamera3d::new(Vec3::new(200.0, 200.0, 200.0), Vec3::new(75.0, 75.0, 75.0));
     let mut scene = SceneNode3d::empty();
@@ -13,9 +16,9 @@ async fn main() {
     let mut c = scene.add_cube(1.0, 1.0, 1.0);
     let mut instances = vec![];
 
-    for i in 0..100 {
-        for j in 0..100 {
-            for k in 0..100 {
+    for i in 0..80 {
+        for j in 0..80 {
+            for k in 0..80 {
                 let ii = i as f32;
                 let jj = j as f32;
                 let kk = k as f32;

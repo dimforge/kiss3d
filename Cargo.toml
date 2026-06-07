@@ -20,8 +20,8 @@ include = [
     "examples/media",
     "examples/Cargo.toml",
     "Cargo.toml",
-    "LICENSE",
-    "Readme.md",
+    "/LICENSE",
+    "/Readme.md",
 ]
 
 

@@ -11,7 +11,6 @@ async fn main() {
 #[kiss3d::main]
 async fn main() {
     use kiss3d::prelude::*;
-    use kiss3d::renderer::RayTracer;
     use kiss3d::window::Inspector;
 
     let mut window = Window::new("Kiss3d: inspector").await;
@@ -49,22 +48,12 @@ async fn main() {
         .set_position(Vec3::new(3.0, 5.0, 3.0));
     scene.add_directional_light(Vec3::new(-1.0, -1.0, -0.5));
 
-    // The path tracer drives the render loop; the inspector can toggle it on/off
-    // (via `RayTracer::set_enabled`, which `raytrace_3d` honors by falling
-    // back to the rasterizer) and tune it live. It starts disabled so the demo
-    // opens in the snappy rasterizer; tick "Enable path tracer" to switch.
-    let mut raytracer = RayTracer::new();
-    raytracer.set_enabled(false);
-
     // You own the inspector; keep it alive across frames so its UI state persists.
     let mut inspector = Inspector::new();
 
-    while window
-        .raytrace_3d(&mut scene, &mut camera, &mut raytracer)
-        .await
-    {
+    while window.render_3d(&mut scene, &mut camera).await {
         // Draw the inspector overlay. Pass `Some(&mut scene_2d)` as the third
         // argument to also inspect a 2D scene.
-        window.draw_inspector(&mut inspector, Some(&mut scene), None, Some(&mut raytracer));
+        window.draw_inspector(&mut inspector, Some(&mut scene), None, None);
     }
 }
