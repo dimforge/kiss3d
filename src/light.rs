@@ -213,6 +213,106 @@ pub struct CollectedLight {
     pub casts_shadows: bool,
 }
 
+/// Distance-fog falloff curve.
+///
+/// The common distance-fog falloff modes:
+/// a `Linear` ramp between two distances, or physically-motivated `Exponential`
+/// / `ExponentialSquared` density curves.
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum FogMode {
+    /// Fog disabled.
+    Off,
+    /// Linear ramp: no fog before `start`, full fog past `end` (both view-space
+    /// distances in world units).
+    Linear { start: f32, end: f32 },
+    /// Exponential falloff `1 - exp(-density * distance)`.
+    Exponential { density: f32 },
+    /// Exponential-squared falloff `1 - exp(-(density * distance)^2)`; denser, with
+    /// a sharper onset.
+    ExponentialSquared { density: f32 },
+}
+
+impl Default for FogMode {
+    fn default() -> Self {
+        FogMode::Off
+    }
+}
+
+/// Distance fog applied to the rendered scene during shading.
+///
+/// Fog blends each shaded fragment toward [`color`](Self::color) by an amount
+/// determined by [`mode`](Self::mode) and the fragment's view-space distance,
+/// optionally thinned with altitude by [`height_falloff`](Self::height_falloff).
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Fog {
+    /// The fog/ambient color fragments are blended toward.
+    pub color: Color,
+    /// The falloff curve (and whether fog is active at all).
+    pub mode: FogMode,
+    /// Optional exponential thinning of fog with world-space height `y`
+    /// (`0` disables it). Larger values clear the fog faster as you go up.
+    pub height_falloff: f32,
+}
+
+impl Default for Fog {
+    fn default() -> Self {
+        Self {
+            color: crate::color::Color::new(0.6, 0.7, 0.8, 1.0),
+            mode: FogMode::Off,
+            height_falloff: 0.0,
+        }
+    }
+}
+
+impl Fog {
+    /// Linear fog ramping from `start` to `end` (view-space distances).
+    pub fn linear(color: Color, start: f32, end: f32) -> Self {
+        Self {
+            color,
+            mode: FogMode::Linear { start, end },
+            height_falloff: 0.0,
+        }
+    }
+
+    /// Exponential fog of the given density.
+    pub fn exponential(color: Color, density: f32) -> Self {
+        Self {
+            color,
+            mode: FogMode::Exponential { density },
+            height_falloff: 0.0,
+        }
+    }
+
+    /// Exponential-squared fog of the given density.
+    pub fn exponential_squared(color: Color, density: f32) -> Self {
+        Self {
+            color,
+            mode: FogMode::ExponentialSquared { density },
+            height_falloff: 0.0,
+        }
+    }
+
+    /// Sets the height falloff (exponential thinning of fog with world height).
+    pub fn with_height_falloff(mut self, height_falloff: f32) -> Self {
+        self.height_falloff = height_falloff.max(0.0);
+        self
+    }
+
+    /// GPU-friendly encoding: `(mode_code, param_a, param_b, height_falloff)`.
+    /// `mode_code` is 0 off / 1 linear / 2 exp / 3 exp2; for linear `param_a/b`
+    /// are start/end, otherwise `param_a` is the density.
+    pub(crate) fn params(&self) -> [f32; 4] {
+        match self.mode {
+            FogMode::Off => [0.0, 0.0, 0.0, 0.0],
+            FogMode::Linear { start, end } => [1.0, start, end, self.height_falloff],
+            FogMode::Exponential { density } => [2.0, density, 0.0, self.height_falloff],
+            FogMode::ExponentialSquared { density } => [3.0, density, 0.0, self.height_falloff],
+        }
+    }
+}
+
 /// A collection of lights gathered from the scene tree during the prepare phase.
 #[derive(Clone, Debug)]
 pub struct LightCollection {
@@ -220,6 +320,10 @@ pub struct LightCollection {
     pub lights: Vec<CollectedLight>,
     /// Global ambient lighting intensity.
     pub ambient: f32,
+    /// Global ambient light color (multiplied by [`ambient`](Self::ambient)).
+    pub ambient_color: Color,
+    /// Distance fog applied to the scene during shading.
+    pub fog: Fog,
 }
 
 impl Default for LightCollection {
@@ -234,6 +338,8 @@ impl LightCollection {
         Self {
             lights: Vec::with_capacity(MAX_LIGHTS),
             ambient: 0.2,
+            ambient_color: crate::color::WHITE,
+            fog: Fog::default(),
         }
     }
 
@@ -242,6 +348,8 @@ impl LightCollection {
         Self {
             lights: Vec::with_capacity(MAX_LIGHTS),
             ambient,
+            ambient_color: crate::color::WHITE,
+            fog: Fog::default(),
         }
     }
 

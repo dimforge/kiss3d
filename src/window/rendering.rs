@@ -248,6 +248,8 @@ impl Window {
 
         // Create a light collection for this frame
         let mut lights = LightCollection::with_ambient(self.ambient_intensity);
+        lights.ambient_color = self.ambient_color;
+        lights.fog = self.fog;
 
         // Render the 3D scene using two-phase rendering
         for pass in 0usize..camera.num_passes() {
@@ -709,6 +711,8 @@ impl Window {
         // Collect lights and propagate world transforms for the path tracer.
         // (`prepare` does both; the path tracer reads geometry off the CPU side.)
         let mut lights = LightCollection::with_ambient(self.ambient_intensity);
+        lights.ambient_color = self.ambient_color;
+        lights.fog = self.fog;
         scene.data_mut().prepare(0, camera, &mut lights, w, h);
 
         // Exposure and tonemap operator are shared with the rasterizer, so the

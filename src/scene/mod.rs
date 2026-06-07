@@ -5,8 +5,8 @@ pub use self::object2d::{
     LINES_WIDTH_USE_OBJECT_2D, POINTS_COLOR_USE_OBJECT_2D, POINTS_SIZE_USE_OBJECT_2D,
 };
 pub use self::object3d::{
-    Bsdf, InstanceData3d, InstancesBuffer3d, Object3d, ObjectData3d, LINES_COLOR_USE_OBJECT,
-    LINES_WIDTH_USE_OBJECT, POINTS_COLOR_USE_OBJECT, POINTS_SIZE_USE_OBJECT,
+    AlphaMode, Bsdf, InstanceData3d, InstancesBuffer3d, Object3d, ObjectData3d,
+    LINES_COLOR_USE_OBJECT, LINES_WIDTH_USE_OBJECT, POINTS_COLOR_USE_OBJECT, POINTS_SIZE_USE_OBJECT,
 };
 pub use self::scene_node2d::{SceneNode2d, SceneNodeData2d};
 pub use self::scene_node3d::{SceneNode3d, SceneNodeData3d};

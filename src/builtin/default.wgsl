@@ -30,6 +30,39 @@ struct FrameUniforms {
     num_lights: u32,
     ambient_intensity: f32,
     _padding: vec2<f32>,
+    ambient_color: vec4<f32>,
+    fog_color: vec4<f32>,
+    // (mode, param_a, param_b, height_falloff): mode 0 off / 1 linear / 2 exp / 3 exp2.
+    fog_params: vec4<f32>,
+}
+
+// Blends `color` toward the fog color by an amount derived from the fragment's
+// view-space distance and (optionally) its world height.
+fn apply_fog(color: vec3<f32>, view_dist: f32, world_y: f32) -> vec3<f32> {
+    let mode = frame.fog_params.x;
+    if mode < 0.5 {
+        return color;
+    }
+    var f = 0.0;
+    if mode < 1.5 {
+        // Linear: param_a = start, param_b = end.
+        let start = frame.fog_params.y;
+        let end = frame.fog_params.z;
+        f = clamp((view_dist - start) / max(end - start, 1e-4), 0.0, 1.0);
+    } else if mode < 2.5 {
+        // Exponential: param_a = density.
+        f = 1.0 - exp(-frame.fog_params.y * view_dist);
+    } else {
+        // Exponential squared.
+        let d = frame.fog_params.y * view_dist;
+        f = 1.0 - exp(-d * d);
+    }
+    // Optional height thinning: less fog higher up.
+    let hf = frame.fog_params.w;
+    if hf > 0.0 {
+        f *= exp(-max(world_y, 0.0) * hf);
+    }
+    return mix(color, frame.fog_color.rgb, clamp(f, 0.0, 1.0) * frame.fog_color.a);
 }
 
 @group(0) @binding(0)
@@ -49,6 +82,16 @@ struct ObjectUniforms {
     has_metallic_roughness_map: f32,
     has_ao_map: f32,
     has_emissive_map: f32,
+    reflectance: f32,
+    clearcoat: f32,
+    clearcoat_roughness: f32,
+    anisotropy: f32,
+    anisotropy_rotation: f32,
+    transmission: f32,
+    // Alpha mode (0 opaque / 1 mask / 2 blend / 3 premultiplied) + mask cutoff.
+    alpha_mode: f32,
+    alpha_cutoff: f32,
+    specular_tint: vec4<f32>,
 }
 
 @group(1) @binding(0)
@@ -447,6 +490,49 @@ fn fresnel_schlick(cos_theta: f32, F0: vec3<f32>) -> vec3<f32> {
     return F0 + (1.0 - F0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
 }
 
+// Scalar Schlick Fresnel (used by the dielectric clearcoat lobe).
+fn fresnel_schlick_scalar(cos_theta: f32, f0: f32) -> f32 {
+    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
+// Isotropic GGX/Trowbridge-Reitz NDF parameterized by linear roughness `alpha`.
+fn d_ggx_alpha(NoH: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let d = (NoH * a2 - NoH) * NoH + 1.0;
+    return a2 / max(PI * d * d, 1e-7);
+}
+
+// Anisotropic GGX NDF. `at`/`ab` are the tangent/bitangent roughnesses.
+fn d_ggx_aniso(at: f32, ab: f32, ToH: f32, BoH: f32, NoH: f32) -> f32 {
+    let a2 = at * ab;
+    let v = vec3<f32>(ab * ToH, at * BoH, a2 * NoH);
+    let v2 = dot(v, v);
+    let w2 = a2 / max(v2, 1e-7);
+    return a2 * w2 * w2 * (1.0 / PI);
+}
+
+// Height-correlated Smith visibility (includes the 1/(4·NoV·NoL) term).
+fn v_smith_correlated(NoV: f32, NoL: f32, alpha: f32) -> f32 {
+    let a2 = alpha * alpha;
+    let lv = NoL * sqrt(NoV * NoV * (1.0 - a2) + a2);
+    let ll = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
+    return 0.5 / max(lv + ll, 1e-7);
+}
+
+// Anisotropic height-correlated Smith visibility.
+fn v_smith_correlated_aniso(
+    at: f32, ab: f32, ToV: f32, BoV: f32, ToL: f32, BoL: f32, NoV: f32, NoL: f32,
+) -> f32 {
+    let lv = NoL * length(vec3<f32>(at * ToV, ab * BoV, NoV));
+    let ll = NoV * length(vec3<f32>(at * ToL, ab * BoL, NoL));
+    return 0.5 / max(lv + ll, 1e-7);
+}
+
+// Kelemen visibility for the clearcoat lobe.
+fn v_kelemen(LoH: f32) -> f32 {
+    return 0.25 / max(LoH * LoH, 1e-7);
+}
+
 // Attenuation functions
 fn calculate_point_attenuation(dist: f32, radius: f32) -> f32 {
     // Smooth falloff that reaches zero at the attenuation radius
@@ -587,9 +673,31 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     // View vector (in view space)
     let V = normalize(-in.view_pos);
 
-    // Calculate reflectance at normal incidence (F0)
-    // Dielectric: 0.04, Metal: albedo
-    let F0 = mix(vec3<f32>(0.04), albedo, metallic);
+    // Linear (alpha) roughness for the analytic lobes.
+    let alpha = max(roughness * roughness, 1e-4);
+
+    // Reflectance at normal incidence (F0). Dielectrics use the reflectance
+    // remap `0.16·reflectance²` (0.04 at the default 0.5) tinted by specular_tint;
+    // metals use the albedo.
+    let dielectric_f0 = 0.16 * object.reflectance * object.reflectance * object.specular_tint.rgb;
+    let F0 = mix(dielectric_f0, albedo, metallic);
+
+    // Anisotropy basis: a tangent/bitangent in view space, rotated about the
+    // normal by `anisotropy_rotation`.
+    let aniso = object.anisotropy;
+    var aniso_t = cross(vec3<f32>(0.0, 1.0, 0.0), N_view);
+    if dot(aniso_t, aniso_t) < 1e-6 {
+        aniso_t = cross(vec3<f32>(1.0, 0.0, 0.0), N_view);
+    }
+    aniso_t = normalize(aniso_t);
+    let ar = object.anisotropy_rotation;
+    aniso_t = normalize(aniso_t * cos(ar) + cross(N_view, aniso_t) * sin(ar));
+    let aniso_b = cross(N_view, aniso_t);
+    let at = max(alpha * (1.0 + aniso), 1e-4);
+    let ab = max(alpha * (1.0 - aniso), 1e-4);
+
+    // Clearcoat linear roughness.
+    let cc_alpha = max(object.clearcoat_roughness * object.clearcoat_roughness, 1e-4);
 
     // Accumulate lighting from all lights
     var Lo = vec3<f32>(0.0);
@@ -636,55 +744,97 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         }
 
         let H = normalize(V + L);
+        let NoV = max(dot(N_view, V), 1e-4);
+        let NdotL_raw = dot(N_view, L);
+        let NoL = max(NdotL_raw, 0.0);
+        let NoH = clamp(dot(N_view, H), 0.0, 1.0);
+        let LoH = clamp(dot(L, H), 0.0, 1.0);
 
-        // Cook-Torrance BRDF
-        let NDF = distribution_ggx(N_view, H, roughness);
-        let G = geometry_smith(N_view, V, L, roughness);
         let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
 
-        // Specular contribution
-        let numerator = NDF * G * F;
-        let denominator = 4.0 * max(dot(N_view, V), 0.0) * max(dot(N_view, L), 0.0) + 0.0001;
-        let specular = numerator / denominator;
+        // Base specular lobe — anisotropic GGX when anisotropy is set, otherwise
+        // the isotropic height-correlated form.
+        var D: f32;
+        var Vis: f32;
+        if abs(aniso) > 1e-3 {
+            let ToV = dot(aniso_t, V);
+            let BoV = dot(aniso_b, V);
+            let ToL = dot(aniso_t, L);
+            let BoL = dot(aniso_b, L);
+            let ToH = dot(aniso_t, H);
+            let BoH = dot(aniso_b, H);
+            D = d_ggx_aniso(at, ab, ToH, BoH, NoH);
+            Vis = v_smith_correlated_aniso(at, ab, ToV, BoV, ToL, BoL, NoV, NoL);
+        } else {
+            D = d_ggx_alpha(NoH, alpha);
+            Vis = v_smith_correlated(NoV, NoL, alpha);
+        }
+        var specular = D * Vis * F;
 
-        // Energy conservation: diffuse + specular = 1
-        let kS = F;
-        var kD = vec3<f32>(1.0) - kS;
-        kD *= 1.0 - metallic;  // Metals have no diffuse
+        // Clearcoat: a thin, smooth dielectric lobe layered on top of the base,
+        // which it attenuates by (1 - Fc).
+        var cc_atten = 1.0;
+        if object.clearcoat > 0.0 {
+            let dc = d_ggx_alpha(NoH, cc_alpha);
+            let vc = v_kelemen(LoH);
+            let fc = fresnel_schlick_scalar(LoH, 0.04) * object.clearcoat;
+            specular = specular * (1.0 - fc) + vec3<f32>(dc * vc * fc);
+            cc_atten = 1.0 - fc;
+        }
 
-        // Lighting calculation
-        let NdotL_raw = dot(N_view, L);
-        let NdotL = max(NdotL_raw, 0.0);
+        // Energy conservation: diffuse gets what the specular + clearcoat leave.
+        let kD = (vec3<f32>(1.0) - F) * (1.0 - metallic) * cc_atten;
 
-        // Wrapped diffuse (half-Lambert) for softer shadows on back-facing triangles
+        // Wrapped diffuse (half-Lambert) for softer terminators on back faces.
         let wrap = 0.2;
-        let NdotL_wrapped = (NdotL_raw * (1.0 - wrap) + wrap);
-        let diffuse_wrap = max(NdotL_wrapped, 0.0);
+        let diffuse_wrap = max(NdotL_raw * (1.0 - wrap) + wrap, 0.0);
 
         // === SHADOW MAPPING: attenuate this light by its shadow-map visibility ===
         let shadow_factor = compute_shadow(i, in.world_pos, dpos_dx, dpos_dy);
         // === END SHADOW MAPPING ===
 
-        // Combine lighting with light color
         let radiance = light.color * light_intensity * attenuation * shadow_factor;
-        let diffuse_contrib = kD * albedo / PI * diffuse_wrap;
-        let specular_contrib = specular * NdotL;
-        Lo += (diffuse_contrib + specular_contrib) * radiance;
+
+        // Diffuse transmission: a fraction of the diffuse is instead lit from the
+        // back side of the surface (cheap translucency).
+        let diffuse_contrib =
+            kD * albedo / PI * diffuse_wrap * (1.0 - object.transmission);
+        var transmit_contrib = vec3<f32>(0.0);
+        if object.transmission > 0.0 {
+            let back = max(-NdotL_raw, 0.0);
+            transmit_contrib = object.transmission * albedo / PI * back;
+        }
+        let specular_contrib = specular * NoL;
+        Lo += (diffuse_contrib + transmit_contrib + specular_contrib) * radiance;
     }
 
-    // Ambient lighting using configurable intensity from frame uniforms
-    let ambient = vec3<f32>(frame.ambient_intensity) * albedo * ao;
+    // Ambient lighting using configurable intensity + color from frame uniforms
+    let ambient = frame.ambient_color.rgb * frame.ambient_intensity * albedo * ao;
 
     // Final color
     var color = ambient + Lo + emissive;
 
+    // Distance fog (applied to the lit color; uses view distance + world height).
+    color = apply_fog(color, length(in.view_pos), in.world_pos.y);
+
     return vec4<f32>(color, albedo_tex.a * base_color.a);
 }
 
-// Opaque pass: write the shaded color straight into the HDR film.
+// Opaque pass: write the shaded color straight into the HDR film. Handles the
+// opaque-phase alpha modes: Opaque (alpha forced to 1) and Mask (cutout discard).
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    return shade(in);
+    let c = shade(in);
+    let mode = u32(object.alpha_mode + 0.5);
+    // Mask: discard fragments below the cutoff.
+    if mode == 1u && c.a < object.alpha_cutoff {
+        discard;
+    }
+    // Opaque and Mask write a fully opaque pixel.
+    if mode == 0u || mode == 1u {
+        return vec4<f32>(c.rgb, 1.0);
+    }
+    return c;
 }
 
 // Weighted-Blended OIT output (McGuire & Bavoil 2013): an additive
@@ -705,8 +855,16 @@ fn fs_oit(in: VertexOutput) -> OitOutput {
     let z = abs(in.view_pos.z);
     let w = clamp(10.0 / (1e-5 + pow(z / 5.0, 2.0) + pow(z / 200.0, 6.0)), 1e-2, 3e3);
 
+    // Premultiplied-alpha surfaces already carry color * alpha; straight-alpha
+    // (Blend) surfaces are premultiplied here for the weighted accumulation.
+    let mode = u32(object.alpha_mode + 0.5);
+    var premult = c.rgb * a;
+    if mode == 3u {
+        premult = c.rgb;
+    }
+
     var out: OitOutput;
-    out.accum = vec4<f32>(c.rgb * a, a) * w;
+    out.accum = vec4<f32>(premult, a) * w;
     out.reveal = a;
     return out;
 }

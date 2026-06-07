@@ -50,6 +50,8 @@ pub struct Window {
     pub(super) events: Rc<Receiver<WindowEvent>>,
     pub(super) unhandled_events: Rc<RefCell<Vec<WindowEvent>>>,
     pub(super) ambient_intensity: f32,
+    pub(super) ambient_color: Color,
+    pub(super) fog: crate::light::Fog,
     pub(super) background: Color,
     pub(super) polyline_renderer_2d: PolylineRenderer2d,
     pub(super) point_renderer_2d: PointRenderer2d,
@@ -381,6 +383,50 @@ impl Window {
         self.ambient_intensity
     }
 
+    /// Sets the global ambient light color.
+    ///
+    /// The ambient term added to every surface is `ambient_color * ambient *
+    /// albedo * ao`, so the color tints the fill light while
+    /// [`set_ambient`](Self::set_ambient) controls its brightness. Defaults to
+    /// white.
+    pub fn set_ambient_color(&mut self, color: Color) {
+        self.ambient_color = color;
+    }
+
+    /// Returns the current ambient light color.
+    pub fn ambient_color(&self) -> Color {
+        self.ambient_color
+    }
+
+    /// Sets the distance fog applied to the rasterized scene.
+    ///
+    /// Pass a [`Fog`](crate::light::Fog) describing the falloff curve and color,
+    /// or [`Fog::default()`] (mode [`FogMode::Off`](crate::light::FogMode::Off))
+    /// to disable fog. Fog blends shaded fragments toward the fog color by their
+    /// view-space distance from the camera.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use kiss3d::prelude::*;
+    /// # async fn main() {
+    /// # let mut window = Window::new("Example").await;
+    /// window.set_fog(Fog::exponential(Color::new(0.6, 0.7, 0.8, 1.0), 0.02));
+    /// # }
+    /// ```
+    pub fn set_fog(&mut self, fog: crate::light::Fog) {
+        self.fog = fog;
+    }
+
+    /// Returns the current distance fog settings.
+    pub fn fog(&self) -> crate::light::Fog {
+        self.fog
+    }
+
+    /// Mutable access to the distance fog settings.
+    pub fn fog_mut(&mut self) -> &mut crate::light::Fog {
+        &mut self.fog
+    }
+
     /// Enables or disables real-time shadow mapping for the rasterizer.
     ///
     /// Shadows are enabled by default. When disabled, no shadow pre-pass runs and
@@ -451,6 +497,24 @@ impl Window {
     /// Sets the exposure multiplier applied before tonemapping (`1.0` is neutral).
     pub fn set_exposure(&mut self, exposure: f32) {
         self.hdr.settings_mut().exposure = exposure;
+    }
+
+    /// Sets the exposure from a physically-based [`Exposure`](crate::camera::Exposure).
+    ///
+    /// Applies to both the rasterizer and the path tracer (they share the HDR
+    /// resolve exposure).
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use kiss3d::prelude::*;
+    /// # async fn main() {
+    /// # let mut window = Window::new("Example").await;
+    /// // f/8, 1/125 s, ISO 100
+    /// window.set_exposure_value(Exposure::from_physical(8.0, 1.0 / 125.0, 100.0));
+    /// # }
+    /// ```
+    pub fn set_exposure_value(&mut self, exposure: crate::camera::Exposure) {
+        self.hdr.settings_mut().exposure = exposure.exposure();
     }
 
     /// Selects the tonemapping operator used by the HDR resolve pass.
@@ -652,6 +716,8 @@ impl Window {
             events: Rc::new(event_receive),
             unhandled_events: Rc::new(RefCell::new(Vec::new())),
             ambient_intensity: 0.2,
+            ambient_color: crate::color::WHITE,
+            fog: crate::light::Fog::default(),
             background: BLACK,
             polyline_renderer_2d: PolylineRenderer2d::new(),
             point_renderer_2d: PointRenderer2d::new(),
@@ -707,6 +773,8 @@ impl Window {
             events: Rc::new(event_receive),
             unhandled_events: Rc::new(RefCell::new(Vec::new())),
             ambient_intensity: 0.2,
+            ambient_color: crate::color::WHITE,
+            fog: crate::light::Fog::default(),
             background: BLACK,
             polyline_renderer_2d: PolylineRenderer2d::new(),
             point_renderer_2d: PointRenderer2d::new(),

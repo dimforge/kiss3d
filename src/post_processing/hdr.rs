@@ -69,6 +69,35 @@ impl Tonemap {
     }
 }
 
+/// Artistic color-grading controls applied in linear HDR space, just before the
+/// tonemap operator. A neutral default (all `1.0`, no hue shift, white balance
+/// `[1,1,1]`) leaves the image unchanged.
+#[derive(Copy, Clone, Debug)]
+pub struct ColorGrading {
+    /// Per-channel linear white-balance gain (RGB). `[1, 1, 1]` is neutral.
+    pub white_balance: [f32; 3],
+    /// Saturation multiplier around luminance (`1.0` neutral, `0.0` grayscale).
+    pub saturation: f32,
+    /// Contrast multiplier around mid-gray (`1.0` neutral).
+    pub contrast: f32,
+    /// Gamma exponent applied in linear space (`1.0` neutral).
+    pub gamma: f32,
+    /// Hue rotation in radians about the RGB grayscale axis (`0.0` neutral).
+    pub hue: f32,
+}
+
+impl Default for ColorGrading {
+    fn default() -> Self {
+        ColorGrading {
+            white_balance: [1.0, 1.0, 1.0],
+            saturation: 1.0,
+            contrast: 1.0,
+            gamma: 1.0,
+            hue: 0.0,
+        }
+    }
+}
+
 /// User-facing HDR finishing settings (exposure, tonemap operator, bloom knobs).
 #[derive(Copy, Clone, Debug)]
 pub struct HdrSettings {
@@ -84,6 +113,8 @@ pub struct HdrSettings {
     pub bloom_knee: f32,
     /// Additive intensity of the bloom contribution.
     pub bloom_intensity: f32,
+    /// Artistic color grading applied before the tonemap operator.
+    pub color_grading: ColorGrading,
 }
 
 impl Default for HdrSettings {
@@ -96,6 +127,7 @@ impl Default for HdrSettings {
             bloom_threshold: 1.0,
             bloom_knee: 0.5,
             bloom_intensity: 0.04,
+            color_grading: ColorGrading::default(),
         }
     }
 }
@@ -121,6 +153,10 @@ struct TonemapUniforms {
     operator: u32,
     bloom_intensity: f32,
     _pad: f32,
+    // Color grading: white-balance gain (rgb) + unused.
+    white_balance: [f32; 4],
+    // (saturation, contrast, gamma, hue).
+    grading: [f32; 4],
 }
 
 /// A single mip level of the bloom chain.
@@ -1119,6 +1155,16 @@ impl HdrPipeline {
                     0.0
                 },
                 _pad: 0.0,
+                white_balance: {
+                    let w = self.settings.color_grading.white_balance;
+                    [w[0], w[1], w[2], 0.0]
+                },
+                grading: [
+                    self.settings.color_grading.saturation,
+                    self.settings.color_grading.contrast,
+                    self.settings.color_grading.gamma,
+                    self.settings.color_grading.hue,
+                ],
             }),
         );
 

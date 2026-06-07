@@ -50,6 +50,7 @@ pub struct OrbitCamera3d {
     fov: f32,
     znear: f32,
     zfar: f32,
+    projection: super::Projection,
     view: Mat4,
     proj: Mat4,
     proj_view: Mat4,
@@ -123,6 +124,7 @@ impl OrbitCamera3d {
             fov,
             znear,
             zfar,
+            projection: super::Projection::Perspective,
             view: Mat4::IDENTITY,
             proj: Mat4::IDENTITY,
             proj_view: Mat4::IDENTITY,
@@ -451,10 +453,42 @@ impl OrbitCamera3d {
 
     fn update_projviews(&mut self) {
         let aspect = self.last_framebuffer_size.x / self.last_framebuffer_size.y;
-        self.proj = Mat4::perspective_rh_gl(self.fov, aspect, self.znear, self.zfar);
+        self.proj = match self.projection {
+            super::Projection::Perspective => {
+                Mat4::perspective_rh_gl(self.fov, aspect, self.znear, self.zfar)
+            }
+            super::Projection::Orthographic => {
+                // Derive the orthographic half-height from the orbit distance and
+                // field of view so it frames the focus point like the perspective
+                // view at the same distance — and so scroll-zoom (which changes
+                // `dist`) keeps working.
+                let half_h = self.dist * (self.fov * 0.5).tan();
+                let half_w = half_h * aspect;
+                Mat4::orthographic_rh_gl(
+                    -half_w, half_w, -half_h, half_h, self.znear, self.zfar,
+                )
+            }
+        };
         self.view = self.view_transform().to_mat4();
         self.proj_view = self.proj * self.view;
         self.inverse_proj_view = self.proj_view.inverse();
+    }
+
+    /// Returns the projection mode (perspective or orthographic).
+    #[inline]
+    pub fn projection(&self) -> super::Projection {
+        self.projection
+    }
+
+    /// Sets the projection mode (perspective or orthographic).
+    ///
+    /// In [`Orthographic`](super::Projection::Orthographic) mode the view is a
+    /// parallel projection sized from the orbit distance and field of view, so
+    /// scroll-zoom still frames the focus point as expected.
+    #[inline]
+    pub fn set_projection(&mut self, projection: super::Projection) {
+        self.projection = projection;
+        self.update_projviews();
     }
 
     /// Sets the up vector of this camera. Prefer using [`set_up_axis_dir`](#method.set_up_axis_dir)

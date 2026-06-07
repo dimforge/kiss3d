@@ -45,6 +45,56 @@ impl Bsdf {
     }
 }
 
+/// How a surface's alpha channel is interpreted when shading.
+///
+/// The common alpha-blending modes. The default, [`Blend`], keeps
+/// kiss3d's historical behavior: a surface is treated as transparent (and routed
+/// through the order-independent transparency pass) exactly when its color alpha
+/// is below `1.0`.
+///
+/// [`Blend`]: AlphaMode::Blend
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum AlphaMode {
+    /// Fully opaque: the alpha channel is ignored and the surface always renders
+    /// in the opaque pass.
+    Opaque,
+    /// Alpha masking / cutout: fragments whose alpha is below the cutoff are
+    /// discarded; everything else is opaque. Good for foliage and chain-link.
+    Mask(f32),
+    /// Standard (straight) alpha blending through the order-independent
+    /// transparency pass when alpha `< 1.0`.
+    Blend,
+    /// Premultiplied alpha blending (color is already multiplied by alpha) through
+    /// the order-independent transparency pass when alpha `< 1.0`.
+    Premultiplied,
+}
+
+impl Default for AlphaMode {
+    fn default() -> Self {
+        AlphaMode::Blend
+    }
+}
+
+impl AlphaMode {
+    /// Whether a surface with this mode and `color_alpha` renders in the
+    /// transparent (OIT) pass rather than the opaque pass.
+    pub(crate) fn is_transparent(self, color_alpha: f32) -> bool {
+        matches!(self, AlphaMode::Blend | AlphaMode::Premultiplied) && color_alpha < 1.0
+    }
+
+    /// `(mode_code, cutoff)` packed for the shader. Codes: 0 opaque, 1 mask,
+    /// 2 blend, 3 premultiplied.
+    pub(crate) fn shader_params(self) -> (u32, f32) {
+        match self {
+            AlphaMode::Opaque => (0, 0.0),
+            AlphaMode::Mask(c) => (1, c),
+            AlphaMode::Blend => (2, 0.0),
+            AlphaMode::Premultiplied => (3, 0.0),
+        }
+    }
+}
+
 /// Monotonic counter handing out a unique default segmentation id to each new
 /// object. Starts at 1 so that 0 stays reserved for "background" (empty pixels)
 /// in the segmentation auxiliary render output.
@@ -79,6 +129,7 @@ pub struct ObjectData3d {
     metallic: f32,
     roughness: f32,
     emissive: Color,
+    alpha_mode: AlphaMode,
     // Path-tracer BSDF properties (ignored by the rasterizer).
     bsdf: Bsdf,
     ior: f32,
@@ -86,6 +137,21 @@ pub struct ObjectData3d {
     specular_tint: Color,
     subsurface: f32,
     subsurface_radius: f32,
+    // Extended PBR surface properties, honored by BOTH the rasterizer and the
+    // path tracer where applicable.
+    /// Dielectric specular intensity remap in `[0, 1]`: `F0 = 0.16 *
+    /// reflectance^2` for non-metals (standard dielectric convention). `0.5`
+    /// reproduces the classic `0.04`.
+    reflectance: f32,
+    /// Clearcoat layer strength in `[0, 1]` (a second, smooth specular lobe).
+    clearcoat: f32,
+    /// Roughness of the clearcoat layer in `[0, 1]`.
+    clearcoat_roughness: f32,
+    /// Anisotropy strength in `[-1, 1]`: stretches the specular highlight along
+    /// the tangent (`> 0`) or bitangent (`< 0`).
+    anisotropy: f32,
+    /// Rotation of the anisotropy direction around the surface normal, in radians.
+    anisotropy_rotation: f32,
     // PBR texture maps
     normal_map: Option<Arc<Texture>>,
     metallic_roughness_map: Option<Arc<Texture>>,
@@ -233,6 +299,12 @@ impl ObjectData3d {
         self.emissive
     }
 
+    /// Returns this object's alpha blending mode.
+    #[inline]
+    pub fn alpha_mode(&self) -> AlphaMode {
+        self.alpha_mode
+    }
+
     /// Returns the path-tracer BSDF model for this object.
     #[inline]
     pub fn bsdf(&self) -> Bsdf {
@@ -267,6 +339,36 @@ impl ObjectData3d {
     #[inline]
     pub fn subsurface_radius(&self) -> f32 {
         self.subsurface_radius
+    }
+
+    /// Returns the dielectric specular reflectance remap in `[0, 1]`.
+    #[inline]
+    pub fn reflectance(&self) -> f32 {
+        self.reflectance
+    }
+
+    /// Returns the clearcoat layer strength in `[0, 1]`.
+    #[inline]
+    pub fn clearcoat(&self) -> f32 {
+        self.clearcoat
+    }
+
+    /// Returns the clearcoat layer roughness in `[0, 1]`.
+    #[inline]
+    pub fn clearcoat_roughness(&self) -> f32 {
+        self.clearcoat_roughness
+    }
+
+    /// Returns the anisotropy strength in `[-1, 1]`.
+    #[inline]
+    pub fn anisotropy(&self) -> f32 {
+        self.anisotropy
+    }
+
+    /// Returns the anisotropy direction rotation around the normal, in radians.
+    #[inline]
+    pub fn anisotropy_rotation(&self) -> f32 {
+        self.anisotropy_rotation
     }
 
     /// Returns a reference to this object's normal map texture.
@@ -523,6 +625,7 @@ impl Object3d {
             metallic: 0.0,
             roughness: 0.5,
             emissive: crate::color::BLACK,
+            alpha_mode: AlphaMode::default(),
             // Path-tracer BSDF defaults: opaque dielectric.
             bsdf: Bsdf::Opaque,
             ior: 1.5,
@@ -530,6 +633,11 @@ impl Object3d {
             specular_tint: crate::color::WHITE,
             subsurface: 0.0,
             subsurface_radius: 0.0,
+            reflectance: 0.5,
+            clearcoat: 0.0,
+            clearcoat_roughness: 0.0,
+            anisotropy: 0.0,
+            anisotropy_rotation: 0.0,
             normal_map: None,
             metallic_roughness_map: None,
             ao_map: None,
@@ -1055,6 +1163,18 @@ impl Object3d {
         self.data.emissive = color;
     }
 
+    /// Sets how this object's alpha is interpreted (see [`AlphaMode`]).
+    ///
+    /// - [`AlphaMode::Opaque`] ignores alpha (always opaque).
+    /// - [`AlphaMode::Mask`] discards fragments below the cutoff (cutout).
+    /// - [`AlphaMode::Blend`] (default) / [`AlphaMode::Premultiplied`] route the
+    ///   surface through the order-independent transparency pass when its color
+    ///   alpha is below `1.0`.
+    #[inline]
+    pub fn set_alpha_mode(&mut self, alpha_mode: AlphaMode) {
+        self.data.alpha_mode = alpha_mode;
+    }
+
     // === Path-tracer BSDF Properties ===
 
     /// Selects the path-tracer BSDF model for this object (rasterizer unaffected).
@@ -1094,6 +1214,39 @@ impl Object3d {
     pub fn set_subsurface(&mut self, factor: f32, radius: f32) {
         self.data.subsurface = factor.clamp(0.0, 1.0);
         self.data.subsurface_radius = radius.max(0.0);
+    }
+
+    // === Extended PBR surface properties (rasterizer + path tracer) ===
+
+    /// Sets the dielectric specular reflectance in `[0, 1]`.
+    ///
+    /// For non-metals the normal-incidence reflectance becomes `F0 = 0.16 *
+    /// reflectance^2`. The default `0.5` reproduces the common `0.04`; raise it
+    /// for shinier dielectrics (e.g. gemstones), lower it for matte surfaces.
+    #[inline]
+    pub fn set_reflectance(&mut self, reflectance: f32) {
+        self.data.reflectance = reflectance.clamp(0.0, 1.0);
+    }
+
+    /// Sets the clearcoat layer strength and roughness, both in `[0, 1]`.
+    ///
+    /// Clearcoat adds a thin, smooth dielectric specular layer on top of the base
+    /// material (car paint, lacquer, varnish). `strength` of `0` disables it.
+    #[inline]
+    pub fn set_clearcoat(&mut self, strength: f32, roughness: f32) {
+        self.data.clearcoat = strength.clamp(0.0, 1.0);
+        self.data.clearcoat_roughness = roughness.clamp(0.0, 1.0);
+    }
+
+    /// Sets the specular anisotropy: `strength` in `[-1, 1]` stretches the
+    /// highlight along the tangent (positive) or bitangent (negative), and
+    /// `rotation` (radians) rotates the anisotropy direction around the normal.
+    ///
+    /// Useful for brushed metal, hair, and vinyl records.
+    #[inline]
+    pub fn set_anisotropy(&mut self, strength: f32, rotation: f32) {
+        self.data.anisotropy = strength.clamp(-1.0, 1.0);
+        self.data.anisotropy_rotation = rotation;
     }
 
     // === PBR Texture Maps ===

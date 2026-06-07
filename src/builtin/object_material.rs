@@ -54,6 +54,12 @@ struct FrameUniforms {
     num_lights: u32,
     ambient_intensity: f32,
     _padding: [f32; 2],
+    // Global ambient light color (rgb); a is unused.
+    ambient_color: [f32; 4],
+    // Distance fog color (rgb) + max fog opacity (a).
+    fog_color: [f32; 4],
+    // Fog params: (mode, param_a, param_b, height_falloff). See `Fog::params`.
+    fog_params: [f32; 4],
 }
 
 /// Object-level uniforms (transform, scale, color, PBR properties).
@@ -73,6 +79,17 @@ struct ObjectUniforms {
     has_metallic_roughness_map: f32,
     has_ao_map: f32,
     has_emissive_map: f32,
+    // Extended PBR surface properties (clearcoat, anisotropy, transmission, ...).
+    reflectance: f32,
+    clearcoat: f32,
+    clearcoat_roughness: f32,
+    anisotropy: f32,
+    anisotropy_rotation: f32,
+    transmission: f32,
+    // Alpha mode code (0 opaque / 1 mask / 2 blend / 3 premultiplied) + cutoff.
+    alpha_mode: f32,
+    alpha_cutoff: f32,
+    specular_tint: [f32; 4],
 }
 
 /// View uniforms for wireframe rendering (includes viewport).
@@ -1592,6 +1609,19 @@ impl Material3d for ObjectMaterial {
                 num_lights: lights.lights.len().min(MAX_LIGHTS) as u32,
                 ambient_intensity: lights.ambient,
                 _padding: [0.0; 2],
+                ambient_color: [
+                    lights.ambient_color.r,
+                    lights.ambient_color.g,
+                    lights.ambient_color.b,
+                    1.0,
+                ],
+                fog_color: [
+                    lights.fog.color.r,
+                    lights.fog.color.g,
+                    lights.fog.color.b,
+                    lights.fog.color.a,
+                ],
+                fog_params: lights.fog.params(),
             };
 
             ctxt.write_buffer(
@@ -1682,6 +1712,21 @@ impl Material3d for ObjectMaterial {
                 1.0
             } else {
                 0.0
+            },
+            reflectance: data.reflectance(),
+            clearcoat: data.clearcoat(),
+            clearcoat_roughness: data.clearcoat_roughness(),
+            anisotropy: data.anisotropy(),
+            anisotropy_rotation: data.anisotropy_rotation(),
+            transmission: data.transmission(),
+            alpha_mode: {
+                let (code, _) = data.alpha_mode().shader_params();
+                code as f32
+            },
+            alpha_cutoff: data.alpha_mode().shader_params().1,
+            specular_tint: {
+                let t = data.specular_tint();
+                [t.r, t.g, t.b, t.a]
             },
         };
 
@@ -1806,7 +1851,7 @@ impl Material3d for ObjectMaterial {
         // is translucent draw in the OIT transparent phase. Transparency is keyed
         // off the object color's alpha (per-instance alpha uses this classification
         // too).
-        let transparent = data.color().a < 1.0;
+        let transparent = data.alpha_mode().is_transparent(data.color().a);
         let render_surface = data.surface_rendering_active()
             && match context.phase {
                 crate::resource::RenderPhase::Opaque => !transparent,
