@@ -241,14 +241,7 @@ fn sample_weights(
 }
 
 /// Samples a `Vec3` keyframe track (translation or scale).
-fn sample_vec3(
-    v: &[Vec3],
-    interp: Interpolation,
-    i0: usize,
-    i1: usize,
-    u: f32,
-    dt: f32,
-) -> Vec3 {
+fn sample_vec3(v: &[Vec3], interp: Interpolation, i0: usize, i1: usize, u: f32, dt: f32) -> Vec3 {
     match interp {
         Interpolation::CubicSpline => {
             // Each key stores (in, value, out); the value is the middle entry.

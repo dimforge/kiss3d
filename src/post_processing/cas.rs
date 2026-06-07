@@ -134,10 +134,18 @@ impl Cas {
         });
 
         let vertices = [
-            QuadVertex { position: [-1.0, -1.0] },
-            QuadVertex { position: [1.0, -1.0] },
-            QuadVertex { position: [-1.0, 1.0] },
-            QuadVertex { position: [1.0, 1.0] },
+            QuadVertex {
+                position: [-1.0, -1.0],
+            },
+            QuadVertex {
+                position: [1.0, -1.0],
+            },
+            QuadVertex {
+                position: [-1.0, 1.0],
+            },
+            QuadVertex {
+                position: [1.0, 1.0],
+            },
         ];
         let vertex_buffer = ctxt.create_buffer_init(
             Some("cas_vertex_buffer"),

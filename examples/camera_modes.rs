@@ -75,9 +75,7 @@ async fn main() {
                 .show(ctx, |ui| {
                     ui.checkbox(&mut orthographic, "Orthographic projection");
                     ui.separator();
-                    ui.add(
-                        egui::Slider::new(&mut ev100, 0.0..=16.0).text("exposure (EV100)"),
-                    );
+                    ui.add(egui::Slider::new(&mut ev100, 0.0..=16.0).text("exposure (EV100)"));
                     ui.label("(lower EV = brighter)");
                     ui.separator();
                     ui.label("Visible render layers:");

@@ -300,6 +300,25 @@ impl Context {
         wgpu::TextureFormat::Depth32Float
     }
 
+    /// Whether this device can run clustered (forward+) lighting.
+    ///
+    /// Clustered lighting needs compute shaders (for light culling) and at least three
+    /// read-only storage buffers visible to the fragment stage (the light list, the
+    /// per-cluster light grid and the global light-index list). Native and WebGPU
+    /// browsers satisfy this; WebGL2 reports no compute shaders and zero storage buffers,
+    /// so it transparently falls back to the legacy fixed 8-light uniform path.
+    ///
+    /// This is a runtime check on purpose: WebGPU and WebGL2 both build as `wasm32`, so a
+    /// compile-time `cfg(target_arch = "wasm32")` gate would wrongly disable clustering on
+    /// WebGPU.
+    pub fn supports_clustered_lighting(&self) -> bool {
+        self.adapter
+            .get_downlevel_capabilities()
+            .flags
+            .contains(wgpu::DownlevelFlags::COMPUTE_SHADERS)
+            && self.device.limits().max_storage_buffers_per_shader_stage >= 3
+    }
+
     /// The internal floating-point color format the rasterizer renders into.
     ///
     /// The rasterized scene (3D + 2D + points/polylines) is drawn into an HDR

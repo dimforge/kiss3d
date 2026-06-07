@@ -85,8 +85,10 @@ impl Skybox {
             immediate_size: 0,
         });
 
-        let shader = ctxt
-            .create_shader_module(Some("skybox_shader"), include_str!("../builtin/skybox.wgsl"));
+        let shader = ctxt.create_shader_module(
+            Some("skybox_shader"),
+            include_str!("../builtin/skybox.wgsl"),
+        );
 
         // Built lazily per MSAA sample count to match the HDR scene attachment.
         let pipeline = PipelineCache::new(move |sample_count| {
@@ -214,7 +216,12 @@ impl Skybox {
             0,
             bytemuck::bytes_of(&SkyUniforms {
                 inv_view_proj: inverse_view_proj.to_cols_array_2d(),
-                params: [self.rotation.cos(), self.rotation.sin(), self.intensity, 0.0],
+                params: [
+                    self.rotation.cos(),
+                    self.rotation.sin(),
+                    self.intensity,
+                    0.0,
+                ],
             }),
         );
 

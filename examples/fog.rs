@@ -41,9 +41,11 @@ async fn main() {
     for i in 0..40 {
         let z = -(i as f32) * 1.5;
         let c = 0.4 + 0.6 * ((i % 2) as f32);
-        scene
-            .add_cube(0.8, 1.6, 0.8)
-            .translate(Vec3::new(if i % 2 == 0 { -1.5 } else { 1.5 }, 0.0, z));
+        scene.add_cube(0.8, 1.6, 0.8).translate(Vec3::new(
+            if i % 2 == 0 { -1.5 } else { 1.5 },
+            0.0,
+            z,
+        ));
         let mut floor = scene.add_cube(6.0, 0.1, 1.4);
         floor.translate(Vec3::new(0.0, -0.85, z));
         floor.set_color(Color::new(c, c, c, 1.0));

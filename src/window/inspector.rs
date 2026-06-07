@@ -202,8 +202,7 @@ impl Inspector {
                         // Whether the path tracer is the active renderer for this
                         // frame (reflects the toggle just edited above). Decides
                         // which renderer-specific section is shown.
-                        let path_tracing =
-                            raytracer.as_deref().is_some_and(|rt| rt.enabled());
+                        let path_tracing = raytracer.as_deref().is_some_and(|rt| rt.enabled());
 
                         // Settings shared by both renderers.
                         self.common_section(ui, &mut win.hdr);
@@ -318,9 +317,13 @@ impl Inspector {
                 let hdr = &mut win.hdr;
                 ui.checkbox(&mut hdr.bloom_enabled, "Bloom");
                 ui.add_enabled_ui(hdr.bloom_enabled, |ui| {
-                    ui.add(egui::Slider::new(&mut hdr.bloom_threshold, 0.0..=4.0).text("Threshold"));
+                    ui.add(
+                        egui::Slider::new(&mut hdr.bloom_threshold, 0.0..=4.0).text("Threshold"),
+                    );
                     ui.add(egui::Slider::new(&mut hdr.bloom_knee, 0.0..=1.0).text("Knee"));
-                    ui.add(egui::Slider::new(&mut hdr.bloom_intensity, 0.0..=1.0).text("Intensity"));
+                    ui.add(
+                        egui::Slider::new(&mut hdr.bloom_intensity, 0.0..=1.0).text("Intensity"),
+                    );
                 });
             });
     }
@@ -437,16 +440,14 @@ impl Inspector {
                 });
                 ui.horizontal(|ui| {
                     if ui.button("Show subtree").clicked() {
-                        node.clone()
-                            .apply_to_scene_nodes_mut_recursive(&mut |n| {
-                                n.set_visible(true);
-                            });
+                        node.clone().apply_to_scene_nodes_mut_recursive(&mut |n| {
+                            n.set_visible(true);
+                        });
                     }
                     if ui.button("Hide subtree").clicked() {
-                        node.clone()
-                            .apply_to_scene_nodes_mut_recursive(&mut |n| {
-                                n.set_visible(false);
-                            });
+                        node.clone().apply_to_scene_nodes_mut_recursive(&mut |n| {
+                            n.set_visible(false);
+                        });
                     }
                 });
             });
@@ -566,8 +567,9 @@ impl Inspector {
                             node.set_specular_tint(c);
                         }
                     }
-                    let sub =
-                        obj_get(&node, |o| (o.data().subsurface(), o.data().subsurface_radius()));
+                    let sub = obj_get(&node, |o| {
+                        (o.data().subsurface(), o.data().subsurface_radius())
+                    });
                     if let Some((mut factor, mut radius)) = sub {
                         let mut changed = slider(ui, "Subsurface", &mut factor, 0.0..=1.0);
                         changed |= slider(ui, "SSS radius", &mut radius, 0.0..=5.0);
@@ -635,10 +637,18 @@ impl Inspector {
                         attenuation_radius,
                     } => {
                         ui.label("Spot light");
-                        changed |=
-                            slider(ui, "Inner cone (rad)", inner_cone_angle, 0.0..=std::f32::consts::FRAC_PI_2);
-                        changed |=
-                            slider(ui, "Outer cone (rad)", outer_cone_angle, 0.0..=std::f32::consts::FRAC_PI_2);
+                        changed |= slider(
+                            ui,
+                            "Inner cone (rad)",
+                            inner_cone_angle,
+                            0.0..=std::f32::consts::FRAC_PI_2,
+                        );
+                        changed |= slider(
+                            ui,
+                            "Outer cone (rad)",
+                            outer_cone_angle,
+                            0.0..=std::f32::consts::FRAC_PI_2,
+                        );
                         changed |= slider(ui, "Attenuation", attenuation_radius, 0.0..=1000.0);
                     }
                     LightType::Directional(dir) => {
@@ -731,7 +741,12 @@ fn drag(ui: &mut egui::Ui, v: &mut f32) -> bool {
     ui.add(egui::DragValue::new(v).speed(0.01)).changed()
 }
 
-fn slider(ui: &mut egui::Ui, label: &str, v: &mut f32, range: std::ops::RangeInclusive<f32>) -> bool {
+fn slider(
+    ui: &mut egui::Ui,
+    label: &str,
+    v: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+) -> bool {
     ui.add(egui::Slider::new(v, range).text(label)).changed()
 }
 

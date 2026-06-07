@@ -284,6 +284,13 @@ pub struct ObjectData3d {
     anisotropy: f32,
     /// Rotation of the anisotropy direction around the surface normal, in radians.
     anisotropy_rotation: f32,
+    /// Per-object screen-space-reflection properties. `Some` (the default) makes
+    /// the object receive SSR; `None` opts it out. Ignored when SSR is disabled.
+    ssr: Option<crate::renderer::SsrMaterial>,
+    /// Planar reflector (mirror): when set, this surface shows a reflected view of
+    /// the scene blended over its PBR shading. `None` (the default) is a normal
+    /// surface. See [`Object3d::set_reflector`].
+    reflector: Option<crate::renderer::Reflector>,
     // PBR texture maps
     normal_map: Option<Arc<Texture>>,
     metallic_roughness_map: Option<Arc<Texture>>,
@@ -501,7 +508,11 @@ impl ObjectData3d {
 
         // Skinning applies only once the palette has been uploaded this frame.
         let has_skin = mesh.has_skin_vertices()
-            && self.skin.as_ref().and_then(|s| s.palette_buffer()).is_some();
+            && self
+                .skin
+                .as_ref()
+                .and_then(|s| s.palette_buffer())
+                .is_some();
         let has_morph = mesh.has_morph() && !self.morph_weights.is_empty();
         if !has_skin && !has_morph {
             return;
@@ -510,7 +521,9 @@ impl ObjectData3d {
         // `ensure_*_on_gpu` take `&self` (interior RwLock mutability), so the skin and
         // morph buffer borrows can be held simultaneously to build one bind group.
         let (joints, weights) = match has_skin {
-            true => mesh.ensure_skin_on_gpu().map_or((None, None), |(j, w)| (Some(j), Some(w))),
+            true => mesh
+                .ensure_skin_on_gpu()
+                .map_or((None, None), |(j, w)| (Some(j), Some(w))),
             false => (None, None),
         };
         let (morph_pos, morph_nrm) = match has_morph {
@@ -643,6 +656,24 @@ impl ObjectData3d {
     #[inline]
     pub fn reflectance(&self) -> f32 {
         self.reflectance
+    }
+
+    /// Returns this object's per-object SSR properties (`None` = opted out).
+    #[inline]
+    pub fn ssr(&self) -> Option<crate::renderer::SsrMaterial> {
+        self.ssr
+    }
+
+    /// Returns this object's planar reflector, if any.
+    #[inline]
+    pub fn reflector(&self) -> Option<&crate::renderer::Reflector> {
+        self.reflector.as_ref()
+    }
+
+    /// Mutable access to this object's planar reflector, if any.
+    #[inline]
+    pub fn reflector_mut(&mut self) -> Option<&mut crate::renderer::Reflector> {
+        self.reflector.as_mut()
     }
 
     /// Returns the clearcoat layer strength in `[0, 1]`.
@@ -962,6 +993,8 @@ impl Object3d {
             clearcoat_roughness: 0.0,
             anisotropy: 0.0,
             anisotropy_rotation: 0.0,
+            ssr: Some(crate::renderer::SsrMaterial::default()),
+            reflector: None,
             normal_map: None,
             metallic_roughness_map: None,
             ao_map: None,
@@ -1534,6 +1567,52 @@ impl Object3d {
     #[inline]
     pub fn set_metallic(&mut self, metallic: f32) {
         self.data.metallic = metallic.clamp(0.0, 1.0);
+    }
+
+    /// Sets this object's screen-space-reflection properties.
+    ///
+    /// `Some(SsrMaterial { .. })` makes the object receive SSR with those
+    /// properties (per-object intensity, infinite-thick, Fresnel and distance
+    /// attenuation); `None` opts the object out of SSR entirely. Objects receive
+    /// SSR by default. Only effective while SSR is enabled on the window
+    /// ([`Window::set_ssr_enabled`](crate::window::Window::set_ssr_enabled)); the
+    /// global march-quality knobs live in
+    /// [`Window::ssr_settings_mut`](crate::window::Window::ssr_settings_mut).
+    #[inline]
+    pub fn set_ssr(&mut self, ssr: Option<crate::renderer::SsrMaterial>) {
+        self.data.ssr = ssr;
+    }
+
+    /// Makes this surface a planar reflector (mirror).
+    ///
+    /// `Some(Reflector { .. })` renders the reflected scene into the reflector's
+    /// texture each frame and blends it over this object's normal PBR shading (so a
+    /// reflective floor can still have its base color, textures, roughness, etc.);
+    /// `None` (the default) is a normal surface. The reflection plane is this
+    /// object's world transform applied to its origin and the reflector's
+    /// object-space normal (default +Z, see [`Reflector::with_local_normal`]).
+    /// Best on a flat surface (e.g. a [`SceneNode3d::add_quad`] quad — or use the
+    /// [`SceneNode3d::add_reflector`] convenience).
+    ///
+    /// [`Reflector`]: crate::renderer::Reflector
+    /// [`Reflector::with_local_normal`]: crate::renderer::Reflector::with_local_normal
+    /// [`SceneNode3d::add_quad`]: crate::scene::SceneNode3d::add_quad
+    /// [`SceneNode3d::add_reflector`]: crate::scene::SceneNode3d::add_reflector
+    #[inline]
+    pub fn set_reflector(&mut self, reflector: Option<crate::renderer::Reflector>) {
+        self.data.reflector = reflector;
+    }
+
+    /// This object's planar reflector, if any.
+    #[inline]
+    pub fn reflector(&self) -> Option<&crate::renderer::Reflector> {
+        self.data.reflector.as_ref()
+    }
+
+    /// Mutable access to this object's planar reflector, if any.
+    #[inline]
+    pub fn reflector_mut(&mut self) -> Option<&mut crate::renderer::Reflector> {
+        self.data.reflector.as_mut()
     }
 
     /// Sets the roughness factor of this object.

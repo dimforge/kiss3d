@@ -70,6 +70,25 @@ pub struct Window {
     /// Screen-space ambient occlusion (created on first enable).
     pub(super) ssao: Option<crate::renderer::Ssao>,
     pub(super) ssao_enabled: bool,
+    /// Clustered forward+ lighting (created on first frame when the backend
+    /// supports compute + fragment storage buffers; otherwise stays `None` and the
+    /// object material falls back to the fixed 8-light path).
+    pub(super) clustered: Option<crate::builtin::clustered::Clustered>,
+    /// Reflection probes (localized parallax-corrected environment maps). Created
+    /// on first probe registration; `None` means no probes.
+    pub(super) reflection_probes: Option<crate::renderer::ReflectionProbes>,
+    /// Reusable GPU targets for runtime probe capture (created on first capture).
+    pub(super) probe_capture: Option<crate::renderer::ProbeCapture>,
+    /// Probe indices queued for a runtime scene capture next frame.
+    pub(super) pending_probe_captures: Vec<usize>,
+    /// Render-layer mask used when capturing reflection probes. Defaults to all
+    /// layers; set it to exclude dynamic objects (which SSR reflects more
+    /// accurately) so a single-point probe doesn't distort nearby geometry.
+    pub(super) reflection_capture_layers: u32,
+    /// Screen-space reflections (created on first enable when the backend supports
+    /// it; stays `None` / inactive on WebGL2).
+    pub(super) ssr: Option<crate::renderer::Ssr>,
+    pub(super) ssr_enabled: bool,
     pub(super) post_process_render_target: RenderTarget,
     /// Offscreen render target used when the window is hidden, so `snap` and
     /// recording work without a presentable surface. Created on first use.
@@ -495,6 +514,91 @@ impl Window {
             .settings_mut()
     }
 
+    /// Registers a reflection probe and returns its index (up to
+    /// [`MAX_PROBES`](crate::renderer::MAX_PROBES)), or `None` if full.
+    ///
+    /// A probe is a localized, parallax-corrected environment map: reflective
+    /// surfaces inside its influence box sample it (with box-projected parallax)
+    /// instead of the global skybox. Fill its content with
+    /// [`set_reflection_probe_image`](Self::set_reflection_probe_image) (a baked
+    /// HDR) or [`capture_reflection_probe`](Self::capture_reflection_probe) (a live
+    /// scene capture).
+    pub fn add_reflection_probe(
+        &mut self,
+        probe: crate::renderer::ReflectionProbe,
+    ) -> Option<usize> {
+        self.reflection_probes
+            .get_or_insert_with(crate::renderer::ReflectionProbes::new)
+            .add(probe)
+    }
+
+    /// Fills reflection probe `idx` from a baked equirectangular HDR image.
+    pub fn set_reflection_probe_image(&mut self, idx: usize, img: &image::DynamicImage) {
+        if let Some(probes) = self.reflection_probes.as_mut() {
+            probes.set_image(idx, img);
+        }
+    }
+
+    /// Mutable access to a registered probe's placement (to move/resize it; call
+    /// before re-capturing).
+    pub fn reflection_probe_mut(
+        &mut self,
+        idx: usize,
+    ) -> Option<&mut crate::renderer::ReflectionProbe> {
+        self.reflection_probes
+            .as_mut()
+            .and_then(|p| p.probe_mut(idx))
+    }
+
+    /// Sets the render-layer mask used when capturing reflection probes (default:
+    /// all layers). A reflection probe captures from a single point, so nearby
+    /// dynamic objects come out distorted/magnified; put such objects on a layer
+    /// excluded here (and let SSR reflect them instead) so the probe captures only
+    /// the static surroundings. An object is captured when its own render-layer
+    /// mask shares a bit with `mask`.
+    pub fn set_reflection_capture_layers(&mut self, mask: u32) {
+        self.reflection_capture_layers = mask;
+    }
+
+    /// Queues a runtime scene capture of reflection probe `idx`: next frame the
+    /// scene is rendered into the probe's six cube faces (from its center) and
+    /// reprojected into its environment map, so it reflects live geometry. The
+    /// captured frame omits the probe being captured (it is not yet populated) and
+    /// uses the fixed-light path; re-call after the scene changes to refresh it.
+    pub fn capture_reflection_probe(&mut self, idx: usize) {
+        if self
+            .reflection_probes
+            .as_ref()
+            .is_some_and(|p| idx < p.len())
+            && !self.pending_probe_captures.contains(&idx)
+        {
+            self.pending_probe_captures.push(idx);
+        }
+    }
+
+    /// Enables or disables screen-space reflections (SSR).
+    ///
+    /// When enabled (and supported by the backend — native/WebGPU; not WebGL2), a
+    /// geometry G-buffer prepass plus a screen-space ray-march add sharp on-screen
+    /// reflections to glossy/metallic surfaces, falling back to reflection probes
+    /// and the skybox where the screen has no data. Disabled by default.
+    pub fn set_ssr_enabled(&mut self, enabled: bool) {
+        self.ssr_enabled = enabled;
+    }
+
+    /// Whether SSR is enabled (may still be inactive if the backend lacks support).
+    pub fn ssr_enabled(&self) -> bool {
+        self.ssr_enabled
+    }
+
+    /// Mutable access to the SSR settings, creating the SSR state if needed.
+    pub fn ssr_settings_mut(&mut self) -> &mut crate::renderer::SsrSettings {
+        let (w, h) = self.canvas.size();
+        self.ssr
+            .get_or_insert_with(|| crate::renderer::Ssr::new(w, h))
+            .settings_mut()
+    }
+
     /// Enables or disables real-time shadow mapping for the rasterizer.
     ///
     /// Shadows are enabled by default. When disabled, no shadow pre-pass runs and
@@ -798,6 +902,13 @@ impl Window {
             skybox: crate::renderer::Skybox::new(),
             ssao: None,
             ssao_enabled: false,
+            clustered: None,
+            reflection_probes: None,
+            probe_capture: None,
+            pending_probe_captures: Vec::new(),
+            reflection_capture_layers: u32::MAX,
+            ssr: None,
+            ssr_enabled: false,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             offscreen_output_target: None,
             aov_renderer: None,
@@ -859,6 +970,13 @@ impl Window {
             skybox: crate::renderer::Skybox::new(),
             ssao: None,
             ssao_enabled: false,
+            clustered: None,
+            reflection_probes: None,
+            probe_capture: None,
+            pending_probe_captures: Vec::new(),
+            reflection_capture_layers: u32::MAX,
+            ssr: None,
+            ssr_enabled: false,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             offscreen_output_target: None,
             aov_renderer: None,

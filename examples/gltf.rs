@@ -15,8 +15,8 @@
 //! ```
 
 use kiss3d::prelude::*;
-use std::path::Path;
 use kiss3d::window::Inspector;
+use std::path::Path;
 
 #[kiss3d::main]
 async fn main() {
@@ -30,7 +30,8 @@ async fn main() {
     scene
         .add_light(Light::point(120.0))
         .set_position(Vec3::new(-4.0, 3.0, 4.0));
-    scene.add_cube(4.0, 0.1, 4.0)
+    scene
+        .add_cube(4.0, 0.1, 4.0)
         .set_position(Vec3::new(0.0, -0.07, 0.0));
 
     // Default to the bundled Fox (animated + skinned); a CLI arg overrides it.
@@ -46,14 +47,20 @@ async fn main() {
     let mut fox = scene.add_gltf(Path::new(path), scale);
 
     let names: Vec<String> = fox.player.clip_names().map(|s| s.to_string()).collect();
-    println!("Loaded `{path}` with {} animation(s): {names:?}", names.len());
+    println!(
+        "Loaded `{path}` with {} animation(s): {names:?}",
+        names.len()
+    );
     if let Some(first) = names.first() {
         fox.player.play(first);
         fox.player.set_looping(true);
     }
 
     // A model with morph atergts
-    let mut morph_cube = scene.add_gltf(Path::new("examples/media/gltf/AnimatedMorphCube.glb"), Vec3::splat(0.3));
+    let mut morph_cube = scene.add_gltf(
+        Path::new("examples/media/gltf/AnimatedMorphCube.glb"),
+        Vec3::splat(0.3),
+    );
 
     morph_cube.root.set_position(Vec3::new(0.8, 0.35, 0.0));
     morph_cube.player.play_index(0);
@@ -75,7 +82,10 @@ async fn main() {
     let mut raytracer = RayTracer::with_enabled(false);
     let mut inspector = Inspector::default();
 
-    while window.raytrace_3d(&mut scene, &mut camera, &mut raytracer).await {
+    while window
+        .raytrace_3d(&mut scene, &mut camera, &mut raytracer)
+        .await
+    {
         fox.player.update(dt);
         morph_cube.player.update(dt);
 

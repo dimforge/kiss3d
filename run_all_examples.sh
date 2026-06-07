@@ -13,6 +13,7 @@ EXAMPLES=(
     primitives_scale
     primitives2d
     multi_light
+    clustered_lights
     wireframe
     lines
     lines2d
@@ -45,6 +46,8 @@ EXAMPLES=(
     fog
     camera_modes
     skybox
+    reflections
+    mirror
     parallax
     shadows
     transparency

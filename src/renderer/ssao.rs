@@ -58,6 +58,11 @@ pub struct Ssao {
 
     viewpos: Target,
     depth: Target,
+    // G-buffer targets shared with SSR: world normal + roughness, F0 + metallic, and
+    // per-object SSR params. Written by the same prepass; unused by SSAO itself.
+    normal: Target,
+    material: Target,
+    ssr_params: Target,
     ao: Target,
     ao_blur: Target,
 
@@ -164,9 +169,13 @@ impl Ssao {
                 cache: None,
             })
         };
-        let ssao_pipeline = make_pipeline("ssao", include_str!("../builtin/ssao.wgsl"), &ssao_layout);
-        let blur_pipeline =
-            make_pipeline("ssao_blur", include_str!("../builtin/ssao_blur.wgsl"), &blur_layout);
+        let ssao_pipeline =
+            make_pipeline("ssao", include_str!("../builtin/ssao.wgsl"), &ssao_layout);
+        let blur_pipeline = make_pipeline(
+            "ssao_blur",
+            include_str!("../builtin/ssao_blur.wgsl"),
+            &blur_layout,
+        );
 
         let ssao_uniform = ctxt.create_buffer_simple(
             Some("ssao_uniform"),
@@ -179,13 +188,17 @@ impl Ssao {
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
 
-        let (viewpos, depth, ao, ao_blur) = Self::make_targets(width, height);
+        let (viewpos, depth, normal, material, ssr_params, ao, ao_blur) =
+            Self::make_targets(width, height);
         Ssao {
             settings: SsaoSettings::default(),
             width,
             height,
             viewpos,
             depth,
+            normal,
+            material,
+            ssr_params,
             ao,
             ao_blur,
             sampler,
@@ -198,7 +211,12 @@ impl Ssao {
         }
     }
 
-    fn make_targets(width: u32, height: u32) -> (Target, Target, Target, Target) {
+    #[allow(clippy::type_complexity)]
+    #[allow(clippy::type_complexity)]
+    fn make_targets(
+        width: u32,
+        height: u32,
+    ) -> (Target, Target, Target, Target, Target, Target, Target) {
         let ctxt = Context::get();
         let w = width.max(1);
         let h = height.max(1);
@@ -214,7 +232,8 @@ impl Ssao {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -245,9 +264,12 @@ impl Ssao {
                 view,
             }
         };
+        let normal = color("gbuffer_normal_roughness", wgpu::TextureFormat::Rgba16Float);
+        let material = color("gbuffer_f0_metallic", wgpu::TextureFormat::Rgba16Float);
+        let ssr_params = color("gbuffer_ssr_params", wgpu::TextureFormat::Rgba16Float);
         let ao = color("ssao_ao", wgpu::TextureFormat::R16Float);
         let ao_blur = color("ssao_ao_blur", wgpu::TextureFormat::R16Float);
-        (viewpos, depth, ao, ao_blur)
+        (viewpos, depth, normal, material, ssr_params, ao, ao_blur)
     }
 
     /// Resizes the SSAO targets if needed.
@@ -255,9 +277,13 @@ impl Ssao {
         if self.width == width.max(1) && self.height == height.max(1) {
             return;
         }
-        let (viewpos, depth, ao, ao_blur) = Self::make_targets(width, height);
+        let (viewpos, depth, normal, material, ssr_params, ao, ao_blur) =
+            Self::make_targets(width, height);
         self.viewpos = viewpos;
         self.depth = depth;
+        self.normal = normal;
+        self.material = material;
+        self.ssr_params = ssr_params;
         self.ao = ao;
         self.ao_blur = ao_blur;
         self.width = width.max(1);
@@ -277,6 +303,22 @@ impl Ssao {
     /// The prepass depth attachment.
     pub fn depth_view(&self) -> &wgpu::TextureView {
         &self.depth.view
+    }
+
+    /// The G-buffer world-normal (xyz) + linear-roughness (a) attachment.
+    pub fn normal_view(&self) -> &wgpu::TextureView {
+        &self.normal.view
+    }
+
+    /// The G-buffer F0 (rgb) + metallic (a) attachment.
+    pub fn material_view(&self) -> &wgpu::TextureView {
+        &self.material.view
+    }
+
+    /// The G-buffer per-object SSR-params attachment (intensity, infinite_thick,
+    /// distance_attenuation, fresnel).
+    pub fn ssr_params_view(&self) -> &wgpu::TextureView {
+        &self.ssr_params.view
     }
 
     /// The final (blurred) AO texture, sampled by the material.
@@ -329,7 +371,13 @@ impl Ssao {
                 },
             ],
         });
-        Self::fullscreen(encoder, &self.ssao_pipeline, &ssao_bg, &self.ao.view, "ssao_pass");
+        Self::fullscreen(
+            encoder,
+            &self.ssao_pipeline,
+            &ssao_bg,
+            &self.ao.view,
+            "ssao_pass",
+        );
 
         // Blur pass: raw AO -> blurred AO.
         let blur_bg = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {

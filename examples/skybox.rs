@@ -27,8 +27,7 @@ async fn main() {
     let mut scene = SceneNode3d::empty();
 
     // A few objects in front of the sky.
-    scene
-        .add_light(Light::directional(Vec3::new(-0.5, -0.7, -0.4)).with_intensity(2.5));
+    scene.add_light(Light::directional(Vec3::new(-0.5, -0.7, -0.4)).with_intensity(2.5));
     for i in 0..4 {
         let x = (i as f32 - 1.5) * 1.6;
         let mut s = scene.add_sphere(0.6);
@@ -44,7 +43,7 @@ async fn main() {
         .map(|p| window.set_skybox_from_file(Path::new(&p)))
         .unwrap_or(false);
     if !from_file {
-        window.set_skybox_image(&procedural_sky(1024, 512));
+        window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
     }
 
     let mut rotation = 0.0f32;
@@ -59,9 +58,7 @@ async fn main() {
                 .default_width(240.0)
                 .show(ctx, |ui| {
                     ui.checkbox(&mut enabled, "Enabled");
-                    ui.add(
-                        egui::Slider::new(&mut rotation, 0.0..=6.2832).text("rotation (rad)"),
-                    );
+                    ui.add(egui::Slider::new(&mut rotation, 0.0..=6.2832).text("rotation (rad)"));
                     ui.add(egui::Slider::new(&mut intensity, 0.0..=4.0).text("intensity"));
                 });
         });
@@ -70,39 +67,7 @@ async fn main() {
         if !enabled {
             window.clear_skybox();
         } else if !window.has_skybox() {
-            window.set_skybox_image(&procedural_sky(1024, 512));
+            window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
         }
     }
-}
-
-/// Builds a simple procedural equirectangular HDR sky: a blue zenith→horizon
-/// gradient over a darker ground, with a warm sun disc. The latitude/longitude
-/// convention matches the skybox shader (`v = acos(dir.y)/π`, `u` around Y).
-#[cfg(feature = "egui")]
-fn procedural_sky(w: u32, h: u32) -> image::DynamicImage {
-    use std::f32::consts::PI;
-    let sun_dir = glamx::Vec3::new(-0.5, 0.6, -0.4).normalize();
-    let buf = image::ImageBuffer::from_fn(w, h, |x, y| {
-        let u = (x as f32 + 0.5) / w as f32;
-        let v = (y as f32 + 0.5) / h as f32;
-        // Invert the shader mapping to get a world direction for this texel.
-        let theta = v * PI; // 0 at +Y (up), PI at -Y (down)
-        let phi = (u - 0.5) * 2.0 * PI; // around Y
-        let dir = glamx::Vec3::new(theta.sin() * phi.cos(), theta.cos(), theta.sin() * phi.sin());
-
-        let up = dir.y.max(0.0);
-        // Sky gradient (zenith blue -> warm horizon) above, dim ground below.
-        let sky = glamx::Vec3::new(0.25, 0.45, 0.85) * up
-            + glamx::Vec3::new(0.7, 0.75, 0.8) * (1.0 - up) * 0.6;
-        let ground = glamx::Vec3::new(0.12, 0.11, 0.10);
-        let mut col = if dir.y >= 0.0 { sky } else { ground };
-
-        // Warm sun disc + glow.
-        let s = dir.dot(sun_dir).clamp(-1.0, 1.0);
-        let sun = (s.max(0.0)).powf(2000.0) * 60.0 + (s.max(0.0)).powf(50.0) * 1.5;
-        col += glamx::Vec3::new(1.0, 0.9, 0.7) * sun;
-
-        image::Rgb([col.x, col.y, col.z])
-    });
-    image::DynamicImage::ImageRgb32F(buf)
 }

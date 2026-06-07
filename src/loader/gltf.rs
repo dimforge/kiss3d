@@ -88,7 +88,9 @@ pub fn load(path: &Path) -> Result<GltfModel, gltf::Error> {
     // Attach mesh primitives (as child object nodes) and skins to each node.
     for node in doc.nodes() {
         let Some(mesh) = node.mesh() else { continue };
-        let skin_data = node.skin().map(|skin| build_skin_parts(&skin, &buffers, &node_map));
+        let skin_data = node
+            .skin()
+            .map(|skin| build_skin_parts(&skin, &buffers, &node_map));
 
         for prim in &meshes[mesh.index()] {
             let mut object = Object3d::new(
@@ -242,7 +244,10 @@ fn build_skin_parts(
     skin: &gltf::Skin,
     buffers: &[gltf::buffer::Data],
     node_map: &[SceneNode3d],
-) -> (Vec<std::rc::Weak<RefCell<crate::scene::SceneNodeData3d>>>, Vec<Mat4>) {
+) -> (
+    Vec<std::rc::Weak<RefCell<crate::scene::SceneNodeData3d>>>,
+    Vec<Mat4>,
+) {
     let joints: Vec<_> = skin
         .joints()
         .map(|j| node_map[j.index()].downgrade())

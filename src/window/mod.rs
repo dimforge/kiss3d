@@ -2,12 +2,12 @@
 
 mod aov;
 mod canvas;
-#[cfg(feature = "egui")]
-mod inspector;
 mod drawing;
 #[cfg(feature = "egui")]
 mod egui_integration;
 mod events;
+#[cfg(feature = "egui")]
+mod inspector;
 #[cfg(not(target_arch = "wasm32"))]
 mod offscreen;
 #[cfg(feature = "recording")]

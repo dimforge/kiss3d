@@ -14,9 +14,13 @@ use std::any::Any;
 use std::cell::Cell;
 
 /// GPU representation of a single light.
+///
+/// This 64-byte layout is shared by the fixed primary-light uniform array
+/// ([`FrameUniforms::lights`]) and the clustered forward+ storage buffer
+/// (`crate::builtin::clustered`), so both shading paths read identical packing.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
-struct GpuLight {
+pub(crate) struct GpuLight {
     position: [f32; 3],
     light_type: u32, // 0=point, 1=directional, 2=spot
     direction: [f32; 3],
@@ -25,7 +29,11 @@ struct GpuLight {
     inner_cone_cos: f32,
     outer_cone_cos: f32,
     attenuation_radius: f32,
-    _padding: [f32; 2],
+    /// Index into `ShadowUniforms.lights` for this light's shadow metadata, or
+    /// `u32::MAX` when it casts no shadow. Used by the clustered tier; the primary
+    /// tier indexes shadows by its own uniform-array slot instead.
+    shadow_slot: u32,
+    _padding: f32,
 }
 
 impl Default for GpuLight {
@@ -39,9 +47,72 @@ impl Default for GpuLight {
             inner_cone_cos: 1.0,
             outer_cone_cos: 0.0,
             attenuation_radius: 100.0,
-            _padding: [0.0; 2],
+            shadow_slot: u32::MAX,
+            _padding: 0.0,
         }
     }
+}
+
+impl GpuLight {
+    /// Packs a scene-collected light into its GPU representation. The light
+    /// type is encoded as 0=point, 1=directional, 2=spot and the spot cone
+    /// angles are pre-converted to cosines for the shader.
+    pub(crate) fn from_collected(light: &crate::light::CollectedLight) -> GpuLight {
+        let (light_type, inner_cone_cos, outer_cone_cos, attenuation_radius) =
+            match &light.light_type {
+                LightType::Point { attenuation_radius } => (0u32, 1.0, 0.0, *attenuation_radius),
+                LightType::Directional(_) => (1u32, 1.0, 0.0, 0.0),
+                LightType::Spot {
+                    inner_cone_angle,
+                    outer_cone_angle,
+                    attenuation_radius,
+                } => (
+                    2u32,
+                    inner_cone_angle.cos(),
+                    outer_cone_angle.cos(),
+                    *attenuation_radius,
+                ),
+            };
+
+        GpuLight {
+            position: light.world_position.into(),
+            light_type,
+            direction: light.world_direction.into(),
+            intensity: light.intensity,
+            color: light.color.into(),
+            inner_cone_cos,
+            outer_cone_cos,
+            attenuation_radius,
+            shadow_slot: u32::MAX,
+            _padding: 0.0,
+        }
+    }
+}
+
+impl GpuLight {
+    /// Sets the shadow-metadata slot (see [`GpuLight::shadow_slot`]).
+    pub(crate) fn set_shadow_slot(&mut self, slot: u32) {
+        self.shadow_slot = slot;
+    }
+}
+
+/// Maximum number of reflection probes packed into the frame uniform. Must match
+/// `MAX_PROBES` in `builtin/default.wgsl` and `renderer::reflection_probe`.
+pub(crate) const MAX_PROBES: usize = crate::renderer::reflection_probe::MAX_PROBES;
+
+/// GPU representation of a single reflection probe (64 bytes), packed into the
+/// frame uniform's fixed-size probe array. Mirrors `Probe` in `default.wgsl`.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
+struct GpuProbe {
+    // xyz: world center; w: 1.0 if this slot is active, else 0.0.
+    center_active: [f32; 4],
+    // xyz: parallax-box min (world); w: array layer index.
+    box_min_layer: [f32; 4],
+    // xyz: parallax-box max (world); w: intensity.
+    box_max_intensity: [f32; 4],
+    // x: rotation (radians); y: falloff (world units); z: max LOD; w: unused.
+    params: [f32; 4],
 }
 
 /// Frame-level uniforms (view, projection, lights).
@@ -64,6 +135,21 @@ struct FrameUniforms {
     camera_pos: [f32; 4],
     // IBL params: (has_ibl, max_lod, intensity, env_rotation_radians).
     ibl_params: [f32; 4],
+    // Clustered forward+ grid: (grid_x, grid_y, grid_z, num_clustered_lights).
+    cluster_grid_dims: [f32; 4],
+    // Clustered depth slicing: (z_near, z_far, ln(z_far/z_near), unused).
+    cluster_depth: [f32; 4],
+    // Clustered tile size in pixels: (tile_w, tile_h, unused, unused).
+    cluster_tile: [f32; 4],
+    // Reflection probes: x = active probe count; yzw unused (keeps the following
+    // array 16-byte aligned).
+    probe_count: [u32; 4],
+    // World-space clip plane (a,b,c,d). When xyz != 0, fragments with
+    // dot(xyz, world_pos) + w < 0 are discarded (reflector capture clips geometry
+    // behind the mirror). All-zero = inactive.
+    clip_plane: [f32; 4],
+    // Fixed-size reflection-probe array (only the first `probe_count.x` are live).
+    probes: [GpuProbe; MAX_PROBES],
 }
 
 /// Object-level uniforms (transform, scale, color, PBR properties).
@@ -96,6 +182,16 @@ struct ObjectUniforms {
     specular_tint: [f32; 4],
     // (has_height_map, parallax_scale, unused, unused).
     parallax: [f32; 4],
+    // Per-object SSR: (intensity, infinite_thick, distance_attenuation, fresnel);
+    // intensity 0 means the object receives no SSR.
+    ssr: [f32; 4],
+    // Per-object planar reflector: world -> reflection-texture clip transform.
+    reflector_view_proj: [[f32; 4]; 4],
+    // (reflection_intensity, has_reflector, normal_falloff, unused).
+    reflection_params: [f32; 4],
+    // Reflector world-space plane normal (xyz); w unused. Used for the
+    // normal-alignment falloff.
+    reflector_normal: [f32; 4],
 }
 
 /// View uniforms for wireframe rendering (includes viewport).
@@ -178,6 +274,13 @@ pub struct ObjectMaterialGpuData {
     cached_ao_map_ptr: usize,
     cached_emissive_map_ptr: usize,
     cached_height_map_ptr: usize,
+    /// Reflection texture view bound last (the reflector target, or fallback during
+    /// capture / when not a reflector). Detects when the bind group must rebuild.
+    cached_reflection_ptr: usize,
+    /// Reflector generation bound last. The reflector's `color_view` lives in a fixed
+    /// struct slot (stable address), so a resize that replaces the underlying texture
+    /// isn't caught by `cached_reflection_ptr` alone — the generation catches it.
+    cached_reflection_gen: u64,
     // Wireframe rendering data (model uniforms are per-object)
     wireframe_model_uniform_buffer: wgpu::Buffer,
     wireframe_edge_buffer: wgpu::Buffer,
@@ -251,6 +354,8 @@ impl ObjectMaterialGpuData {
             cached_ao_map_ptr: 0,
             cached_emissive_map_ptr: 0,
             cached_height_map_ptr: 0,
+            cached_reflection_ptr: 0,
+            cached_reflection_gen: 0,
             // Wireframe rendering
             wireframe_model_uniform_buffer,
             wireframe_edge_buffer,
@@ -370,6 +475,8 @@ pub struct ObjectMaterial {
     default_ao_map: std::sync::Arc<crate::resource::Texture>,
     default_emissive_map: std::sync::Arc<crate::resource::Texture>,
     default_height_map: std::sync::Arc<crate::resource::Texture>,
+    /// Clamp+linear sampler for the per-object planar-reflection texture (binding 13).
+    reflection_sampler: wgpu::Sampler,
     // Wireframe rendering resources
     wireframe_pipeline: PipelineCache,
     wireframe_model_bind_group_layout: wgpu::BindGroupLayout,
@@ -385,6 +492,17 @@ pub struct ObjectMaterial {
     /// Frame bind group layout, kept so the group can be rebuilt when the IBL
     /// environment or SSAO texture changes.
     frame_bind_group_layout: wgpu::BindGroupLayout,
+    /// Whether this material uses the clustered forward+ pipeline variant (group 0
+    /// has storage bindings 4/5/6 and the fragment shader has the clustered loop).
+    clustered: bool,
+    /// Currently-bound clustered storage buffers (group 0 bindings 4/5/6). Start as
+    /// tiny placeholders; swapped for the renderer's real buffers by
+    /// [`set_clustered_buffers`](Self::set_clustered_buffers).
+    clustered_lights_buf: wgpu::Buffer,
+    cluster_grid_buf: wgpu::Buffer,
+    cluster_index_buf: wgpu::Buffer,
+    /// Whether the real clustered buffers have been bound yet (false = placeholders).
+    clustered_bound: bool,
     // === Per-view textures in group 0: IBL env (1/2) + SSAO (3). ===
     /// 1x1 black fallback env bound when no IBL environment is set.
     _ibl_fallback_texture: wgpu::Texture,
@@ -407,6 +525,25 @@ pub struct ObjectMaterial {
     ibl_rotation: Cell<f32>,
     /// Whether SSAO is active this frame (gates the AO sample in the shader).
     ssao_has: Cell<bool>,
+    /// Active while a reflection probe is being captured. The capture's per-face
+    /// views have no clustered cull data (and the clustered buffers may still be
+    /// placeholders), so it forces the fixed-light path; it also disables
+    /// reflection probes so captured surfaces don't sample the probe being
+    /// captured (which would create a hall-of-mirrors feedback loop).
+    capture_mode: Cell<bool>,
+    // === Reflection probes (group 0 binding 7; data in the frame uniform). ===
+    /// 1x1x1 black fallback probe array, bound when no probes are set.
+    _probe_fallback_texture: wgpu::Texture,
+    probe_fallback_view: wgpu::TextureView,
+    /// Currently-bound probe array view (clone; defaults to the fallback).
+    cur_probe_view: wgpu::TextureView,
+    /// Identity of the bound probe view (`0` = fallback) to avoid rebuilds.
+    probe_bound_ptr: usize,
+    /// Packed probe records + count + max LOD, written into the frame uniform.
+    probe_records: Cell<[GpuProbe; MAX_PROBES]>,
+    probe_count: Cell<u32>,
+    /// World-space clip plane (a,b,c,d), set during reflector capture; all-zero off.
+    clip_plane: Cell<[f32; 4]>,
     /// Dynamic buffer for object uniforms
     object_uniform_buffer: DynamicUniformBuffer<ObjectUniforms>,
     /// Bind group for object uniforms (recreated when buffer grows)
@@ -603,18 +740,66 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput, @builtin(vertex_index) 
     return out;
 }";
 
+/// Clustered forward+ storage bindings, injected into group 0 only for the
+/// clustered pipeline variant. Omitted on the fixed-light fallback so the shader
+/// declares no storage buffers (WebGL2-safe).
+const CLUSTERED_BINDINGS: &str =
+    "@group(0) @binding(4) var<storage, read> clustered_lights: array<LightData>;
+@group(0) @binding(5) var<storage, read> cluster_light_grid: array<vec2<u32>>;
+@group(0) @binding(6) var<storage, read> cluster_light_index: array<u32>;";
+
+/// The clustered-light shading loop, injected after the primary-light loop in
+/// `shade()`. Locates the fragment's cluster, then accumulates the (shadowless)
+/// contribution of every light the cull pass recorded for it.
+const CLUSTERED_LOOP: &str = "if frame.cluster_grid_dims.w > 0.5 {
+        let near = frame.cluster_depth.x;
+        let log_ratio = frame.cluster_depth.z;
+        let gz = frame.cluster_grid_dims.z;
+        let zv = max(-in.view_pos.z, near);
+        var fslice = floor(log(zv / near) / log_ratio * gz);
+        fslice = clamp(fslice, 0.0, gz - 1.0);
+        let slice = u32(fslice);
+        let gx = u32(frame.cluster_grid_dims.x);
+        let gy = u32(frame.cluster_grid_dims.y);
+        let tx = min(u32(in.clip_position.x / frame.cluster_tile.x), gx - 1u);
+        let ty = min(u32(in.clip_position.y / frame.cluster_tile.y), gy - 1u);
+        let cluster = tx + ty * gx + slice * gx * gy;
+        let cell = cluster_light_grid[cluster];
+        for (var k = 0u; k < cell.y; k = k + 1u) {
+            let li = cluster_light_index[cell.x + k];
+            let cl = clustered_lights[li];
+            var contrib = shade_light(
+                cl, in.view_pos, V, N_view, F0, albedo, metallic,
+                alpha, aniso, at, ab, aniso_t, aniso_b, cc_alpha
+            );
+            // A clustered light with an allocated shadow slot is shadow-mapped too.
+            if cl.shadow_slot != 0xffffffffu {
+                contrib *= compute_shadow(cl.shadow_slot, in.world_pos, dpos_dx, dpos_dy, receives_transmit);
+            }
+            Lo += contrib;
+        }
+    }";
+
 /// Assembles the object shader source, injecting either the plain or the deformed
-/// (skinning + morph) vertex input + vertex entry into `default.wgsl`. The whole
-/// fragment stage (and everything else) is shared between the two variants.
-fn build_object_shader_src(deformed: bool) -> String {
+/// (skinning + morph) vertex input + vertex entry into `default.wgsl`, and the
+/// clustered forward+ bindings + loop when `clustered` is set. The whole fragment
+/// stage (apart from the injected clustered loop) is shared between all variants.
+fn build_object_shader_src(deformed: bool, clustered: bool) -> String {
     let (vertex_input, vs_main) = if deformed {
         (DEFORM_VERTEX_INPUT, DEFORM_VS_MAIN)
     } else {
         (PLAIN_VERTEX_INPUT, PLAIN_VS_MAIN)
     };
+    let (cl_bindings, cl_loop) = if clustered {
+        (CLUSTERED_BINDINGS, CLUSTERED_LOOP)
+    } else {
+        ("", "")
+    };
     include_str!("default.wgsl")
         .replace("//__VERTEX_INPUT__", vertex_input)
         .replace("//__VS_MAIN__", vs_main)
+        .replace("//__CLUSTERED_BINDINGS__", cl_bindings)
+        .replace("//__CLUSTERED_LOOP__", cl_loop)
 }
 
 /// The vertex buffer layouts shared by the opaque and OIT surface pipelines.
@@ -721,51 +906,106 @@ impl ObjectMaterial {
     pub fn new() -> ObjectMaterial {
         let ctxt = Context::get();
 
-        // Create bind group layouts
+        // Clustered forward+ needs compute + fragment storage buffers. When the
+        // backend supports it (native + WebGPU) the object material uses the
+        // clustered pipeline variant (group 0 gains storage bindings 4/5/6);
+        // otherwise it falls back to the legacy fixed 8-light path (WebGL2).
+        let clustered = ctxt.supports_clustered_lighting();
+
+        // Create bind group layouts. Group 0: frame uniform (0), IBL env (1/2),
+        // SSAO (3), and — for the clustered variant — the clustered light list (4),
+        // per-cluster light grid (5) and global light-index list (6).
+        let mut frame_entries = vec![
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // Image-based-lighting environment map (+ sampler).
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // Screen-space ambient occlusion (sampled by texel via textureLoad).
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ];
+        if clustered {
+            for binding in 4..=6 {
+                frame_entries.push(wgpu::BindGroupLayoutEntry {
+                    binding,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                });
+            }
+        }
+        // Reflection-probe equirectangular array (binding 7, always present). The
+        // probe data lives in the frame uniform; this is just the layered texture.
+        // Sampled with the IBL sampler (binding 2) — no extra sampler binding.
+        frame_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 7,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        });
         let frame_bind_group_layout =
             ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("object_material_frame_bind_group_layout"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // Image-based-lighting environment map (+ sampler).
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    // Screen-space ambient occlusion (sampled by texel via textureLoad).
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                ],
+                entries: &frame_entries,
             });
+
+        // Placeholder clustered buffers, bound until the renderer hands over the
+        // real ones via `set_clustered_buffers`. Tiny (1 element each); never read
+        // while `num_clustered_lights == 0` gates the shader's clustered loop.
+        let clustered_lights_buf = ctxt.create_buffer_simple(
+            Some("object_material_clustered_lights_placeholder"),
+            64,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let cluster_grid_buf = ctxt.create_buffer_simple(
+            Some("object_material_cluster_grid_placeholder"),
+            8,
+            wgpu::BufferUsages::STORAGE,
+        );
+        let cluster_index_buf = ctxt.create_buffer_simple(
+            Some("object_material_cluster_index_placeholder"),
+            4,
+            wgpu::BufferUsages::STORAGE,
+        );
 
         // 1x1 black fallback environment, bound when no IBL is active.
         let ibl_fallback_texture = ctxt.create_texture(&wgpu::TextureDescriptor {
@@ -847,6 +1087,48 @@ impl ObjectMaterial {
         let ao_fallback_view =
             ao_fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
+        // 1x1x1 black fallback reflection-probe array, bound when no probes exist
+        // (the probe layout binding is always present).
+        let probe_fallback_texture = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("object_material_probe_fallback"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        ctxt.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &probe_fallback_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0u8; 8],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let probe_fallback_view =
+            probe_fallback_texture.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("object_material_probe_fallback_view"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+
         // Object bind group uses dynamic offset for batched uniforms
         let object_bind_group_layout =
             ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -868,7 +1150,10 @@ impl ObjectMaterial {
         // Albedo and the PBR maps share one group so the pipeline uses only 4 bind
         // groups total, within WebGPU's `maxBindGroups` limit of 4. Bindings:
         // 0/1 albedo, 2/3 normal, 4/5 metallic-roughness, 6/7 ao, 8/9 emissive.
-        let texture_entries: Vec<wgpu::BindGroupLayoutEntry> = (0..6u32)
+        // 7 texture+sampler pairs (bindings 0..13): albedo(0/1), normal(2/3),
+        // metallic-roughness(4/5), ao(6/7), emissive(8/9), height(10/11), and the
+        // per-object planar-reflection texture(12/13).
+        let texture_entries: Vec<wgpu::BindGroupLayoutEntry> = (0..7u32)
             .flat_map(|i| {
                 [
                     wgpu::BindGroupLayoutEntry {
@@ -904,6 +1189,18 @@ impl ObjectMaterial {
         let default_emissive_map = crate::resource::Texture::new_default_emissive_map();
         let default_height_map = crate::resource::Texture::new_default_height_map();
 
+        // Sampler for the per-object planar reflection (binding 13). Clamp so the
+        // projected reflection UV doesn't wrap at the screen edges.
+        let reflection_sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("object_material_reflection_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
         // Shadow bind group layout (group 3). Structurally identical to the one the
         // window's `ShadowMapper` builds, so its bind group is compatible here.
         let shadow_bind_group_layout = crate::builtin::shadow::shadow_bind_group_layout(&ctxt);
@@ -923,11 +1220,12 @@ impl ObjectMaterial {
 
         // Load shader (non-skinned variant). The skinned variant, built below,
         // shares the whole fragment stage and differs only in its vertex input +
-        // entry point. `build_object_shader_src(false)` reproduces the original
-        // `default.wgsl` byte-for-byte.
+        // entry point. When clustered lighting is unsupported,
+        // `build_object_shader_src(false, false)` reproduces the original
+        // `default.wgsl` byte-for-byte (no storage bindings, WebGL2-safe).
         let shader = ctxt.create_shader_module(
             Some("object_material_shader"),
-            &build_object_shader_src(false),
+            &build_object_shader_src(false, clustered),
         );
 
         // Shared opaque-surface pipeline builder, parameterized by the pipeline
@@ -995,7 +1293,16 @@ impl ObjectMaterial {
             let build = build_opaque.clone();
             let l = pipeline_layout.clone();
             let s = shader.clone();
-            move |sc| build(&l, &s, false, Some(wgpu::Face::Back), "object_material_pipeline_cull", sc)
+            move |sc| {
+                build(
+                    &l,
+                    &s,
+                    false,
+                    Some(wgpu::Face::Back),
+                    "object_material_pipeline_cull",
+                    sc,
+                )
+            }
         });
         let pipeline_no_cull = PipelineCache::new({
             let build = build_opaque.clone();
@@ -1099,14 +1406,30 @@ impl ObjectMaterial {
             let l = pipeline_layout.clone();
             let s = shader.clone();
             move |sc| {
-                build(&l, &s, false, Some(wgpu::Face::Back), "object_material_oit_pipeline_cull", sc)
+                build(
+                    &l,
+                    &s,
+                    false,
+                    Some(wgpu::Face::Back),
+                    "object_material_oit_pipeline_cull",
+                    sc,
+                )
             }
         });
         let oit_pipeline_no_cull = PipelineCache::new({
             let build = build_oit.clone();
             let l = pipeline_layout.clone();
             let s = shader.clone();
-            move |sc| build(&l, &s, false, None, "object_material_oit_pipeline_no_cull", sc)
+            move |sc| {
+                build(
+                    &l,
+                    &s,
+                    false,
+                    None,
+                    "object_material_oit_pipeline_no_cull",
+                    sc,
+                )
+            }
         });
 
         // Depth + view-position prepass pipeline: reuses the surface vertex stage
@@ -1137,11 +1460,31 @@ impl ObjectMaterial {
                     fragment: Some(wgpu::FragmentState {
                         module: shader,
                         entry_point: Some("fs_prepass"),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba16Float,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
+                        // G-buffer MRT: viewpos, world-normal+roughness, F0+metallic,
+                        // per-object SSR params. SSAO reads only target 0; the rest
+                        // feed SSR.
+                        targets: &[
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                            Some(wgpu::ColorTargetState {
+                                format: wgpu::TextureFormat::Rgba16Float,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            }),
+                        ],
                         compilation_options: Default::default(),
                     }),
                     primitive: wgpu::PrimitiveState {
@@ -1197,14 +1540,23 @@ impl ObjectMaterial {
                 });
             let deform_shader = ctxt.create_shader_module(
                 Some("object_material_deform_shader"),
-                &build_object_shader_src(true),
+                &build_object_shader_src(true, clustered),
             );
 
             let pipeline_cull = PipelineCache::new({
                 let build = build_opaque.clone();
                 let l = deform_pipeline_layout.clone();
                 let s = deform_shader.clone();
-                move |sc| build(&l, &s, true, Some(wgpu::Face::Back), "object_material_deform_cull", sc)
+                move |sc| {
+                    build(
+                        &l,
+                        &s,
+                        true,
+                        Some(wgpu::Face::Back),
+                        "object_material_deform_cull",
+                        sc,
+                    )
+                }
             });
             let pipeline_no_cull = PipelineCache::new({
                 let build = build_opaque.clone();
@@ -1216,7 +1568,16 @@ impl ObjectMaterial {
                 let build = build_oit.clone();
                 let l = deform_pipeline_layout.clone();
                 let s = deform_shader.clone();
-                move |sc| build(&l, &s, true, Some(wgpu::Face::Back), "object_material_deform_oit_cull", sc)
+                move |sc| {
+                    build(
+                        &l,
+                        &s,
+                        true,
+                        Some(wgpu::Face::Back),
+                        "object_material_deform_oit_cull",
+                        sc,
+                    )
+                }
             });
             let oit_pipeline_no_cull = PipelineCache::new({
                 let build = build_oit.clone();
@@ -1677,27 +2038,46 @@ impl ObjectMaterial {
         });
 
         // Create frame bind group
+        let mut frame_group_entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: frame_uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&ibl_fallback_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&ibl_fallback_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&ao_fallback_view),
+            },
+        ];
+        if clustered {
+            frame_group_entries.push(wgpu::BindGroupEntry {
+                binding: 4,
+                resource: clustered_lights_buf.as_entire_binding(),
+            });
+            frame_group_entries.push(wgpu::BindGroupEntry {
+                binding: 5,
+                resource: cluster_grid_buf.as_entire_binding(),
+            });
+            frame_group_entries.push(wgpu::BindGroupEntry {
+                binding: 6,
+                resource: cluster_index_buf.as_entire_binding(),
+            });
+        }
+        frame_group_entries.push(wgpu::BindGroupEntry {
+            binding: 7,
+            resource: wgpu::BindingResource::TextureView(&probe_fallback_view),
+        });
         let frame_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shared_frame_bind_group"),
             layout: &frame_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: frame_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&ibl_fallback_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&ibl_fallback_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&ao_fallback_view),
-                },
-            ],
+            entries: &frame_group_entries,
         });
 
         // Dynamic buffer for object uniforms
@@ -1872,6 +2252,7 @@ impl ObjectMaterial {
             default_ao_map,
             default_emissive_map,
             default_height_map,
+            reflection_sampler,
             wireframe_pipeline,
             wireframe_model_bind_group_layout,
             points_pipeline,
@@ -1879,6 +2260,11 @@ impl ObjectMaterial {
             frame_uniform_buffer,
             frame_bind_group,
             frame_bind_group_layout,
+            clustered,
+            clustered_lights_buf,
+            cluster_grid_buf,
+            cluster_index_buf,
+            clustered_bound: false,
             cur_ibl_view: ibl_fallback_view.clone(),
             cur_ibl_sampler: ibl_fallback_sampler.clone(),
             cur_ao_view: ao_fallback_view.clone(),
@@ -1894,6 +2280,14 @@ impl ObjectMaterial {
             ibl_intensity: Cell::new(1.0),
             ibl_rotation: Cell::new(0.0),
             ssao_has: Cell::new(false),
+            capture_mode: Cell::new(false),
+            cur_probe_view: probe_fallback_view.clone(),
+            _probe_fallback_texture: probe_fallback_texture,
+            probe_fallback_view,
+            probe_bound_ptr: 0,
+            probe_records: Cell::new([GpuProbe::default(); MAX_PROBES]),
+            probe_count: Cell::new(0),
+            clip_plane: Cell::new([0.0; 4]),
             object_uniform_buffer,
             object_bind_group: Some(object_bind_group),
             object_bind_group_capacity,
@@ -1915,27 +2309,46 @@ impl ObjectMaterial {
     /// resources: the frame uniform, the IBL environment, and the SSAO texture.
     fn rebuild_frame_bind_group(&mut self) {
         let ctxt = Context::get();
+        let mut entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: self.frame_uniform_buffer.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::TextureView(&self.cur_ibl_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::Sampler(&self.cur_ibl_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&self.cur_ao_view),
+            },
+        ];
+        if self.clustered {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 4,
+                resource: self.clustered_lights_buf.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 5,
+                resource: self.cluster_grid_buf.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 6,
+                resource: self.cluster_index_buf.as_entire_binding(),
+            });
+        }
+        entries.push(wgpu::BindGroupEntry {
+            binding: 7,
+            resource: wgpu::BindingResource::TextureView(&self.cur_probe_view),
+        });
         self.frame_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shared_frame_bind_group"),
             layout: &self.frame_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.frame_uniform_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&self.cur_ibl_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.cur_ibl_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&self.cur_ao_view),
-                },
-            ],
+            entries: &entries,
         });
     }
 
@@ -1947,6 +2360,7 @@ impl ObjectMaterial {
         ao_map: &Texture,
         emissive_map: &Texture,
         height_map: &Texture,
+        reflection_view: &wgpu::TextureView,
     ) -> wgpu::BindGroup {
         let ctxt = Context::get();
         let textures = [
@@ -1957,7 +2371,7 @@ impl ObjectMaterial {
             emissive_map,
             height_map,
         ];
-        let entries: Vec<wgpu::BindGroupEntry> = textures
+        let mut entries: Vec<wgpu::BindGroupEntry> = textures
             .iter()
             .enumerate()
             .flat_map(|(i, tex)| {
@@ -1974,6 +2388,17 @@ impl ObjectMaterial {
                 ]
             })
             .collect();
+        // Per-object planar reflection (binding 12/13): the reflector's target, or a
+        // 1x1 fallback when the object isn't a reflector. Uses the dedicated clamp
+        // sampler so the projected UV doesn't wrap.
+        entries.push(wgpu::BindGroupEntry {
+            binding: 12,
+            resource: wgpu::BindingResource::TextureView(reflection_view),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 13,
+            resource: wgpu::BindingResource::Sampler(&self.reflection_sampler),
+        });
         ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("object_material_texture_bind_group"),
             layout: &self.texture_bind_group_layout,
@@ -2114,45 +2539,23 @@ impl Material3d for ObjectMaterial {
             // Write frame uniforms once per frame
             let (view, proj) = camera.view_transform_pair(pass);
 
-            // Convert collected lights to GPU format
+            // Split into the primary tier (this fixed uniform array, with shadows)
+            // and the clustered overflow tier. The clustered lights are uploaded and
+            // shaded separately by `crate::builtin::clustered`; here we only fill the
+            // primary slots, in the exact order the shadow atlas also uses.
+            let (primary, clustered) = lights.split_primary_clustered();
             let mut gpu_lights: [GpuLight; MAX_LIGHTS] = [GpuLight::default(); MAX_LIGHTS];
-            for (i, collected_light) in lights.lights.iter().take(MAX_LIGHTS).enumerate() {
-                let (light_type, inner_cone_cos, outer_cone_cos, attenuation_radius) =
-                    match &collected_light.light_type {
-                        LightType::Point { attenuation_radius } => {
-                            (0u32, 1.0, 0.0, *attenuation_radius)
-                        }
-                        LightType::Directional(_) => (1u32, 1.0, 0.0, 0.0),
-                        LightType::Spot {
-                            inner_cone_angle,
-                            outer_cone_angle,
-                            attenuation_radius,
-                        } => (
-                            2u32,
-                            inner_cone_angle.cos(),
-                            outer_cone_angle.cos(),
-                            *attenuation_radius,
-                        ),
-                    };
-
-                gpu_lights[i] = GpuLight {
-                    position: collected_light.world_position.into(),
-                    light_type,
-                    direction: collected_light.world_direction.into(),
-                    intensity: collected_light.intensity,
-                    color: collected_light.color.into(),
-                    inner_cone_cos,
-                    outer_cone_cos,
-                    attenuation_radius,
-                    _padding: [0.0; 2],
-                };
+            for (slot, &li) in primary.iter().take(MAX_LIGHTS).enumerate() {
+                gpu_lights[slot] = GpuLight::from_collected(&lights.lights[li]);
             }
+            let num_primary = primary.len().min(MAX_LIGHTS) as u32;
+            let num_clustered = clustered.len() as u32;
 
             let frame_uniforms = FrameUniforms {
                 view: view.to_mat4().to_cols_array_2d(),
                 proj: proj.to_cols_array_2d(),
                 lights: gpu_lights,
-                num_lights: lights.lights.len().min(MAX_LIGHTS) as u32,
+                num_lights: num_primary,
                 ambient_intensity: lights.ambient,
                 _padding: [0.0; 2],
                 ambient_color: [
@@ -2179,6 +2582,42 @@ impl Material3d for ObjectMaterial {
                     self.ibl_intensity.get(),
                     self.ibl_rotation.get(),
                 ],
+                cluster_grid_dims: {
+                    use crate::builtin::clustered::{GRID_X, GRID_Y, GRID_Z};
+                    let n = if self.clustered && !self.capture_mode.get() {
+                        num_clustered
+                    } else {
+                        0
+                    };
+                    [GRID_X as f32, GRID_Y as f32, GRID_Z as f32, n as f32]
+                },
+                cluster_depth: {
+                    let (near, far) = camera.clip_planes();
+                    [near, far, (far / near).ln(), 0.0]
+                },
+                cluster_tile: {
+                    use crate::builtin::clustered::{GRID_X, GRID_Y};
+                    [
+                        viewport_width as f32 / GRID_X as f32,
+                        viewport_height as f32 / GRID_Y as f32,
+                        0.0,
+                        0.0,
+                    ]
+                },
+                // Probes are suppressed during capture so captured surfaces reflect
+                // only the skybox/IBL, not the probe being captured (no feedback).
+                probe_count: [
+                    if self.capture_mode.get() {
+                        0
+                    } else {
+                        self.probe_count.get()
+                    },
+                    0,
+                    0,
+                    0,
+                ],
+                clip_plane: self.clip_plane.get(),
+                probes: self.probe_records.get(),
             };
 
             ctxt.write_buffer(
@@ -2286,11 +2725,33 @@ impl Material3d for ObjectMaterial {
                 [t.r, t.g, t.b, t.a]
             },
             parallax: [
-                if data.height_map().is_some() { 1.0 } else { 0.0 },
+                if data.height_map().is_some() {
+                    1.0
+                } else {
+                    0.0
+                },
                 data.parallax_scale(),
                 data.parallax_layers(),
                 data.parallax_method().code(),
             ],
+            ssr: crate::renderer::SsrMaterial::pack(data.ssr()),
+            reflector_view_proj: match data.reflector() {
+                Some(r) => r.view_proj().to_cols_array_2d(),
+                None => glamx::Mat4::IDENTITY.to_cols_array_2d(),
+            },
+            reflection_params: match data.reflector() {
+                Some(r) => [r.intensity(), 1.0, r.normal_falloff(), 0.0],
+                None => [0.0; 4],
+            },
+            reflector_normal: match data.reflector() {
+                // World plane normal = object world rotation * the reflector's
+                // object-space normal (the falloff compares the surface normal to it).
+                Some(r) => {
+                    let n = (transform.rotation * r.local_normal()).normalize();
+                    [n.x, n.y, n.z, 0.0]
+                }
+                None => [0.0; 4],
+            },
         };
 
         // Push to dynamic buffer and store offset in gpu_data
@@ -2398,6 +2859,49 @@ impl Material3d for ObjectMaterial {
         }
     }
 
+    fn set_reflection_probes(&mut self, probes: Option<crate::resource::ProbeLighting<'_>>) {
+        match probes {
+            Some(p) if !p.probes.is_empty() => {
+                let mut records = [GpuProbe::default(); MAX_PROBES];
+                let n = p.probes.len().min(MAX_PROBES);
+                for (slot, probe) in p.probes.iter().take(MAX_PROBES).enumerate() {
+                    let c = probe.center;
+                    let h = probe.half_extents;
+                    records[slot] = GpuProbe {
+                        center_active: [c.x, c.y, c.z, 1.0],
+                        box_min_layer: [c.x - h.x, c.y - h.y, c.z - h.z, probe.layer as f32],
+                        box_max_intensity: [c.x + h.x, c.y + h.y, c.z + h.z, probe.intensity],
+                        params: [probe.rotation, probe.falloff.max(1e-4), p.max_lod, 0.0],
+                    };
+                }
+                self.probe_records.set(records);
+                self.probe_count.set(n as u32);
+                let ptr = p.array_view as *const wgpu::TextureView as usize;
+                if self.probe_bound_ptr != ptr {
+                    self.cur_probe_view = p.array_view.clone();
+                    self.probe_bound_ptr = ptr;
+                    self.rebuild_frame_bind_group();
+                }
+            }
+            _ => {
+                self.probe_count.set(0);
+                if self.probe_bound_ptr != 0 {
+                    self.cur_probe_view = self.probe_fallback_view.clone();
+                    self.probe_bound_ptr = 0;
+                    self.rebuild_frame_bind_group();
+                }
+            }
+        }
+    }
+
+    fn set_capture_mode(&mut self, on: bool) {
+        self.capture_mode.set(on);
+    }
+
+    fn set_clip_plane(&mut self, plane: Option<[f32; 4]>) {
+        self.clip_plane.set(plane.unwrap_or([0.0; 4]));
+    }
+
     fn set_ssao(&mut self, ao: Option<&wgpu::TextureView>) {
         match ao {
             Some(view) => {
@@ -2417,6 +2921,29 @@ impl Material3d for ObjectMaterial {
                     self.rebuild_frame_bind_group();
                 }
             }
+        }
+    }
+
+    fn set_clustered_buffers(
+        &mut self,
+        lights: &wgpu::Buffer,
+        grid: &wgpu::Buffer,
+        index: &wgpu::Buffer,
+        force_rebind: bool,
+    ) {
+        if !self.clustered {
+            return;
+        }
+        // Rebind on the first frame (placeholders -> real buffers) and whenever the
+        // light buffer was reallocated (its handle changed). The grid/index buffers
+        // are fixed-size, so only `force_rebind` (from a light-buffer grow) matters
+        // after the initial bind.
+        if force_rebind || !self.clustered_bound {
+            self.clustered_lights_buf = lights.clone();
+            self.cluster_grid_buf = grid.clone();
+            self.cluster_index_buf = index.clone();
+            self.clustered_bound = true;
+            self.rebuild_frame_bind_group();
         }
     }
 
@@ -2458,6 +2985,14 @@ impl Material3d for ObjectMaterial {
         context: &RenderContext,
     ) {
         let ctxt = Context::get();
+
+        // A reflector surface is excluded from every reflection capture: it would
+        // otherwise sample its own (currently-written) target — an illegal usage —
+        // and a mirror doesn't render other mirrors (v1). Its own surface is thus
+        // absent from its reflection too (the floor doesn't reflect itself).
+        if self.capture_mode.get() && data.reflector().is_some() {
+            return;
+        }
 
         // Order-independent transparency phase split: opaque surfaces (and all
         // wireframe/point overlays) draw in the opaque phase; surfaces whose color
@@ -2557,13 +3092,31 @@ impl Material3d for ObjectMaterial {
         let emissive_ptr = std::sync::Arc::as_ptr(emissive_map) as usize;
         let height_ptr = std::sync::Arc::as_ptr(height_map) as usize;
 
+        // Per-object planar reflection (binding 12). During capture, bind the 1x1
+        // fallback (reflections aren't sampled then, and binding a reflector's own
+        // target while it's the render target would be an illegal usage) — note
+        // reflector objects are skipped entirely during capture (see below), so this
+        // fallback only applies to non-reflector objects. In the main pass, a
+        // reflector object binds its own target.
+        let (reflection_view, reflection_gen) = if self.capture_mode.get() {
+            (&self.default_emissive_map.view, 0)
+        } else {
+            match data.reflector() {
+                Some(r) => (r.color_view(), r.generation()),
+                None => (&self.default_emissive_map.view, 0),
+            }
+        };
+        let reflection_ptr = reflection_view as *const wgpu::TextureView as usize;
+
         let textures_changed = gpu_data.texture_bind_group.is_none()
             || gpu_data.cached_texture_ptr != texture_ptr
             || gpu_data.cached_normal_map_ptr != normal_ptr
             || gpu_data.cached_metallic_roughness_map_ptr != mr_ptr
             || gpu_data.cached_ao_map_ptr != ao_ptr
             || gpu_data.cached_emissive_map_ptr != emissive_ptr
-            || gpu_data.cached_height_map_ptr != height_ptr;
+            || gpu_data.cached_height_map_ptr != height_ptr
+            || gpu_data.cached_reflection_ptr != reflection_ptr
+            || gpu_data.cached_reflection_gen != reflection_gen;
 
         if textures_changed {
             gpu_data.texture_bind_group = Some(self.create_texture_bind_group(
@@ -2573,6 +3126,7 @@ impl Material3d for ObjectMaterial {
                 ao_map,
                 emissive_map,
                 height_map,
+                reflection_view,
             ));
             gpu_data.cached_texture_ptr = texture_ptr;
             gpu_data.cached_normal_map_ptr = normal_ptr;
@@ -2580,11 +3134,13 @@ impl Material3d for ObjectMaterial {
             gpu_data.cached_ao_map_ptr = ao_ptr;
             gpu_data.cached_emissive_map_ptr = emissive_ptr;
             gpu_data.cached_height_map_ptr = height_ptr;
+            gpu_data.cached_reflection_ptr = reflection_ptr;
+            gpu_data.cached_reflection_gen = reflection_gen;
         }
 
         // Render surface (filled triangles)
         if render_surface {
-            let cull = data.backface_culling_enabled();
+            let cull = data.backface_culling_enabled() && !context.force_no_cull;
 
             // A skinned/morphed object uses the deform pipeline only when the deform
             // pipelines exist (native) and the object's deform bind group was built
@@ -2611,7 +3167,9 @@ impl Material3d for ObjectMaterial {
                 match (context.phase, cull) {
                     (crate::resource::RenderPhase::Prepass, _) => &self.prepass_pipeline,
                     (crate::resource::RenderPhase::Transparent, true) => &self.oit_pipeline_cull,
-                    (crate::resource::RenderPhase::Transparent, false) => &self.oit_pipeline_no_cull,
+                    (crate::resource::RenderPhase::Transparent, false) => {
+                        &self.oit_pipeline_no_cull
+                    }
                     (crate::resource::RenderPhase::Opaque, true) => &self.pipeline_cull,
                     (crate::resource::RenderPhase::Opaque, false) => &self.pipeline_no_cull,
                 }

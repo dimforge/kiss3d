@@ -67,9 +67,12 @@ impl Exposure {
     /// * `aperture_f_stops` — lens aperture (e.g. `4.0` for f/4).
     /// * `shutter_speed_s` — shutter open time in seconds (e.g. `1.0/250.0`).
     /// * `sensitivity_iso` — sensor ISO sensitivity (e.g. `100.0`).
-    pub fn from_physical(aperture_f_stops: f32, shutter_speed_s: f32, sensitivity_iso: f32) -> Self {
-        let ev100 = ((aperture_f_stops * aperture_f_stops) / shutter_speed_s
-            * 100.0
+    pub fn from_physical(
+        aperture_f_stops: f32,
+        shutter_speed_s: f32,
+        sensitivity_iso: f32,
+    ) -> Self {
+        let ev100 = ((aperture_f_stops * aperture_f_stops) / shutter_speed_s * 100.0
             / sensitivity_iso)
             .log2();
         Exposure { ev100 }

@@ -243,20 +243,6 @@ impl Window {
             // Render pass is dropped here, ending the clear pass
         }
 
-        // Skybox: drawn full-screen into the HDR film right after the clear, so the
-        // opaque pass overwrites it wherever geometry is visible. Uses the primary
-        // (pass 0) inverse view-projection; since the sky is at infinity this is
-        // also correct for stereo (both eyes share the view rotation). No-op when
-        // no skybox environment is set.
-        if self.skybox.is_set() {
-            self.skybox.render(
-                &mut encoder,
-                &color_view,
-                sample_count,
-                camera.inverse_transformation(),
-            );
-        }
-
         // Signal start of new frame to all materials (for dynamic buffer clearing)
         MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
 
@@ -278,12 +264,44 @@ impl Window {
             }
         }
 
-        // SSAO: ensure resources exist/sized, then bind the (persistent) AO
-        // texture + set the enable flag on the material BEFORE prepare() — the
-        // flag is baked into the frame uniform there. The AO contents are
-        // computed below (after prepare propagates transforms) into that same
-        // texture, before the opaque pass samples it.
-        if self.ssao_enabled {
+        // Supply the reflection probes (parallax-corrected localized env maps) to
+        // the default material, or clear them when none are registered.
+        {
+            let default_mat = MaterialManager3d::get_global_manager(|mm| mm.get_default());
+            let mut mat = default_mat.borrow_mut();
+            match self.reflection_probes.as_ref() {
+                Some(probes) if !probes.is_empty() => {
+                    let records: Vec<crate::resource::ProbeData> = probes
+                        .probes()
+                        .iter()
+                        .enumerate()
+                        .map(|(layer, p)| crate::resource::ProbeData {
+                            center: p.center,
+                            half_extents: p.half_extents,
+                            falloff: p.falloff,
+                            intensity: p.intensity,
+                            rotation: p.rotation,
+                            layer: layer as u32,
+                        })
+                        .collect();
+                    mat.set_reflection_probes(Some(crate::resource::ProbeLighting {
+                        array_view: probes.array_view(),
+                        probes: &records,
+                        max_lod: probes.max_lod(),
+                    }));
+                }
+                _ => mat.set_reflection_probes(None),
+            }
+        }
+
+        // SSAO / SSR share the geometry G-buffer prepass. Ensure the prepass
+        // resources exist/sized whenever either effect is active, then bind the
+        // (persistent) AO texture + set the enable flag on the material BEFORE
+        // prepare() — the flag is baked into the frame uniform there. The AO
+        // contents are computed below (after prepare propagates transforms) into
+        // that same texture, before the opaque pass samples it.
+        let ssr_active = self.ssr_enabled && Context::get().supports_clustered_lighting();
+        if self.ssao_enabled || ssr_active {
             let ssao = self
                 .ssao
                 .get_or_insert_with(|| crate::renderer::Ssao::new(w, h));
@@ -303,6 +321,162 @@ impl Window {
         let mut lights = LightCollection::with_ambient(self.ambient_intensity);
         lights.ambient_color = self.ambient_color;
         lights.fog = self.fog;
+
+        // Reflection-probe runtime capture (queued via `capture_reflection_probe`).
+        // For each queued probe, render the scene into six cube faces from the probe
+        // center and reproject them into the probe's environment map. Runs before
+        // the main passes so the captured maps are ready for the opaque pass that
+        // samples them. Uses the fixed-light path (per-face views have no clustered
+        // cull data) and the previous frame's shadow atlas.
+        if !self.pending_probe_captures.is_empty() && scene.is_some() {
+            let captures = std::mem::take(&mut self.pending_probe_captures);
+            let (znear, zfar) = camera.clip_planes();
+            const FACE: u32 = 256;
+            if self.probe_capture.is_none() {
+                self.probe_capture = Some(crate::renderer::ProbeCapture::new(FACE));
+            }
+            // Force the non-clustered shading path for the capture frame uniforms.
+            MaterialManager3d::get_global_manager(|mm| mm.get_default())
+                .borrow_mut()
+                .set_capture_mode(true);
+
+            // Each cube face must be its own queue submission. The frame uniform
+            // (and the object-uniform buffer) are shared and uploaded with
+            // `queue.write_buffer`, whose writes coalesce *before* any command
+            // buffer in the same submission runs — so if all six faces shared the
+            // frame encoder, the last face's (or the main render's) uniforms would
+            // clobber every earlier face, capturing the main view with probes on
+            // instead of six probe-less cube faces (a feedback loop). Submitting
+            // per face makes each face's uniforms take effect.
+            let ctxt = Context::get();
+            let sky_set = self.skybox.is_set();
+            for idx in captures {
+                let center = match self.reflection_probes.as_ref() {
+                    Some(p) if idx < p.len() => p.probes()[idx].center,
+                    _ => continue,
+                };
+                for face in 0..6usize {
+                    let mut cam = crate::renderer::CubeFaceCamera::new(center, face, znear, zfar);
+                    // Bump the frame counter so prepare writes this face's uniforms.
+                    MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
+                    let mut cap_lights = LightCollection::with_ambient(self.ambient_intensity);
+                    cap_lights.ambient_color = self.ambient_color;
+                    cap_lights.fog = self.fog;
+                    if let Some(scene) = scene.as_deref_mut() {
+                        scene
+                            .data_mut()
+                            .prepare(0, &mut cam, &mut cap_lights, FACE, FACE);
+                        scene.update_deformations();
+                    }
+                    MaterialManager3d::get_global_manager(|mm| mm.flush());
+
+                    let mut fenc =
+                        ctxt.create_command_encoder(Some("probe_capture_face_encoder"));
+                    let cap = self.probe_capture.as_ref().unwrap();
+                    if sky_set {
+                        self.skybox.render(
+                            &mut fenc,
+                            cap.face_color_view(face),
+                            1,
+                            cam.inverse_transformation(),
+                        );
+                    }
+                    let ctx = RenderContext {
+                        surface_format: crate::post_processing::HDR_FORMAT,
+                        sample_count: 1,
+                        viewport_width: FACE,
+                        viewport_height: FACE,
+                        render_layers: self.reflection_capture_layers,
+                        force_no_cull: false,
+                        shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                        phase: RenderPhase::Opaque,
+                    };
+                    {
+                        let load = if sky_set {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                        };
+                        let mut pass = fenc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("probe_capture_face"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: cap.face_color_view(face),
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load,
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: cap.depth_view(),
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        if let Some(scene) = scene.as_deref_mut() {
+                            scene
+                                .data_mut()
+                                .render(0, &mut cam, &cap_lights, &mut pass, &ctx);
+                        }
+                    }
+                    ctxt.submit(std::iter::once(fenc.finish()));
+                }
+
+                // Reproject the six faces into the probe's environment map + mips
+                // (its own submission, after the face submits that produced them).
+                if let Some(probes) = self.reflection_probes.as_ref() {
+                    let dst = probes.layer_mip0_view(idx);
+                    let mut renc =
+                        ctxt.create_command_encoder(Some("probe_reproject_encoder"));
+                    self.probe_capture.as_ref().unwrap().reproject(&mut renc, &dst);
+                    probes.generate_layer_mips(&mut renc, idx);
+                    ctxt.submit(std::iter::once(renc.finish()));
+                }
+            }
+
+            // Restore clustered shading and bump the counter so the main passes
+            // re-write the real camera's frame uniforms below.
+            MaterialManager3d::get_global_manager(|mm| mm.get_default())
+                .borrow_mut()
+                .set_capture_mode(false);
+            MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
+        }
+
+        // === Planar reflectors (mirrors) ===
+        // Discover reflector surfaces in the scene, render the scene from each one's
+        // mirror camera into its own texture, and store the reflected view-proj so
+        // the surface samples it during the main pass. Runs before the per-pass loop;
+        // like probe capture it uses the previous frame's shadow atlas and a separate
+        // queue submission per reflector (the `write_buffer` coalescing rule).
+        self.render_reflectors(scene.as_deref_mut(), camera, w, h);
+
+        // Skybox: drawn full-screen into the HDR film right after the clear, so the
+        // opaque pass overwrites it wherever geometry is visible. Uses the primary
+        // (pass 0) inverse view-projection; since the sky is at infinity this is
+        // also correct for stereo (both eyes share the view rotation). No-op when
+        // no skybox environment is set. Recorded into `encoder` here (after the
+        // clear pass, before the opaque pass — command order is preserved), but
+        // *issued* after the probe-capture and planar-reflector passes so its
+        // `write_buffer` to the shared skybox uniform is the last one before the
+        // main submit (those auxiliary passes reuse the same uniform with their own
+        // matrices and would otherwise leave it holding a mirror/cube-face view).
+        if self.skybox.is_set() {
+            self.skybox.render(
+                &mut encoder,
+                &color_view,
+                sample_count,
+                camera.inverse_transformation(),
+            );
+        }
 
         // Render the 3D scene using two-phase rendering
         for pass in 0usize..camera.num_passes() {
@@ -324,14 +498,21 @@ impl Window {
             // already propagated and lights collected by `prepare`. Only meaningful
             // for the first pass; stereo passes reuse the same shadow maps.
             if let Some(scene) = scene.as_deref_mut() {
-                self.shadow_mapper
-                    .render(scene, &*camera, &lights, &mut encoder, &mut self.gpu_timer);
+                self.shadow_mapper.render(
+                    scene,
+                    &*camera,
+                    &lights,
+                    &mut encoder,
+                    &mut self.gpu_timer,
+                );
             }
 
-            // Phase 2.6: SSAO prepass + compute (first pass only). Render the
-            // scene's view-space positions into the SSAO prepass target, then run
-            // the SSAO + blur passes into the AO texture the opaque pass samples.
-            if self.ssao_enabled && pass == 0 {
+            // Phase 2.6: geometry G-buffer prepass (first pass only), shared by SSAO
+            // and SSR. Renders view-space positions + world normal/roughness + F0/
+            // metallic into the prepass MRT, then (if SSAO is on) runs the SSAO +
+            // blur passes into the AO texture the opaque pass samples. SSR consumes
+            // the same G-buffer after the opaque pass.
+            if (self.ssao_enabled || ssr_active) && pass == 0 {
                 if let Some(scene) = scene.as_deref_mut() {
                     let ssao = self.ssao.as_ref().unwrap();
                     let prepass_ctx = RenderContext {
@@ -340,22 +521,44 @@ impl Window {
                         viewport_width: w,
                         viewport_height: h,
                         render_layers: camera.render_layers(),
+                        force_no_cull: false,
                         shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
                         phase: RenderPhase::Prepass,
                     };
                     {
+                        let clear_color = wgpu::Operations {
+                            // a = 0 marks background (no geometry).
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        };
                         let mut pp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                            label: Some("ssao_prepass"),
-                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                                view: ssao.viewpos_view(),
-                                resolve_target: None,
-                                ops: wgpu::Operations {
-                                    // a = 0 marks background (no geometry).
-                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                                    store: wgpu::StoreOp::Store,
-                                },
-                                depth_slice: None,
-                            })],
+                            label: Some("gbuffer_prepass"),
+                            color_attachments: &[
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: ssao.viewpos_view(),
+                                    resolve_target: None,
+                                    ops: clear_color,
+                                    depth_slice: None,
+                                }),
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: ssao.normal_view(),
+                                    resolve_target: None,
+                                    ops: clear_color,
+                                    depth_slice: None,
+                                }),
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: ssao.material_view(),
+                                    resolve_target: None,
+                                    ops: clear_color,
+                                    depth_slice: None,
+                                }),
+                                Some(wgpu::RenderPassColorAttachment {
+                                    view: ssao.ssr_params_view(),
+                                    resolve_target: None,
+                                    ops: clear_color,
+                                    depth_slice: None,
+                                }),
+                            ],
                             depth_stencil_attachment: Some(
                                 wgpu::RenderPassDepthStencilAttachment {
                                     view: ssao.depth_view(),
@@ -374,9 +577,35 @@ impl Window {
                             .data_mut()
                             .render(0, camera, &lights, &mut pp, &prepass_ctx);
                     }
-                    let (_, proj) = camera.view_transform_pair(0);
-                    ssao.compute(&mut encoder, proj);
+                    if self.ssao_enabled {
+                        let (_, proj) = camera.view_transform_pair(0);
+                        ssao.compute(&mut encoder, proj);
+                    }
                 }
+            }
+
+            // Phase 2.7: Clustered forward+ light culling (first pass only). Uploads
+            // the overflow lights (stamped with the shadow slots the shadow pass just
+            // assigned), rebuilds the cluster AABBs when the projection/viewport
+            // changed, and culls lights into the clusters the object material's
+            // fragment shader reads. Stereo passes reuse the result.
+            if pass == 0 && Context::get().supports_clustered_lighting() {
+                // Cheap copy so the clustered borrow below doesn't alias the mapper.
+                let shadow_slots = self.shadow_mapper.shadow_slots().to_vec();
+                let clustered = self
+                    .clustered
+                    .get_or_insert_with(|| crate::builtin::clustered::Clustered::new(w, h));
+                let realloc = clustered.run(&mut encoder, &lights, &shadow_slots, &*camera, w, h);
+                let lights_buf = clustered.lights_buffer().clone();
+                let grid_buf = clustered.grid_buffer().clone();
+                let index_buf = clustered.index_buffer().clone();
+                let default_mat = MaterialManager3d::get_global_manager(|mm| mm.get_default());
+                default_mat.borrow_mut().set_clustered_buffers(
+                    &lights_buf,
+                    &grid_buf,
+                    &index_buf,
+                    realloc,
+                );
             }
 
             // Phase 3: Render - issue draw calls using a SINGLE render pass.
@@ -389,6 +618,7 @@ impl Window {
                     viewport_width: w,
                     viewport_height: h,
                     render_layers: camera.render_layers(),
+                    force_no_cull: false,
                     shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
                     phase: RenderPhase::Opaque,
                 };
@@ -481,6 +711,7 @@ impl Window {
                 viewport_width: w,
                 viewport_height: h,
                 render_layers: camera.render_layers(),
+                force_no_cull: false,
                 shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
                 phase: RenderPhase::Transparent,
             };
@@ -628,6 +859,42 @@ impl Window {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+        }
+
+        // Screen-space reflections: now that the opaque scene is resolved into the
+        // single-sample HDR texture, march the G-buffer and additively composite
+        // reflections into it (before bloom/tonemap). Uses the pass-0 matrices and
+        // the global skybox environment as the off-screen fallback. Skipped on
+        // backends without the required support (WebGL2).
+        if ssr_active {
+            {
+                let ssr = self
+                    .ssr
+                    .get_or_insert_with(|| crate::renderer::Ssr::new(w, h));
+                ssr.resize(w, h);
+            }
+            if let Some(ssao) = self.ssao.as_ref() {
+                let (view_pose, proj) = camera.view_transform_pair(0);
+                let env = self.skybox.ibl_env().map(|e| crate::resource::EnvLight {
+                    view: &e.view,
+                    sampler: &e.sampler,
+                    mip_count: e.mip_count,
+                    intensity: self.skybox.intensity(),
+                    rotation: self.skybox.rotation(),
+                });
+                let scene_resolved = self.hdr.scene_resolved_view();
+                self.ssr.as_ref().unwrap().compute(
+                    &mut encoder,
+                    scene_resolved,
+                    ssao.viewpos_view(),
+                    ssao.normal_view(),
+                    ssao.material_view(),
+                    ssao.ssr_params_view(),
+                    view_pose.to_mat4(),
+                    proj,
+                    env,
+                );
+            }
         }
 
         // Tonemap + bloom resolve. Existing post-processing effects run on the
@@ -1004,5 +1271,162 @@ impl Window {
         scene
             .data_mut()
             .render(pass, camera, lights, render_pass, context);
+    }
+
+    /// Renders every planar reflector (mirror) in the scene: for each reflector
+    /// surface, render the scene from a mirror camera into the reflector's own
+    /// texture and store the reflected view-projection so the surface samples it
+    /// during the main pass. See [`crate::renderer::reflector`].
+    fn render_reflectors(
+        &mut self,
+        scene: Option<&mut SceneNode3d>,
+        camera: &mut dyn Camera3d,
+        w: u32,
+        h: u32,
+    ) {
+        let scene = match scene {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Cheap detection first — skip the extra prepare when there are no mirrors.
+        let mut any = false;
+        scene.apply_to_objects_recursive(&mut |obj| {
+            if obj.reflector().is_some() {
+                any = true;
+            }
+        });
+        if !any {
+            return;
+        }
+
+        let ctxt = Context::get();
+        let (znear, zfar) = camera.clip_planes();
+        let (mview, mproj) = camera.view_transform_pair(0);
+        let eye = camera.eye();
+        let sky_set = self.skybox.is_set();
+
+        // Propagate world transforms so we can read each reflector's world plane.
+        MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
+        let mut lights = LightCollection::with_ambient(self.ambient_intensity);
+        lights.ambient_color = self.ambient_color;
+        lights.fog = self.fog;
+        scene.data_mut().prepare(0, camera, &mut lights, w, h);
+        scene.update_deformations();
+
+        // Build a mirror camera per reflector and (in the same walk) resize its
+        // target + store the reflected view-proj on it. Collect the views + clip
+        // plane so the renders below don't need to re-borrow the scene's reflectors.
+        let mut jobs: Vec<(crate::renderer::MirrorCamera, wgpu::TextureView, wgpu::TextureView, [f32; 4])> =
+            Vec::new();
+        scene.apply_to_objects_with_world_mut_recursive(&mut |pose, _scale, obj| {
+            let local_n = match obj.reflector() {
+                Some(r) => r.local_normal(),
+                None => return,
+            };
+            // World plane: origin = node position; normal = node rotation * local
+            // normal, oriented toward the camera so we keep the front half-space.
+            let point = pose.translation;
+            let mut normal = (pose.rotation * local_n).normalize();
+            if normal.dot(eye - point) < 0.0 {
+                normal = -normal;
+            }
+            let mcam =
+                crate::renderer::MirrorCamera::new(mview, mproj, eye, znear, zfar, point, normal);
+            let view_proj = mcam.reflector_view_proj();
+            let clip = [normal.x, normal.y, normal.z, -normal.dot(point)];
+
+            let r = obj.reflector_mut().unwrap();
+            r.resize(w, h);
+            r.set_view_proj(view_proj);
+            jobs.push((mcam, r.color_view().clone(), r.depth_view().clone(), clip));
+        });
+
+        // Fixed-light path for the capture frames (the mirror camera has no clustered
+        // cull data). Reflector surfaces skip themselves during capture (handled in
+        // the material via `capture_mode`).
+        MaterialManager3d::get_global_manager(|mm| mm.get_default())
+            .borrow_mut()
+            .set_capture_mode(true);
+
+        for (mut mcam, color_view, depth_view, clip) in jobs {
+            // Clip geometry behind this mirror's plane.
+            MaterialManager3d::get_global_manager(|mm| mm.get_default())
+                .borrow_mut()
+                .set_clip_plane(Some(clip));
+
+            // Prepare + flush the scene for the mirror camera.
+            MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
+            let mut mlights = LightCollection::with_ambient(self.ambient_intensity);
+            mlights.ambient_color = self.ambient_color;
+            mlights.fog = self.fog;
+            scene.data_mut().prepare(0, &mut mcam, &mut mlights, w, h);
+            scene.update_deformations();
+            MaterialManager3d::get_global_manager(|mm| mm.flush());
+
+            // Render into this reflector's target (its own queue submission).
+            let mut menc = ctxt.create_command_encoder(Some("reflector_encoder"));
+            if sky_set {
+                self.skybox
+                    .render(&mut menc, &color_view, 1, mcam.inverse_transformation());
+            }
+            let ctx = RenderContext {
+                surface_format: crate::post_processing::HDR_FORMAT,
+                sample_count: 1,
+                viewport_width: w,
+                viewport_height: h,
+                render_layers: camera.render_layers(),
+                // The reflected projection flips winding, so disable back-face cull.
+                force_no_cull: true,
+                shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                phase: RenderPhase::Opaque,
+            };
+            {
+                let load = if sky_set {
+                    wgpu::LoadOp::Load
+                } else {
+                    wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                };
+                let mut pass = menc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("reflector_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                scene
+                    .data_mut()
+                    .render(0, &mut mcam, &mlights, &mut pass, &ctx);
+            }
+            ctxt.submit(std::iter::once(menc.finish()));
+        }
+
+        // Restore the default material's state.
+        {
+            let default_mat = MaterialManager3d::get_global_manager(|mm| mm.get_default());
+            let mut m = default_mat.borrow_mut();
+            m.set_capture_mode(false);
+            m.set_clip_plane(None);
+        }
+
+        // Bump the frame counter so the per-pass loop re-prepares the main camera
+        // (reflector objects then pick up the view-proj set on their Reflector above).
+        MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
     }
 }

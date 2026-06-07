@@ -307,7 +307,10 @@ impl GpuMesh3d {
 
     /// Whether this mesh carries per-target morph normal deltas.
     pub fn has_morph_normals(&self) -> bool {
-        self.morph.as_ref().map(|m| m.has_normals()).unwrap_or(false)
+        self.morph
+            .as_ref()
+            .map(|m| m.has_normals())
+            .unwrap_or(false)
     }
 
     /// The morph-target position-delta buffer (`[target * num_vertices + vertex]`),

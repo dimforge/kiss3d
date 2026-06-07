@@ -45,6 +45,10 @@ pub struct RenderContext {
     /// when its own layer mask shares a bit with this one. `u32::MAX` (the
     /// default) renders every layer.
     pub render_layers: u32,
+    /// Forces back-face culling off for this pass. Set by the planar-reflector
+    /// mirror render, whose reflected projection flips triangle winding (so normal
+    /// back-face culling would render closed objects inside-out).
+    pub force_no_cull: bool,
     /// Shadow bind group (group 4) supplied by the window's shadow mapper.
     ///
     /// When `None`, materials fall back to their own neutral "no shadows" bind
@@ -68,6 +72,37 @@ pub struct EnvLight<'a> {
     pub intensity: f32,
     /// Y-axis rotation in radians (matches the skybox).
     pub rotation: f32,
+}
+
+/// One reflection probe's placement, as supplied to materials each frame in
+/// [`ProbeLighting`]. Mirrors `renderer::ReflectionProbe` but decoupled from the
+/// renderer module so materials only depend on the trait crate.
+#[derive(Copy, Clone, Debug)]
+pub struct ProbeData {
+    /// World-space center (capture viewpoint).
+    pub center: Vec3,
+    /// Half-extents of the parallax/influence box (world AABB), centered on `center`.
+    pub half_extents: Vec3,
+    /// Soft-edge width (world units) over which the probe fades to the global env.
+    pub falloff: f32,
+    /// Luminance multiplier.
+    pub intensity: f32,
+    /// Y-axis rotation (radians), matching the skybox convention.
+    pub rotation: f32,
+    /// Array layer holding this probe's equirectangular map.
+    pub layer: u32,
+}
+
+/// The reflection-probe resources a window supplies to materials each frame: the
+/// shared mip-chained equirectangular probe array plus the active probe records.
+/// Consumed in [`Material3d::set_reflection_probes`].
+pub struct ProbeLighting<'a> {
+    /// View over the mip-chained equirectangular probe array (one layer per probe).
+    pub array_view: &'a wgpu::TextureView,
+    /// Active probes (at most `renderer::MAX_PROBES`).
+    pub probes: &'a [ProbeData],
+    /// Maximum sampleable LOD of the probe array (max roughness → this mip).
+    pub max_lod: f32,
 }
 
 /// Per-object GPU data for a material.
@@ -153,10 +188,42 @@ pub trait Material3d {
     /// it (the default no-op).
     fn set_environment_lighting(&mut self, _env: Option<EnvLight<'_>>) {}
 
+    /// Supplies (or clears) the reflection probes for this frame: the shared
+    /// equirectangular probe array plus the active probe records. Reflective
+    /// surfaces inside a probe's influence box sample it (parallax-corrected)
+    /// instead of the global environment. `None` (or an empty probe list)
+    /// disables probes. Default no-op (materials without probe support).
+    fn set_reflection_probes(&mut self, _probes: Option<ProbeLighting<'_>>) {}
+
     /// Supplies (or clears) the screen-space ambient-occlusion texture for this
     /// frame. The material samples it per pixel to darken ambient lighting.
     /// `None` disables it. Default no-op.
     fn set_ssao(&mut self, _ao: Option<&wgpu::TextureView>) {}
+
+    /// Toggles reflection-probe *capture mode* for the next frame uniform: while
+    /// on, the material renders with the fixed-light (non-clustered) path, since
+    /// the per-face capture views have no clustered cull data. Default no-op.
+    fn set_capture_mode(&mut self, _on: bool) {}
+
+    /// Sets a world-space clip plane `(a, b, c, d)` for the next frame: fragments
+    /// with `dot((a,b,c), world_pos) + d < 0` are discarded. Used by reflector
+    /// capture to clip geometry behind the mirror. `None` disables it. Default no-op.
+    fn set_clip_plane(&mut self, _plane: Option<[f32; 4]>) {}
+
+    /// Supplies the clustered forward+ storage buffers for this frame (the light
+    /// list, per-cluster light grid, and global light-index list). Called by the
+    /// window after the light-culling compute pass when clustered lighting is
+    /// active; `force_rebind` is set when the light buffer was reallocated. Default
+    /// no-op (materials without clustered support, or backends that fall back to
+    /// the fixed-light path).
+    fn set_clustered_buffers(
+        &mut self,
+        _lights: &wgpu::Buffer,
+        _grid: &wgpu::Buffer,
+        _index: &wgpu::Buffer,
+        _force_rebind: bool,
+    ) {
+    }
 
     /// Renders an object using this material (phase 3).
     ///

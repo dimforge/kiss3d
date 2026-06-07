@@ -30,10 +30,10 @@ use wgpu::ExperimentalFeatures;
 
 /// Computes the device features to request.
 ///
-/// With the `hw_raytracer` feature enabled, this opts into wgpu's experimental ray
-/// query + acceleration-structure features when the adapter supports them, so the
-/// path tracer can use the hardware backend. Otherwise no extra features are
-/// requested and the portable compute backend is used.
+/// Opts into wgpu's experimental ray query + acceleration-structure features
+/// whenever the adapter supports them, so the path tracer can use the hardware
+/// backend; on platforms without support the feature is simply not requested and
+/// the portable compute backend is used as a fallback.
 fn raytracing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
     let mut features = wgpu::Features::empty();
     let supported = adapter.features();
@@ -45,11 +45,9 @@ fn raytracing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
         features |= wgpu::Features::TIMESTAMP_QUERY;
     }
 
-    #[cfg(feature = "hw_raytracer")]
-    {
-        if supported.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
-            features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-        }
+    // Hardware ray queries for the path tracer, when the platform supports them.
+    if supported.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+        features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
     }
 
     features
@@ -62,16 +60,12 @@ fn raytracing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
 /// feature without enabling the token makes `request_device` fail. Returns the
 /// enabled token only when ray query is actually being requested.
 fn experimental_features(required: wgpu::Features) -> ExperimentalFeatures {
-    #[cfg(feature = "hw_raytracer")]
-    {
-        if required.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
-            // SAFETY: we opt into wgpu's experimental hardware ray-query API. It may
-            // still contain bugs; the path tracer's hardware backend accepts that to
-            // use GPU-accelerated ray tracing where available.
-            return unsafe { ExperimentalFeatures::enabled() };
-        }
+    if required.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+        // SAFETY: we opt into wgpu's experimental hardware ray-query API. It may
+        // still contain bugs; the path tracer's hardware backend accepts that to
+        // use GPU-accelerated ray tracing where available.
+        return unsafe { ExperimentalFeatures::enabled() };
     }
-    let _ = required;
     ExperimentalFeatures::disabled()
 }
 

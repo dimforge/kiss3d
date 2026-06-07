@@ -353,21 +353,71 @@ impl LightCollection {
         }
     }
 
-    /// Adds a light to the collection if there's room.
+    /// Adds a light to the collection.
     ///
-    /// Returns `true` if the light was added, `false` if the collection is full.
+    /// All lights are collected; the renderer later splits them into the fixed
+    /// "primary" tier (rendered through the uniform array with shadows) and the
+    /// "clustered" overflow tier via [`split_primary_clustered`](Self::split_primary_clustered).
+    /// Always returns `true` (the bool is kept for backwards compatibility).
     pub fn add(&mut self, light: CollectedLight) -> bool {
-        if self.lights.len() < MAX_LIGHTS {
-            self.lights.push(light);
-            true
-        } else {
-            false
-        }
+        self.lights.push(light);
+        true
     }
 
-    /// Returns `true` if the collection has reached the maximum number of lights.
+    /// Returns `true` if the collection has reached the [`MAX_LIGHTS`] primary budget.
+    ///
+    /// This no longer prevents further lights from being collected — extra lights
+    /// spill into the clustered tier — but remains useful to detect when the cheap
+    /// shadow-capable primary slots are exhausted.
     pub fn is_full(&self) -> bool {
         self.lights.len() >= MAX_LIGHTS
+    }
+
+    /// Splits the collected lights into the primary and clustered tiers.
+    ///
+    /// The **primary** tier (at most [`MAX_LIGHTS`] lights) is rendered through the
+    /// fixed uniform array and keeps full shadow-mapping support. The **clustered**
+    /// tier holds the overflow, shaded by the clustered forward+ path without shadows.
+    ///
+    /// Returns two lists of indices into [`lights`](Self::lights). Both the object
+    /// material's uniform upload and the shadow atlas must consume the **same**
+    /// primary ordering so that uniform slot `i` and shadow view `i` refer to the
+    /// same light.
+    ///
+    /// Selection: when the scene has `<= MAX_LIGHTS` lights, every light is primary
+    /// in collection order (byte-identical to the legacy fixed path). Otherwise the
+    /// primary slots go to shadow-casting lights first, then directional lights, then
+    /// the remaining lights by descending intensity (collection order breaks ties).
+    pub fn split_primary_clustered(&self) -> (Vec<usize>, Vec<usize>) {
+        let n = self.lights.len();
+        if n <= MAX_LIGHTS {
+            return ((0..n).collect(), Vec::new());
+        }
+
+        // Lower key sorts earlier (higher priority for a primary slot).
+        fn tier(l: &CollectedLight) -> u8 {
+            if l.casts_shadows {
+                0
+            } else if matches!(l.light_type, LightType::Directional(_)) {
+                1
+            } else {
+                2
+            }
+        }
+
+        let mut order: Vec<usize> = (0..n).collect();
+        // `sort_by` is stable, so equal-priority lights keep their collection order.
+        order.sort_by(|&a, &b| {
+            let (la, lb) = (&self.lights[a], &self.lights[b]);
+            tier(la).cmp(&tier(lb)).then_with(|| {
+                lb.intensity
+                    .partial_cmp(&la.intensity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+
+        let clustered = order.split_off(MAX_LIGHTS);
+        (order, clustered)
     }
 
     /// Returns the number of lights in the collection.

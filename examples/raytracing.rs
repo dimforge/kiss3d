@@ -6,8 +6,8 @@
 //! camera is moved with the mouse.
 //!
 //! The portable compute backend runs everywhere (including macOS/Metal and the
-//! web). Build with `--features hw_raytracer` on a capable Vulkan GPU to use the
-//! hardware ray-query backend instead.
+//! web). On a capable Vulkan GPU the hardware ray-query backend is selected
+//! automatically; otherwise it falls back to the compute backend.
 
 use kiss3d::prelude::*;
 use kiss3d::renderer::{RayBackend, RayTracer};
@@ -85,7 +85,6 @@ async fn main() {
     let font = Font::default();
     match raytracer.backend() {
         RayBackend::Software => println!("Path tracer backend: compute (BVH)"),
-        #[cfg(feature = "hw_raytracer")]
         RayBackend::Hardware => println!("Path tracer backend: hardware ray queries"),
     }
 

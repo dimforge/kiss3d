@@ -12,7 +12,7 @@
 ### GPU path tracer
 
 - Added a progressive Monte-Carlo **path tracer** (`RayTracer`) that renders the existing scene graph as an alternative to the rasterizer, via `Window::raytrace_3d` and `OffscreenSurface::render_image_raytraced`.
-  - Two backends sharing one WGSL kernel: a software compute-shader BVH traversal (default) and a hardware ray-query path behind the `hw_raytracer` feature, selectable at runtime.
+  - Two backends sharing one WGSL kernel: a software compute-shader BVH traversal and a hardware ray-query path, selected automatically at runtime (the hardware path is used when the GPU supports it, otherwise it falls back to the compute backend).
   - Two-level (instanced) BVH so instanced scene nodes are traced once per mesh.
   - Unified PBR/BSDF surface model (diffuse / metal / glass), per-object materials and textures, area-light next-event estimation with multiple-importance sampling, thin-lens depth of field, and image-based lighting from an equirectangular HDRI.
   - Alpha (coverage) transparency; ambient acts as a uniform fill light; the window background color is shown on directly-seen ray misses without lighting the scene.

@@ -19,7 +19,25 @@ struct LightData {
     inner_cone_cos: f32,
     outer_cone_cos: f32,
     attenuation_radius: f32,
-    _padding: vec2<f32>,
+    // Index into ShadowUniforms.lights, or 0xffffffff when the light casts no
+    // shadow. Used by the clustered tier (the primary tier uses its slot index).
+    shadow_slot: u32,
+    _padding: f32,
+}
+
+// Maximum reflection probes (must match object_material.rs / reflection_probe.rs).
+const MAX_PROBES: u32 = 8u;
+
+// A single reflection probe (mirrors GpuProbe in builtin/object_material.rs).
+struct Probe {
+    // xyz: world center; w: 1.0 if active.
+    center_active: vec4<f32>,
+    // xyz: parallax-box min (world); w: array layer.
+    box_min_layer: vec4<f32>,
+    // xyz: parallax-box max (world); w: intensity.
+    box_max_intensity: vec4<f32>,
+    // x: rotation; y: falloff; z: max LOD; w: unused.
+    params: vec4<f32>,
 }
 
 // Bind group 0: Frame uniforms (view, projection, lights)
@@ -38,6 +56,20 @@ struct FrameUniforms {
     camera_pos: vec4<f32>,
     // (has_ibl, max_lod, intensity, env_rotation_radians).
     ibl_params: vec4<f32>,
+    // Clustered forward+ grid: (grid_x, grid_y, grid_z, num_clustered_lights).
+    cluster_grid_dims: vec4<f32>,
+    // Clustered depth slicing: (z_near, z_far, ln(z_far/z_near), unused).
+    cluster_depth: vec4<f32>,
+    // Clustered tile size in pixels: (tile_w, tile_h, unused, unused).
+    cluster_tile: vec4<f32>,
+    // Reflection probes: x = active probe count (rest unused).
+    probe_count: vec4<u32>,
+    // World-space clip plane (a,b,c,d): when xyz != 0, fragments with
+    // dot(xyz, world_pos) + w < 0 are discarded. Used by reflector capture to clip
+    // geometry behind the mirror. All-zero = inactive.
+    clip_plane: vec4<f32>,
+    // Fixed-size reflection-probe array (first `probe_count.x` are live).
+    probes: array<Probe, MAX_PROBES>,
 }
 
 // Blends `color` toward the fog color by an amount derived from the fragment's
@@ -82,6 +114,16 @@ var ibl_samp: sampler;
 @group(0) @binding(3)
 var ibl_ssao: texture_2d<f32>;
 
+// Clustered forward+ storage buffers (bindings 4..6). Injected only for the
+// clustered pipeline variant; omitted entirely on the fixed-light fallback (so
+// the shader has no storage bindings and still compiles on WebGL2).
+//__CLUSTERED_BINDINGS__
+
+// Reflection-probe equirectangular array (one layer per probe, mip-chained).
+// Sampled with `ibl_samp` (binding 2). Always bound (a 1x1 fallback when empty).
+@group(0) @binding(7)
+var ibl_probes: texture_2d_array<f32>;
+
 // Rotates a direction about Y by the environment rotation (matches the skybox).
 fn ibl_rotate(rd: vec3<f32>) -> vec3<f32> {
     let rot = frame.ibl_params.w;
@@ -98,6 +140,64 @@ fn ibl_dir_to_uv(d: vec3<f32>) -> vec2<f32> {
 // Samples the environment in `dir` at the given mip LOD.
 fn ibl_sample(dir: vec3<f32>, lod: f32) -> vec3<f32> {
     return textureSampleLevel(ibl_env, ibl_samp, ibl_dir_to_uv(ibl_rotate(dir)), lod).rgb;
+}
+
+// === Reflection probes ===
+
+// Influence weight of probe `i` at world position `P`: 1 well inside the box,
+// ramping to 0 over `falloff` world units at the boundary (0 outside).
+fn probe_weight(i: u32, p: vec3<f32>) -> f32 {
+    let bmin = frame.probes[i].box_min_layer.xyz;
+    let bmax = frame.probes[i].box_max_intensity.xyz;
+    let falloff = frame.probes[i].params.y;
+    let d = min(p - bmin, bmax - p); // per-axis distance to the nearer face
+    let edge = min(d.x, min(d.y, d.z));
+    return clamp(edge / falloff, 0.0, 1.0);
+}
+
+// Parallax-corrects direction `dir` against probe `i`'s box: intersect the ray
+// from `P` with the box, then re-aim from the probe center to the hit point so the
+// reflection tracks local geometry instead of a distant environment.
+fn probe_parallax(i: u32, p: vec3<f32>, dir: vec3<f32>) -> vec3<f32> {
+    let bmin = frame.probes[i].box_min_layer.xyz;
+    let bmax = frame.probes[i].box_max_intensity.xyz;
+    let center = frame.probes[i].center_active.xyz;
+    let invd = 1.0 / dir;
+    let t1 = (bmin - p) * invd;
+    let t2 = (bmax - p) * invd;
+    let tmax = max(t1, t2);
+    let t = min(min(tmax.x, tmax.y), tmax.z);
+    let hit = p + dir * max(t, 0.0);
+    return normalize(hit - center);
+}
+
+// Samples probe `i`'s equirectangular layer in `dir` at the given mip LOD.
+fn probe_sample(i: u32, dir: vec3<f32>, lod: f32) -> vec3<f32> {
+    let rot = frame.probes[i].params.x;
+    let c = cos(rot);
+    let s = sin(rot);
+    let rd = vec3<f32>(c * dir.x + s * dir.z, dir.y, -s * dir.x + c * dir.z);
+    let layer = i32(frame.probes[i].box_min_layer.w + 0.5);
+    return textureSampleLevel(ibl_probes, ibl_samp, ibl_dir_to_uv(rd), layer, lod).rgb;
+}
+
+// Picks the highest-weight probe influencing `P`. Returns its index (-1 if none)
+// packed in `.x` and the blend weight in `.y`.
+fn select_probe(p: vec3<f32>) -> vec2<f32> {
+    var best_idx = -1.0;
+    var best_w = 0.0;
+    let n = min(frame.probe_count.x, MAX_PROBES);
+    for (var i = 0u; i < n; i = i + 1u) {
+        if frame.probes[i].center_active.w < 0.5 {
+            continue;
+        }
+        let w = probe_weight(i, p);
+        if w > best_w {
+            best_w = w;
+            best_idx = f32(i);
+        }
+    }
+    return vec2<f32>(best_idx, best_w);
 }
 
 // Karis' analytic environment BRDF approximation (avoids a precomputed LUT).
@@ -142,6 +242,14 @@ struct ObjectUniforms {
     specular_tint: vec4<f32>,
     // (has_height_map, parallax_scale, unused, unused).
     parallax: vec4<f32>,
+    // Per-object SSR: (intensity, infinite_thick, distance_attenuation, fresnel).
+    ssr: vec4<f32>,
+    // Per-object planar reflector: world -> reflection-texture clip transform.
+    reflector_view_proj: mat4x4<f32>,
+    // (reflection_intensity, has_reflector, normal_falloff, unused).
+    reflection_params: vec4<f32>,
+    // Reflector world-space plane normal (xyz); w unused.
+    reflector_normal: vec4<f32>,
 }
 
 @group(1) @binding(0)
@@ -174,10 +282,19 @@ var s_emissive: sampler;
 var t_height: texture_2d<f32>;
 @group(2) @binding(11)
 var s_height: sampler;
+// Per-object planar reflection (the reflector's mirror-rendered scene; a 1x1
+// fallback when the object isn't a reflector).
+@group(2) @binding(12)
+var t_reflection: texture_2d<f32>;
+@group(2) @binding(13)
+var s_reflection: sampler;
 
 // === SHADOW MAPPING (group 3) — localized block for easy merging ===
 // Maximum number of atlas views (must match builtin/shadow.rs MAX_SHADOW_VIEWS).
 const MAX_SHADOW_VIEWS: u32 = 16u;
+// Per-light shadow-metadata slots (must match shadow.rs MAX_SHADOW_LIGHTS =
+// MAX_LIGHTS + MAX_SHADOW_VIEWS). Primary tier in 0..MAX_LIGHTS, clustered above.
+const MAX_SHADOW_LIGHTS: u32 = 24u;
 
 // Per-light shadow metadata (mirrors GpuLightShadow in builtin/shadow.rs).
 struct LightShadow {
@@ -191,7 +308,7 @@ struct LightShadow {
 
 struct ShadowUniforms {
     view_proj: array<mat4x4<f32>, MAX_SHADOW_VIEWS>,
-    lights: array<LightShadow, MAX_LIGHTS>,
+    lights: array<LightShadow, MAX_SHADOW_LIGHTS>,
     shadows_enabled: f32,
     texel_size: f32,
     depth_bias: f32,
@@ -723,6 +840,115 @@ fn parallax_uv(uv0: vec2<f32>, ts_view: vec3<f32>) -> vec2<f32> {
 
 // Shades the fragment, returning (linear HDR color, alpha). Shared by the opaque
 // pass (`fs_main`) and the weighted-blended OIT pass (`fs_oit`).
+// Evaluates a single light's (un-shadowed) contribution with the full Cook-Torrance
+// BRDF. Shared by the fixed primary-light loop and the clustered forward+ loop so
+// both stay in lockstep; the primary loop additionally multiplies in the shadow
+// factor. Reads the `object`/`frame` globals directly; the rest of the surface
+// state is passed in.
+fn shade_light(
+    light: LightData,
+    view_pos: vec3<f32>,
+    V: vec3<f32>,
+    N_view: vec3<f32>,
+    F0: vec3<f32>,
+    albedo: vec3<f32>,
+    metallic: f32,
+    alpha: f32,
+    aniso: f32,
+    at: f32,
+    ab: f32,
+    aniso_t: vec3<f32>,
+    aniso_b: vec3<f32>,
+    cc_alpha: f32,
+) -> vec3<f32> {
+    let view_mat3 = mat3x3<f32>(frame.view[0].xyz, frame.view[1].xyz, frame.view[2].xyz);
+
+    var L: vec3<f32>;
+    var attenuation: f32 = 1.0;
+    let light_intensity = light.intensity;
+
+    if light.light_type == LIGHT_TYPE_POINT {
+        let light_pos_view = (frame.view * vec4<f32>(light.position, 1.0)).xyz;
+        let light_vec = light_pos_view - view_pos;
+        let dist = length(light_vec);
+        L = normalize(light_vec);
+        attenuation = calculate_point_attenuation(dist, light.attenuation_radius);
+    } else if light.light_type == LIGHT_TYPE_DIRECTIONAL {
+        let light_dir_view = normalize(view_mat3 * light.direction);
+        L = -light_dir_view;
+    } else {
+        let light_pos_view = (frame.view * vec4<f32>(light.position, 1.0)).xyz;
+        let light_dir_view = normalize(view_mat3 * light.direction);
+        let light_vec = light_pos_view - view_pos;
+        let dist = length(light_vec);
+        L = normalize(light_vec);
+        attenuation = calculate_spot_attenuation(
+            L,
+            light_dir_view,
+            dist,
+            light.inner_cone_cos,
+            light.outer_cone_cos,
+            light.attenuation_radius
+        );
+    }
+
+    if attenuation <= 0.0 {
+        return vec3<f32>(0.0);
+    }
+
+    let H = normalize(V + L);
+    let NoV = max(dot(N_view, V), 1e-4);
+    let NdotL_raw = dot(N_view, L);
+    let NoL = max(NdotL_raw, 0.0);
+    let NoH = clamp(dot(N_view, H), 0.0, 1.0);
+    let LoH = clamp(dot(L, H), 0.0, 1.0);
+
+    let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
+
+    var D: f32;
+    var Vis: f32;
+    if abs(aniso) > 1e-3 {
+        let ToV = dot(aniso_t, V);
+        let BoV = dot(aniso_b, V);
+        let ToL = dot(aniso_t, L);
+        let BoL = dot(aniso_b, L);
+        let ToH = dot(aniso_t, H);
+        let BoH = dot(aniso_b, H);
+        D = d_ggx_aniso(at, ab, ToH, BoH, NoH);
+        Vis = v_smith_correlated_aniso(at, ab, ToV, BoV, ToL, BoL, NoV, NoL);
+    } else {
+        D = d_ggx_alpha(NoH, alpha);
+        Vis = v_smith_correlated(NoV, NoL, alpha);
+    }
+    var specular = D * Vis * F;
+
+    var cc_atten = 1.0;
+    if object.clearcoat > 0.0 {
+        let dc = d_ggx_alpha(NoH, cc_alpha);
+        let vc = v_kelemen(LoH);
+        let fc = fresnel_schlick_scalar(LoH, 0.04) * object.clearcoat;
+        specular = specular * (1.0 - fc) + vec3<f32>(dc * vc * fc);
+        cc_atten = 1.0 - fc;
+    }
+
+    let kD = (vec3<f32>(1.0) - F) * (1.0 - metallic) * cc_atten;
+
+    let wrap = 0.2;
+    let diffuse_wrap = max(NdotL_raw * (1.0 - wrap) + wrap, 0.0);
+
+    let radiance = light.color * light_intensity * attenuation;
+
+    let diffuse_contrib =
+        kD * albedo / PI * diffuse_wrap * (1.0 - object.transmission);
+    var transmit_contrib = vec3<f32>(0.0);
+    if object.transmission > 0.0 {
+        let back = max(-NdotL_raw, 0.0);
+        transmit_contrib = object.transmission * albedo / PI * back;
+    }
+    let specular_contrib = specular * NoL;
+    return (diffuse_contrib + transmit_contrib + specular_contrib) * radiance;
+}
+
 fn shade(in: VertexOutput) -> vec4<f32> {
     // Screen-space derivatives of the world position, taken here in uniform
     // control flow (before any branching) so they are valid. The shadow code
@@ -848,125 +1074,58 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     // Accumulate lighting from all lights
     var Lo = vec3<f32>(0.0);
 
+    // Primary lights: the fixed uniform array, with shadow-map attenuation.
     for (var i = 0u; i < frame.num_lights; i++) {
-        let light = frame.lights[i];
-
-        // Calculate light direction and attenuation based on light type
-        var L: vec3<f32>;
-        var attenuation: f32 = 1.0;
-        var light_intensity = light.intensity;
-
-        if light.light_type == LIGHT_TYPE_POINT {
-            // Point light: calculate direction from light position to fragment
-            let light_pos_view = (frame.view * vec4<f32>(light.position, 1.0)).xyz;
-            let light_vec = light_pos_view - in.view_pos;
-            let dist = length(light_vec);
-            L = normalize(light_vec);
-            attenuation = calculate_point_attenuation(dist, light.attenuation_radius);
-        } else if light.light_type == LIGHT_TYPE_DIRECTIONAL {
-            // Directional light: use light direction directly
-            let light_dir_view = normalize(view_mat3 * light.direction);
-            L = -light_dir_view;  // Light direction points FROM light, we need TO light
-        } else {
-            // Spot light: calculate direction and angular attenuation
-            let light_pos_view = (frame.view * vec4<f32>(light.position, 1.0)).xyz;
-            let light_dir_view = normalize(view_mat3 * light.direction);
-            let light_vec = light_pos_view - in.view_pos;
-            let dist = length(light_vec);
-            L = normalize(light_vec);
-            attenuation = calculate_spot_attenuation(
-                L,
-                light_dir_view,
-                dist,
-                light.inner_cone_cos,
-                light.outer_cone_cos,
-                light.attenuation_radius
-            );
-        }
-
-        // Skip if no contribution
-        if attenuation <= 0.0 {
-            continue;
-        }
-
-        let H = normalize(V + L);
-        let NoV = max(dot(N_view, V), 1e-4);
-        let NdotL_raw = dot(N_view, L);
-        let NoL = max(NdotL_raw, 0.0);
-        let NoH = clamp(dot(N_view, H), 0.0, 1.0);
-        let LoH = clamp(dot(L, H), 0.0, 1.0);
-
-        let F = fresnel_schlick(max(dot(H, V), 0.0), F0);
-
-        // Base specular lobe — anisotropic GGX when anisotropy is set, otherwise
-        // the isotropic height-correlated form.
-        var D: f32;
-        var Vis: f32;
-        if abs(aniso) > 1e-3 {
-            let ToV = dot(aniso_t, V);
-            let BoV = dot(aniso_b, V);
-            let ToL = dot(aniso_t, L);
-            let BoL = dot(aniso_b, L);
-            let ToH = dot(aniso_t, H);
-            let BoH = dot(aniso_b, H);
-            D = d_ggx_aniso(at, ab, ToH, BoH, NoH);
-            Vis = v_smith_correlated_aniso(at, ab, ToV, BoV, ToL, BoL, NoV, NoL);
-        } else {
-            D = d_ggx_alpha(NoH, alpha);
-            Vis = v_smith_correlated(NoV, NoL, alpha);
-        }
-        var specular = D * Vis * F;
-
-        // Clearcoat: a thin, smooth dielectric lobe layered on top of the base,
-        // which it attenuates by (1 - Fc).
-        var cc_atten = 1.0;
-        if object.clearcoat > 0.0 {
-            let dc = d_ggx_alpha(NoH, cc_alpha);
-            let vc = v_kelemen(LoH);
-            let fc = fresnel_schlick_scalar(LoH, 0.04) * object.clearcoat;
-            specular = specular * (1.0 - fc) + vec3<f32>(dc * vc * fc);
-            cc_atten = 1.0 - fc;
-        }
-
-        // Energy conservation: diffuse gets what the specular + clearcoat leave.
-        let kD = (vec3<f32>(1.0) - F) * (1.0 - metallic) * cc_atten;
-
-        // Wrapped diffuse (half-Lambert) for softer terminators on back faces.
-        let wrap = 0.2;
-        let diffuse_wrap = max(NdotL_raw * (1.0 - wrap) + wrap, 0.0);
-
-        // === SHADOW MAPPING: attenuate this light by its shadow-map visibility ===
+        let contrib = shade_light(
+            frame.lights[i], in.view_pos, V, N_view, F0, albedo, metallic,
+            alpha, aniso, at, ab, aniso_t, aniso_b, cc_alpha
+        );
+        // Shadow factor is per-light (indexed by uniform slot). Derivatives are
+        // taken in uniform control flow above and passed in for the depth bias.
         let shadow_factor = compute_shadow(i, in.world_pos, dpos_dx, dpos_dy, receives_transmit);
-        // === END SHADOW MAPPING ===
-
-        let radiance = light.color * light_intensity * attenuation * shadow_factor;
-
-        // Diffuse transmission: a fraction of the diffuse is instead lit from the
-        // back side of the surface (cheap translucency).
-        let diffuse_contrib =
-            kD * albedo / PI * diffuse_wrap * (1.0 - object.transmission);
-        var transmit_contrib = vec3<f32>(0.0);
-        if object.transmission > 0.0 {
-            let back = max(-NdotL_raw, 0.0);
-            transmit_contrib = object.transmission * albedo / PI * back;
-        }
-        let specular_contrib = specular * NoL;
-        Lo += (diffuse_contrib + transmit_contrib + specular_contrib) * radiance;
+        Lo += contrib * shadow_factor;
     }
 
-    // Ambient lighting: image-based when an environment is set, else the flat
-    // colored ambient term.
+    // Clustered forward+ overflow lights (shadowless). Injected only in the
+    // clustered pipeline variant; replaced by nothing on the fixed-light fallback.
+    //__CLUSTERED_LOOP__
+
+    // Ambient lighting: image-based when an environment and/or reflection probes
+    // are set, else the flat colored ambient term.
     var ambient: vec3<f32>;
-    if frame.ibl_params.x > 0.5 {
+    let has_ibl = frame.ibl_params.x > 0.5;
+    let probe = select_probe(in.world_pos); // (.x = index or -1, .y = weight)
+    if has_ibl || probe.x >= 0.0 {
         let world_v = normalize(frame.camera_pos.xyz - in.world_pos);
         let nov = max(dot(N, world_v), 1e-4);
         let r_dir = reflect(-world_v, N);
         let intensity = frame.ibl_params.z;
         let max_lod = frame.ibl_params.y;
-        // Diffuse irradiance ≈ the coarsest mip in the normal direction;
-        // specular ≈ the environment at the reflection direction, mip by roughness.
-        let irradiance = ibl_sample(N, max_lod) * intensity;
-        let prefiltered = ibl_sample(r_dir, roughness * max_lod) * intensity;
+        // Global environment (fallback / blend base). Diffuse irradiance ≈ coarsest
+        // mip in the normal direction; specular ≈ env at the reflection direction,
+        // mip by roughness.
+        var irradiance = vec3<f32>(0.0);
+        var prefiltered = vec3<f32>(0.0);
+        if has_ibl {
+            irradiance = ibl_sample(N, max_lod) * intensity;
+            prefiltered = ibl_sample(r_dir, roughness * max_lod) * intensity;
+        }
+        // Blend in the best-matching reflection probe (parallax-corrected).
+        if probe.x >= 0.0 {
+            let pi = u32(probe.x);
+            let p_lod = frame.probes[pi].params.z;
+            let p_int = frame.probes[pi].box_max_intensity.w;
+            let p_spec = probe_sample(pi, probe_parallax(pi, in.world_pos, r_dir), roughness * p_lod) * p_int;
+            let p_irr = probe_sample(pi, probe_parallax(pi, in.world_pos, N), p_lod) * p_int;
+            if has_ibl {
+                prefiltered = mix(prefiltered, p_spec, probe.y);
+                irradiance = mix(irradiance, p_irr, probe.y);
+            } else {
+                // No global env: the probe alone, fading out to black at the edge.
+                prefiltered = p_spec * probe.y;
+                irradiance = p_irr * probe.y;
+            }
+        }
         let f = fresnel_schlick_roughness(nov, F0, roughness);
         let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
         let spec_env = prefiltered * env_brdf_approx(F0, roughness, nov);
@@ -978,23 +1137,88 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     // Final color
     var color = ambient + Lo + emissive;
 
+    // Per-object planar reflection (mirror). Composited as an additive delta over
+    // the environment specular the forward pass already wrote — the crisp planar
+    // reflection replaces the env reflection where the reflection texture has data —
+    // so it combines with the surface's regular PBR shading (base color, textures,
+    // roughness). `reflection_params` = (intensity, has_reflector, ...).
+    if object.reflection_params.y > 0.5 {
+        let rc = object.reflector_view_proj * vec4<f32>(in.world_pos, 1.0);
+        if rc.w > 0.0 {
+            let rndc = rc.xy / rc.w;
+            let ruv = vec2<f32>(rndc.x * 0.5 + 0.5, 0.5 - rndc.y * 0.5);
+            if all(ruv >= vec2<f32>(0.0)) && all(ruv <= vec2<f32>(1.0)) {
+                let refl_col = textureSampleLevel(t_reflection, s_reflection, ruv, 0.0).rgb;
+                let world_v = normalize(frame.camera_pos.xyz - in.world_pos);
+                let nov = max(dot(N, world_v), 1e-4);
+                let r_dir = reflect(-world_v, N);
+                var env_col = vec3<f32>(0.0);
+                if frame.ibl_params.x > 0.5 {
+                    env_col = ibl_sample(r_dir, roughness * frame.ibl_params.y) * frame.ibl_params.z;
+                }
+                let brdf = env_brdf_approx(F0, roughness, nov);
+                // Normal-alignment falloff: fade the reflection where the surface
+                // normal diverges from the reflector's plane normal (so a curved
+                // reflector only reflects on the cap facing the plane normal). A
+                // falloff of 0 keeps it uniform.
+                let falloff = object.reflection_params.z;
+                var fade = 1.0;
+                if falloff > 0.0 {
+                    let align = max(dot(N, normalize(object.reflector_normal.xyz)), 0.0);
+                    fade = pow(align, falloff);
+                }
+                color += (refl_col - env_col) * brdf * ao * object.reflection_params.x * fade;
+            }
+        }
+    }
+
     // Distance fog (applied to the lit color; uses view distance + world height).
     color = apply_fog(color, length(in.view_pos), in.world_pos.y);
 
     return vec4<f32>(color, albedo_tex.a * base_color.a);
 }
 
-// Depth/view-position prepass: writes the view-space position (xyz) so the SSAO
-// pass can reconstruct geometry. Depth is written by the pipeline.
+// Depth/view-position + lightweight G-buffer prepass. Writes the data the
+// screen-space effects need: view-space position (for SSAO + SSR ray marching),
+// world-space geometric normal + linear roughness, and F0 + metallic (for the SSR
+// BRDF weighting). Uses object uniforms only (no texture maps / tangent frame), so
+// it stays cheap and binding-light. Depth is written by the pipeline. SSAO reads
+// only @location(0); the rest is unused unless SSR is enabled.
+struct PrepassOutput {
+    @location(0) viewpos: vec4<f32>,
+    @location(1) normal_roughness: vec4<f32>,
+    @location(2) f0_metallic: vec4<f32>,
+    // Per-object SSR params, consumed by the SSR pass.
+    @location(3) ssr: vec4<f32>,
+}
+
 @fragment
-fn fs_prepass(in: VertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.view_pos, 1.0);
+fn fs_prepass(in: VertexOutput) -> PrepassOutput {
+    var out: PrepassOutput;
+    out.viewpos = vec4<f32>(in.view_pos, 1.0);
+
+    let n = normalize(in.world_normal);
+    let rough = clamp(object.roughness, 0.04, 1.0);
+    let metal = object.metallic;
+    let albedo = object.color.rgb;
+    let dielectric_f0 = 0.16 * object.reflectance * object.reflectance * object.specular_tint.rgb;
+    let f0 = mix(dielectric_f0, albedo, metal);
+
+    out.normal_roughness = vec4<f32>(n, rough);
+    out.f0_metallic = vec4<f32>(f0, metal);
+    out.ssr = object.ssr;
+    return out;
 }
 
 // Opaque pass: write the shaded color straight into the HDR film. Handles the
 // opaque-phase alpha modes: Opaque (alpha forced to 1) and Mask (cutout discard).
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
+    // Reflector capture: clip geometry behind the mirror plane.
+    if dot(frame.clip_plane.xyz, frame.clip_plane.xyz) > 0.0
+        && dot(frame.clip_plane.xyz, in.world_pos) + frame.clip_plane.w < 0.0 {
+        discard;
+    }
     let c = shade(in);
     let mode = u32(object.alpha_mode + 0.5);
     // Mask: discard fragments below the cutoff.

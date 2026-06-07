@@ -29,7 +29,7 @@
 
 use crate::camera::Camera3d;
 use crate::context::Context;
-use crate::light::{LightCollection, LightType, MAX_LIGHTS};
+use crate::light::{CollectedLight, LightCollection, LightType, MAX_LIGHTS};
 use crate::scene::SceneNode3d;
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat4, Vec3};
@@ -39,6 +39,12 @@ use glamx::{Mat4, Vec3};
 /// A directional or spot light uses one view; a point light uses six. The cap
 /// bounds GPU memory and keeps the per-frame uniform fixed-size.
 pub const MAX_SHADOW_VIEWS: usize = 16;
+
+/// Maximum number of lights with shadow metadata in a frame. The primary tier
+/// occupies slots `0..MAX_LIGHTS` (indexed by uniform slot); clustered shadow
+/// casters occupy `MAX_LIGHTS..MAX_SHADOW_LIGHTS`. Real usage is still bounded by
+/// [`MAX_SHADOW_VIEWS`] (each light needs at least one atlas view).
+pub const MAX_SHADOW_LIGHTS: usize = MAX_LIGHTS + MAX_SHADOW_VIEWS;
 
 /// Maximum number of cascades a directional light may use (cascaded shadow maps).
 pub const MAX_CASCADES: u32 = 4;
@@ -83,11 +89,7 @@ fn light_near_far(light_pos: Vec3, aabb_min: Vec3, aabb_max: Vec3) -> (f32, f32)
 /// Picks the point/spot shadow near/far planes: tight bounds from the caster AABB
 /// when available (far never exceeds the light's attenuation `radius`, since
 /// geometry beyond it is unlit), else the old wide default.
-fn fit_near_far(
-    caster_aabb: Option<(Vec3, Vec3)>,
-    light_pos: Vec3,
-    radius: f32,
-) -> (f32, f32) {
+fn fit_near_far(caster_aabb: Option<(Vec3, Vec3)>, light_pos: Vec3, radius: f32) -> (f32, f32) {
     match caster_aabb {
         Some((min, max)) => {
             let (near, far) = light_near_far(light_pos, min, max);
@@ -147,8 +149,11 @@ impl Default for GpuLightShadow {
 struct ShadowUniforms {
     /// Light-space view-projection matrix for every atlas view.
     view_proj: [[[f32; 4]; 4]; MAX_SHADOW_VIEWS],
-    /// Per-light metadata, indexed in lockstep with the lighting `lights` array.
-    lights: [GpuLightShadow; MAX_LIGHTS],
+    /// Per-light shadow metadata. Slots `0..MAX_LIGHTS` are the primary tier
+    /// (indexed by uniform slot, read via `compute_shadow(i)`); slots
+    /// `MAX_LIGHTS..` are clustered shadow casters (referenced by each clustered
+    /// light's `shadow_slot`).
+    lights: [GpuLightShadow; MAX_SHADOW_LIGHTS],
     /// `1.0` when shadow mapping is globally enabled this frame, else `0.0`.
     shadows_enabled: f32,
     /// Texel size (`1.0 / resolution`) for PCF tap spacing.
@@ -289,6 +294,11 @@ pub struct ShadowMapper {
     model_capacity: u64,
     /// Bind group over `model_uniform_buffer` (uses a dynamic offset).
     model_bind_group: wgpu::BindGroup,
+    /// Per-collected-light shadow-metadata slot from the last [`render`](Self::render):
+    /// `shadow_slots[i]` is the `ShadowUniforms.lights` index for `lights.lights[i]`,
+    /// or `u32::MAX` if it casts no shadow this frame. The clustered tier reads this
+    /// to stamp each clustered light's `shadow_slot`.
+    last_shadow_slots: Vec<u32>,
 }
 
 impl ShadowMapper {
@@ -525,6 +535,128 @@ impl ShadowMapper {
             model_uniform_buffer,
             model_capacity,
             model_bind_group,
+            last_shadow_slots: Vec::new(),
+        }
+    }
+
+    /// Per-collected-light shadow-metadata slots from the last [`render`](Self::render).
+    /// `slots[i]` is the `ShadowUniforms.lights` index for the scene's `i`-th collected
+    /// light, or `u32::MAX` if it casts no shadow this frame. Consumed by the clustered
+    /// lighting pass to stamp each clustered light's `shadow_slot`.
+    pub(crate) fn shadow_slots(&self) -> &[u32] {
+        &self.last_shadow_slots
+    }
+
+    /// Number of atlas views a light occupies (directional = cascades, spot = 1,
+    /// point = 6).
+    fn shadow_view_count(&self, light: &CollectedLight) -> usize {
+        match light.light_type {
+            LightType::Point { .. } => 6,
+            LightType::Directional(_) => self.num_cascades as usize,
+            LightType::Spot { .. } => 1,
+        }
+    }
+
+    /// Computes the light-space matrices for a shadow-casting light, writes them
+    /// into `view_proj` (and queues the views for the depth pre-pass), and returns
+    /// the light's `GpuLightShadow` metadata. `base_view` is the light's first atlas
+    /// layer; the caller must have checked it fits within [`MAX_SHADOW_VIEWS`].
+    #[allow(clippy::too_many_arguments)]
+    fn build_light_shadow(
+        &self,
+        light: &CollectedLight,
+        camera: &dyn Camera3d,
+        base_view: u32,
+        splits: &[f32],
+        caster_aabb: Option<(Vec3, Vec3)>,
+        view_proj: &mut [[[f32; 4]; 4]; MAX_SHADOW_VIEWS],
+        views: &mut Vec<ShadowView>,
+    ) -> GpuLightShadow {
+        let needed = self.shadow_view_count(light);
+        let light_type;
+        let mut far_plane = 1.0;
+
+        match light.light_type {
+            LightType::Directional(_) => {
+                light_type = 1;
+                let dir = light.world_direction.normalize_or(Vec3::NEG_Z);
+                // Cascaded shadow maps: fit each cascade to its frustum slice
+                // (the `splits` boundaries computed above), so near geometry gets
+                // a dedicated high-resolution map and far geometry coarser ones.
+                for c in 0..self.num_cascades {
+                    let vp = calculate_cascade(
+                        dir,
+                        camera,
+                        splits[c as usize],
+                        splits[c as usize + 1],
+                        self.resolution,
+                    );
+                    let layer = base_view + c;
+                    view_proj[layer as usize] = vp.to_cols_array_2d();
+                    views.push(ShadowView {
+                        layer,
+                        view_proj: vp,
+                    });
+                }
+            }
+            LightType::Spot {
+                outer_cone_angle,
+                attenuation_radius,
+                ..
+            } => {
+                light_type = 2;
+                let radius = attenuation_radius.max(1.0);
+                let (near, far) = fit_near_far(caster_aabb, light.world_position, radius);
+                far_plane = far;
+                let dir = light.world_direction.normalize_or(Vec3::NEG_Z);
+                let fov = (outer_cone_angle * 2.0).clamp(0.1, std::f32::consts::PI - 0.05);
+                // Shrink the radial near plane to the (square) frustum's corner so
+                // off-axis occluders aren't clipped (see the point-light case).
+                let near = near * near_corner_scale(fov);
+                let vp = perspective_view_proj(
+                    light.world_position,
+                    light.world_position + dir,
+                    fov,
+                    near,
+                    far,
+                );
+                view_proj[base_view as usize] = vp.to_cols_array_2d();
+                views.push(ShadowView {
+                    layer: base_view,
+                    view_proj: vp,
+                });
+            }
+            LightType::Point { attenuation_radius } => {
+                light_type = 0;
+                let radius = attenuation_radius.max(1.0);
+                let (near, far) = fit_near_far(caster_aabb, light.world_position, radius);
+                far_plane = far;
+                // Each cube face is a 90° frustum. The AABB-fit near plane is a
+                // RADIAL distance, but an occluder near a face corner lies at only
+                // ~1/√3 of that distance along the face axis, so the radial near
+                // plane would clip the off-axis part of a caster (dropping half its
+                // shadow). Shrink it to the corner's axial near.
+                let near = near * near_corner_scale(std::f32::consts::FRAC_PI_2);
+                // Six perspective views unrolling a cube map: +X,-X,+Y,-Y,+Z,-Z.
+                let faces = cube_face_view_projs(light.world_position, near, far);
+                for (face_idx, vp) in faces.iter().enumerate() {
+                    let layer = base_view + face_idx as u32;
+                    view_proj[layer as usize] = vp.to_cols_array_2d();
+                    views.push(ShadowView {
+                        layer,
+                        view_proj: *vp,
+                    });
+                }
+            }
+        }
+
+        GpuLightShadow {
+            base_view,
+            num_views: needed as u32,
+            light_type,
+            enabled: 1.0,
+            light_pos: light.world_position.into(),
+            far_plane,
         }
     }
 
@@ -1256,7 +1388,7 @@ impl ShadowMapper {
 
         let mut uniforms = ShadowUniforms {
             view_proj: [[[0.0; 4]; 4]; MAX_SHADOW_VIEWS],
-            lights: [GpuLightShadow::default(); MAX_LIGHTS],
+            lights: [GpuLightShadow::default(); MAX_SHADOW_LIGHTS],
             shadows_enabled: 0.0,
             texel_size: 1.0 / self.resolution as f32,
             depth_bias: self.depth_bias,
@@ -1293,7 +1425,7 @@ impl ShadowMapper {
         // wasted between a tiny near plane and a far plane at the full attenuation
         // radius — which is what makes contact shadows attach. Only point/spot
         // lights use it, so skip the (per-frame, all-caster) scan otherwise.
-        let needs_aabb = lights.lights.iter().take(MAX_LIGHTS).any(|l| {
+        let needs_aabb = lights.lights.iter().any(|l| {
             l.casts_shadows
                 && matches!(
                     l.light_type,
@@ -1306,109 +1438,69 @@ impl ShadowMapper {
             None
         };
 
-        for (i, light) in lights.lights.iter().take(MAX_LIGHTS).enumerate() {
+        // Split lights into the primary tier (uniform array, shadows looked up by
+        // slot via `compute_shadow(i)`) and the clustered tier. Shadow metadata for
+        // the primary tier lives at slots `0..MAX_LIGHTS` (== uniform slot, so it
+        // stays in lockstep with `object_material`'s `frame.lights`); clustered
+        // shadow casters get slots `MAX_LIGHTS..MAX_SHADOW_LIGHTS` and each clustered
+        // light references its slot through its `shadow_slot` field. Atlas views are
+        // allocated greedily across both tiers, primary first.
+        let (primary, clustered) = lights.split_primary_clustered();
+        let mut shadow_slots = vec![u32::MAX; lights.lights.len()];
+
+        for (slot, &li) in primary.iter().enumerate() {
+            let light = &lights.lights[li];
             if !light.casts_shadows {
                 continue;
             }
-
-            let needed = match light.light_type {
-                LightType::Point { .. } => 6,
-                LightType::Directional(_) => self.num_cascades as usize,
-                LightType::Spot { .. } => 1,
-            };
+            let needed = self.shadow_view_count(light);
             if next_layer as usize + needed > MAX_SHADOW_VIEWS {
                 // Out of atlas space: this light lights without shadows.
                 continue;
             }
-
-            let base_view = next_layer;
-            let light_type;
-            let mut far_plane = 1.0;
-
-            match light.light_type {
-                LightType::Directional(_) => {
-                    light_type = 1;
-                    let dir = light.world_direction.normalize_or(Vec3::NEG_Z);
-                    // Cascaded shadow maps: fit each cascade to its frustum slice
-                    // (the `splits` boundaries computed above), so near geometry gets
-                    // a dedicated high-resolution map and far geometry coarser ones.
-                    for c in 0..self.num_cascades {
-                        let vp = calculate_cascade(
-                            dir,
-                            camera,
-                            splits[c as usize],
-                            splits[c as usize + 1],
-                            self.resolution,
-                        );
-                        let layer = base_view + c;
-                        uniforms.view_proj[layer as usize] = vp.to_cols_array_2d();
-                        views.push(ShadowView {
-                            layer,
-                            view_proj: vp,
-                        });
-                    }
-                }
-                LightType::Spot {
-                    outer_cone_angle,
-                    attenuation_radius,
-                    ..
-                } => {
-                    light_type = 2;
-                    let radius = attenuation_radius.max(1.0);
-                    let (near, far) = fit_near_far(caster_aabb, light.world_position, radius);
-                    far_plane = far;
-                    let dir = light.world_direction.normalize_or(Vec3::NEG_Z);
-                    let fov = (outer_cone_angle * 2.0).clamp(0.1, std::f32::consts::PI - 0.05);
-                    // Shrink the radial near plane to the (square) frustum's corner so
-                    // off-axis occluders aren't clipped (see the point-light case).
-                    let near = near * near_corner_scale(fov);
-                    let vp = perspective_view_proj(
-                        light.world_position,
-                        light.world_position + dir,
-                        fov,
-                        near,
-                        far,
-                    );
-                    uniforms.view_proj[base_view as usize] = vp.to_cols_array_2d();
-                    views.push(ShadowView {
-                        layer: base_view,
-                        view_proj: vp,
-                    });
-                }
-                LightType::Point { attenuation_radius } => {
-                    light_type = 0;
-                    let radius = attenuation_radius.max(1.0);
-                    let (near, far) = fit_near_far(caster_aabb, light.world_position, radius);
-                    far_plane = far;
-                    // Each cube face is a 90° frustum. The AABB-fit near plane is a
-                    // RADIAL distance, but an occluder near a face corner lies at only
-                    // ~1/√3 of that distance along the face axis, so the radial near
-                    // plane would clip the off-axis part of a caster (dropping half its
-                    // shadow). Shrink it to the corner's axial near.
-                    let near = near * near_corner_scale(std::f32::consts::FRAC_PI_2);
-                    // Six perspective views unrolling a cube map: +X,-X,+Y,-Y,+Z,-Z.
-                    let faces = cube_face_view_projs(light.world_position, near, far);
-                    for (face_idx, vp) in faces.iter().enumerate() {
-                        let layer = base_view + face_idx as u32;
-                        uniforms.view_proj[layer as usize] = vp.to_cols_array_2d();
-                        views.push(ShadowView {
-                            layer,
-                            view_proj: *vp,
-                        });
-                    }
-                }
-            }
-
-            uniforms.lights[i] = GpuLightShadow {
-                base_view,
-                num_views: needed as u32,
-                light_type,
-                enabled: 1.0,
-                light_pos: light.world_position.into(),
-                far_plane,
-            };
+            uniforms.lights[slot] = self.build_light_shadow(
+                light,
+                camera,
+                next_layer,
+                &splits,
+                caster_aabb,
+                &mut uniforms.view_proj,
+                &mut views,
+            );
+            shadow_slots[li] = slot as u32;
             next_layer += needed as u32;
         }
+
+        let mut slot = MAX_LIGHTS;
+        for &li in &clustered {
+            if slot >= MAX_SHADOW_LIGHTS {
+                // No metadata slots left for clustered shadow casters.
+                break;
+            }
+            let light = &lights.lights[li];
+            if !light.casts_shadows {
+                continue;
+            }
+            let needed = self.shadow_view_count(light);
+            if next_layer as usize + needed > MAX_SHADOW_VIEWS {
+                // Out of atlas space; a smaller later light might still fit.
+                continue;
+            }
+            uniforms.lights[slot] = self.build_light_shadow(
+                light,
+                camera,
+                next_layer,
+                &splits,
+                caster_aabb,
+                &mut uniforms.view_proj,
+                &mut views,
+            );
+            shadow_slots[li] = slot as u32;
+            next_layer += needed as u32;
+            slot += 1;
+        }
+
+        self.last_shadow_slots = shadow_slots;
 
         if views.is_empty() {
             // Nothing casts shadows: behave as if shadows were off.
@@ -1424,19 +1516,21 @@ impl ShadowMapper {
         // buffer writes can't be interleaved with an active pass.
         let mut models: Vec<ShadowModelUniforms> = Vec::new();
         let mut has_transparent = false;
-        scene.data().collect_shadow_models(&mut |transform, scale, color| {
-            has_transparent |= color.a < OPAQUE_ALPHA_THRESHOLD;
-            let scale_mat = glamx::Mat3::from_diagonal(scale).to_cols_array_2d();
-            models.push(ShadowModelUniforms {
-                transform: transform.to_mat4().to_cols_array_2d(),
-                scale: [
-                    [scale_mat[0][0], scale_mat[0][1], scale_mat[0][2], 0.0],
-                    [scale_mat[1][0], scale_mat[1][1], scale_mat[1][2], 0.0],
-                    [scale_mat[2][0], scale_mat[2][1], scale_mat[2][2], 0.0],
-                ],
-                color: [color.r, color.g, color.b, color.a],
+        scene
+            .data()
+            .collect_shadow_models(&mut |transform, scale, color| {
+                has_transparent |= color.a < OPAQUE_ALPHA_THRESHOLD;
+                let scale_mat = glamx::Mat3::from_diagonal(scale).to_cols_array_2d();
+                models.push(ShadowModelUniforms {
+                    transform: transform.to_mat4().to_cols_array_2d(),
+                    scale: [
+                        [scale_mat[0][0], scale_mat[0][1], scale_mat[0][2], 0.0],
+                        [scale_mat[1][0], scale_mat[1][1], scale_mat[1][2], 0.0],
+                        [scale_mat[2][0], scale_mat[2][1], scale_mat[2][2], 0.0],
+                    ],
+                    color: [color.r, color.g, color.b, color.a],
+                });
             });
-        });
 
         if models.is_empty() {
             // No surface geometry to occlude: nothing to render, behave as off.

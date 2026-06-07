@@ -58,7 +58,7 @@ impl Default for CanvasSetup {
     fn default() -> Self {
         CanvasSetup {
             vsync: true,
-            samples: NumSamples::Zero,
+            samples: NumSamples::Four,
             canvas_id: "canvas".to_string(),
         }
     }

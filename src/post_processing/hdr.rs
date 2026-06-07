@@ -654,7 +654,8 @@ impl HdrPipeline {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::R16Float,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
                 view_formats: &[],
             });
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
@@ -735,7 +736,8 @@ impl HdrPipeline {
                     cache: None,
                 })
             };
-        let meter_pipeline = make_1x1_pipeline("hdr_autoexposure_meter", &meter_layout, &meter_shader);
+        let meter_pipeline =
+            make_1x1_pipeline("hdr_autoexposure_meter", &meter_layout, &meter_shader);
 
         // Adaptation pipeline: meter + prev exposure + sampler + uniforms -> new exposure.
         let adapt_layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -783,7 +785,8 @@ impl HdrPipeline {
             Some("hdr_autoexposure_adapt"),
             include_str!("../builtin/auto_exposure_adapt.wgsl"),
         );
-        let adapt_pipeline = make_1x1_pipeline("hdr_autoexposure_adapt", &adapt_layout, &adapt_shader);
+        let adapt_pipeline =
+            make_1x1_pipeline("hdr_autoexposure_adapt", &adapt_layout, &adapt_shader);
         let adapt_uniform = ctxt.create_buffer_simple(
             Some("hdr_autoexposure_adapt_uniform"),
             std::mem::size_of::<AdaptUniforms>() as u64,
@@ -1062,15 +1065,20 @@ impl HdrPipeline {
             (tex, view)
         };
         let (oit_accum_texture, oit_accum_view) = make_oit("hdr_oit_accum", OIT_ACCUM_FORMAT, 1);
-        let (oit_reveal_texture, oit_reveal_view) = make_oit("hdr_oit_reveal", OIT_REVEAL_FORMAT, 1);
-        let (oit_accum_msaa_texture, oit_accum_msaa_view, oit_reveal_msaa_texture, oit_reveal_msaa_view) =
-            if sample_count > 1 {
-                let (at, av) = make_oit("hdr_oit_accum_msaa", OIT_ACCUM_FORMAT, sample_count);
-                let (rt, rv) = make_oit("hdr_oit_reveal_msaa", OIT_REVEAL_FORMAT, sample_count);
-                (Some(at), Some(av), Some(rt), Some(rv))
-            } else {
-                (None, None, None, None)
-            };
+        let (oit_reveal_texture, oit_reveal_view) =
+            make_oit("hdr_oit_reveal", OIT_REVEAL_FORMAT, 1);
+        let (
+            oit_accum_msaa_texture,
+            oit_accum_msaa_view,
+            oit_reveal_msaa_texture,
+            oit_reveal_msaa_view,
+        ) = if sample_count > 1 {
+            let (at, av) = make_oit("hdr_oit_accum_msaa", OIT_ACCUM_FORMAT, sample_count);
+            let (rt, rv) = make_oit("hdr_oit_reveal_msaa", OIT_REVEAL_FORMAT, sample_count);
+            (Some(at), Some(av), Some(rt), Some(rv))
+        } else {
+            (None, None, None, None)
+        };
 
         HdrTargets {
             scene_texture,
@@ -1128,6 +1136,13 @@ impl HdrPipeline {
         self.scene_msaa_view.as_ref().unwrap_or(&self.scene_view)
     }
 
+    /// The single-sample resolved HDR scene texture (the resolve destination under
+    /// MSAA, or the direct render target otherwise). Sampleable + renderable;
+    /// used by SSR to read and additively composite reflections before tonemapping.
+    pub fn scene_resolved_view(&self) -> &wgpu::TextureView {
+        &self.scene_view
+    }
+
     /// The MSAA resolve target (the single-sample HDR texture), or `None` when
     /// MSAA is disabled.
     pub fn scene_resolve_view(&self) -> Option<&wgpu::TextureView> {
@@ -1142,26 +1157,34 @@ impl HdrPipeline {
     /// (color attachment 0): the multisampled target under MSAA, the single-sample
     /// one otherwise. Clear to transparent black before rendering.
     pub fn oit_accum_view(&self) -> &wgpu::TextureView {
-        self.oit_accum_msaa_view.as_ref().unwrap_or(&self.oit_accum_view)
+        self.oit_accum_msaa_view
+            .as_ref()
+            .unwrap_or(&self.oit_accum_view)
     }
 
     /// The OIT revealage attachment the transparent geometry pass renders into (color
     /// attachment 1): the multisampled target under MSAA, the single-sample one
     /// otherwise. Clear to white (1.0) before rendering.
     pub fn oit_reveal_view(&self) -> &wgpu::TextureView {
-        self.oit_reveal_msaa_view.as_ref().unwrap_or(&self.oit_reveal_view)
+        self.oit_reveal_msaa_view
+            .as_ref()
+            .unwrap_or(&self.oit_reveal_view)
     }
 
     /// MSAA resolve target for the OIT accumulation attachment (the single-sample
     /// accum texture), or `None` when MSAA is disabled.
     pub fn oit_accum_resolve_view(&self) -> Option<&wgpu::TextureView> {
-        self.oit_accum_msaa_view.as_ref().map(|_| &self.oit_accum_view)
+        self.oit_accum_msaa_view
+            .as_ref()
+            .map(|_| &self.oit_accum_view)
     }
 
     /// MSAA resolve target for the OIT revealage attachment (the single-sample reveal
     /// texture), or `None` when MSAA is disabled.
     pub fn oit_reveal_resolve_view(&self) -> Option<&wgpu::TextureView> {
-        self.oit_reveal_msaa_view.as_ref().map(|_| &self.oit_reveal_view)
+        self.oit_reveal_msaa_view
+            .as_ref()
+            .map(|_| &self.oit_reveal_view)
     }
 
     /// Composites the transparent OIT result over the opaque HDR scene. Run after

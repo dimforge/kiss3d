@@ -1,6 +1,6 @@
 use crate::camera::Camera3d;
 use crate::color::Color;
-use crate::light::{CollectedLight, Light, LightCollection, LightType, MAX_LIGHTS};
+use crate::light::{CollectedLight, Light, LightCollection, LightType};
 use crate::procedural;
 use crate::procedural::{IndexBuffer, RenderMesh};
 use crate::resource::vertex_index::VertexIndex;
@@ -152,7 +152,7 @@ impl SceneNodeData3d {
     fn do_collect_lights(&mut self, lights: &mut LightCollection) {
         // Collect light if present and enabled
         if let Some(ref light) = self.light {
-            if light.enabled && lights.lights.len() < MAX_LIGHTS {
+            if light.enabled {
                 let local_direction = match light.light_type {
                     LightType::Directional(direction) => direction.normalize_or(Vec3::NEG_Z),
                     _ => Vec3::NEG_Z,
@@ -314,7 +314,8 @@ impl SceneNodeData3d {
                         let jlk = jl.read().unwrap();
                         let wlk = wl.read().unwrap();
                         let palette = skin.palette();
-                        let jmat = |j: u32| palette.get(j as usize).copied().unwrap_or(Mat4::IDENTITY);
+                        let jmat =
+                            |j: u32| palette.get(j as usize).copied().unwrap_or(Mat4::IDENTITY);
                         if let (Some(js), Some(ws)) = (jlk.data().as_ref(), wlk.data().as_ref()) {
                             for (idx, &local) in coords.iter().enumerate() {
                                 let j = js[idx];
@@ -1081,6 +1082,69 @@ impl SceneNode3d {
         node
     }
 
+    /// Adds a planar **reflector** (mirror) of size `width` × `height` as a child,
+    /// returning its node.
+    ///
+    /// This is a convenience over [`Self::add_quad`] + [`Self::set_reflector`]: a
+    /// flat quad (local XY plane, normal +Z) carrying the **default PBR material**
+    /// plus a [`Reflector`](crate::renderer::Reflector). Each frame the window
+    /// renders the scene from a mirror camera into the reflector's texture and the
+    /// surface composites it over its PBR shading — so you can still
+    /// [`set_color`](Self::set_color)/[`set_texture`](Self::set_texture)/
+    /// [`set_roughness`](Self::set_roughness) it. Place and orient it with the usual
+    /// node transforms (the reflection plane follows the node's world transform), so
+    /// wall, floor and angled mirrors all work, and use as many as you like.
+    pub fn add_reflector(&mut self, width: f32, height: f32) -> SceneNode3d {
+        let mut node = self.add_quad(width, height, 1, 1);
+        node.set_reflector(Some(crate::renderer::Reflector::new()));
+        node
+    }
+
+    /// Makes this node's surface a planar reflector (or clears it). See
+    /// [`Object3d::set_reflector`](crate::scene::Object3d::set_reflector).
+    pub fn set_reflector(&mut self, reflector: Option<crate::renderer::Reflector>) -> Self {
+        // `Reflector` isn't `Clone`, so move it into the (single) object this node
+        // owns; deeper descendants are unaffected.
+        let mut slot = reflector;
+        self.apply_to_object_mut(&mut |o| o.set_reflector(slot.take()));
+        self.clone()
+    }
+
+    /// Sets the reflection intensity in `[0, 1]` of this node's reflector (scales the
+    /// composited reflection). No-op on non-reflector nodes. See [`Self::add_reflector`].
+    pub fn set_reflector_intensity(&mut self, intensity: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| {
+            if let Some(r) = o.reflector_mut() {
+                r.set_intensity(intensity);
+            }
+        });
+        self.clone()
+    }
+
+    /// Sets the object-space plane normal of this node's reflector. No-op on
+    /// non-reflector nodes. See [`Reflector::with_local_normal`](crate::renderer::Reflector::with_local_normal).
+    pub fn set_reflector_normal(&mut self, normal: Vec3) -> Self {
+        self.apply_to_object_mut(&mut |o| {
+            if let Some(r) = o.reflector_mut() {
+                r.set_local_normal(normal);
+            }
+        });
+        self.clone()
+    }
+
+    /// Sets the normal-alignment falloff of this node's reflector: the reflection
+    /// fades where the surface normal diverges from the reflector's plane normal
+    /// (`0` = uniform; larger fades faster). No-op on non-reflector nodes. See
+    /// [`Reflector::with_normal_falloff`](crate::renderer::Reflector::with_normal_falloff).
+    pub fn set_reflector_normal_falloff(&mut self, falloff: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| {
+            if let Some(r) = o.reflector_mut() {
+                r.set_normal_falloff(falloff);
+            }
+        });
+        self.clone()
+    }
+
     /// Adds a double-sided quad with the specified vertices.
     pub fn add_quad_with_vertices(
         &mut self,
@@ -1217,8 +1281,7 @@ impl SceneNode3d {
     /// model.player.play("Walk");
     /// ```
     pub fn add_gltf(&mut self, path: &Path, scale: Vec3) -> GltfModel {
-        let mut model =
-            crate::loader::gltf::load(path).expect("Failed to load the glTF/GLB file.");
+        let mut model = crate::loader::gltf::load(path).expect("Failed to load the glTF/GLB file.");
         model.root.set_local_scale(scale.x, scale.y, scale.z);
         self.add_child(model.root.clone());
         model
@@ -1971,6 +2034,16 @@ impl SceneNode3d {
     #[inline]
     pub fn set_metallic(&mut self, metallic: f32) -> Self {
         self.apply_to_object_mut(&mut |o| o.set_metallic(metallic));
+        self.clone()
+    }
+
+    /// Sets this node's object's per-object screen-space-reflection properties.
+    /// `None` opts the object out of SSR; `Some(SsrMaterial { .. })` sets per-object
+    /// intensity / infinite-thick / Fresnel / distance attenuation. See
+    /// [`Object3d::set_ssr`](crate::scene::Object3d::set_ssr).
+    #[inline]
+    pub fn set_ssr(&mut self, ssr: Option<crate::renderer::SsrMaterial>) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_ssr(ssr));
         self.clone()
     }
 

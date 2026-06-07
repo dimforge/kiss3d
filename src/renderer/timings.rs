@@ -346,11 +346,13 @@ impl GpuTimer {
             slot.ready.store(false, Ordering::Release);
             slot.pending = true;
             let ready = slot.ready.clone();
-            slot.buffer.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-                if res.is_ok() {
-                    ready.store(true, Ordering::Release);
-                }
-            });
+            slot.buffer
+                .slice(..)
+                .map_async(wgpu::MapMode::Read, move |res| {
+                    if res.is_ok() {
+                        ready.store(true, Ordering::Release);
+                    }
+                });
         }
         self.frame = self.frame.wrapping_add(1);
     }

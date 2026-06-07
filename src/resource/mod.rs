@@ -6,8 +6,8 @@ pub use crate::resource::framebuffer_manager::{
 };
 pub use crate::resource::gpu_vector::{AllocationType, BufferType, GPUVec};
 pub use crate::resource::material::{
-    EnvLight, GpuData, Material2d, Material3d, RenderContext, RenderContext2d,
-    RenderContext2dEncoder, RenderPhase,
+    EnvLight, GpuData, Material2d, Material3d, ProbeData, ProbeLighting, RenderContext,
+    RenderContext2d, RenderContext2dEncoder, RenderPhase,
 };
 pub use crate::resource::material_manager2d::MaterialManager2d;
 pub use crate::resource::material_manager3d::MaterialManager3d;

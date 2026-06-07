@@ -8,8 +8,9 @@
 //! Two backends share the same shading kernel:
 //! - **Compute** (always available): traverses a CPU-built BVH in a compute
 //!   shader. Runs on every wgpu backend, including Metal and the web.
-//! - **Hardware ray-query** (`hw_raytracer` feature, capable Vulkan GPUs): uses
-//!   wgpu's experimental ray queries against hardware acceleration structures.
+//! - **Hardware ray-query** (capable Vulkan GPUs): uses wgpu's experimental ray
+//!   queries against hardware acceleration structures. Selected automatically
+//!   when the GPU supports it, otherwise the compute backend is used.
 //!
 //! Accumulation restarts automatically when the camera moves, the viewport is
 //! resized, or the scene changes. For in-place vertex edits that the change hash
@@ -43,8 +44,8 @@ use tonemap::Tonemap;
 pub enum RayBackend {
     /// Portable compute-shader BVH traversal.
     Software,
-    /// Hardware ray queries (requires the `hw_raytracer` feature and GPU support).
-    #[cfg(feature = "hw_raytracer")]
+    /// Hardware ray queries (requires GPU support; falls back to [`Software`](Self::Software)
+    /// when unavailable).
     Hardware,
 }
 
@@ -137,8 +138,8 @@ fn effective_denoise_iterations(max_iterations: u32, samples: u32) -> u32 {
 
 impl RayTracer {
     /// Creates a new path tracer, selecting the best available backend: the
-    /// hardware ray-query backend when the `hw_raytracer` feature is enabled and
-    /// the GPU supports it, otherwise the portable compute backend.
+    /// hardware ray-query backend when the GPU supports it, otherwise the
+    /// portable compute backend.
     ///
     /// # Panics
     /// Panics if the GPU context has not been initialized (i.e. no window exists).
@@ -192,16 +193,16 @@ impl RayTracer {
     }
 
     fn pick_backend() -> RayBackend {
-        #[cfg(feature = "hw_raytracer")]
-        {
-            // The hardware path requires the ray-query device feature (which also
-            // gates acceleration structures), enabled at device creation.
-            let features = crate::context::Context::get().device.features();
-            if features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
-                return RayBackend::Hardware;
-            }
+        // The hardware path requires the ray-query device feature (which also
+        // gates acceleration structures), enabled at device creation. When the
+        // platform does not support it the device never requests it, so this
+        // falls back to the portable compute backend.
+        let features = crate::context::Context::get().device.features();
+        if features.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            RayBackend::Hardware
+        } else {
+            RayBackend::Software
         }
-        RayBackend::Software
     }
 
     /// Returns the backend selected at construction.
@@ -506,7 +507,6 @@ impl RayTracer {
                     gpu,
                 );
             }
-            #[cfg(feature = "hw_raytracer")]
             RayBackend::Hardware => {
                 self.pipeline.dispatch_hardware(
                     encoder,

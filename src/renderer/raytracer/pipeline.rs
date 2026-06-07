@@ -64,7 +64,6 @@ pub struct FrameUniforms {
 
 const PREAMBLE: &str = include_str!("../../builtin/raytrace/rt_preamble.wgsl");
 const INTERSECT_BVH: &str = include_str!("../../builtin/raytrace/rt_intersect_bvh.wgsl");
-#[cfg(feature = "hw_raytracer")]
 const INTERSECT_RAYQUERY: &str = include_str!("../../builtin/raytrace/rt_intersect_rayquery.wgsl");
 const KERNEL: &str = include_str!("../../builtin/raytrace/rt_kernel.wgsl");
 
@@ -83,14 +82,12 @@ impl PathTracePipeline {
 
         let intersect = match backend {
             RayBackend::Software => INTERSECT_BVH,
-            #[cfg(feature = "hw_raytracer")]
             RayBackend::Hardware => INTERSECT_RAYQUERY,
         };
         // The `enable` directive must precede all declarations, so it is prepended
         // to the whole module for the ray-query backend.
         let prologue = match backend {
             RayBackend::Software => "",
-            #[cfg(feature = "hw_raytracer")]
             RayBackend::Hardware => "enable wgpu_ray_query;\n",
         };
         let source = format!("{prologue}{PREAMBLE}\n{intersect}\n{KERNEL}");
@@ -159,21 +156,6 @@ impl PathTracePipeline {
         entries.push(storage_entry(12, true)); // instances
     }
 
-    #[cfg(not(feature = "hw_raytracer"))]
-    fn group1_entries(_backend: RayBackend) -> Vec<wgpu::BindGroupLayoutEntry> {
-        let mut entries = vec![
-            storage_entry(0, true), // mesh vertices
-            storage_entry(1, true), // mesh triangles
-            storage_entry(2, true), // materials
-            storage_entry(3, true), // lights
-            storage_entry(4, true), // TLAS nodes
-        ];
-        Self::group1_shared_tail(&mut entries);
-        Self::group1_two_level_tail(&mut entries);
-        entries
-    }
-
-    #[cfg(feature = "hw_raytracer")]
     fn group1_entries(backend: RayBackend) -> Vec<wgpu::BindGroupLayoutEntry> {
         let mut entries = vec![
             storage_entry(0, true), // (mesh) vertices
@@ -314,7 +296,6 @@ impl PathTracePipeline {
     /// Phase 2: builds bind group 1 with the TLAS bound at binding 4 instead of
     /// the BVH buffer. The shared kernel and group 0 are identical to the compute
     /// path.
-    #[cfg(feature = "hw_raytracer")]
     pub fn dispatch_hardware(
         &self,
         encoder: &mut wgpu::CommandEncoder,

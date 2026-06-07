@@ -466,9 +466,7 @@ impl OrbitCamera3d {
                 // `dist`) keeps working.
                 let half_h = self.dist * (self.fov * 0.5).tan();
                 let half_w = half_h * aspect;
-                Mat4::orthographic_rh_gl(
-                    -half_w, half_w, -half_h, half_h, self.znear, self.zfar,
-                )
+                Mat4::orthographic_rh_gl(-half_w, half_w, -half_h, half_h, self.znear, self.zfar)
             }
         };
         self.view = self.view_transform().to_mat4();

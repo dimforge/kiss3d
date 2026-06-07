@@ -3,7 +3,7 @@
 //! Holds the storage buffers shared by both backends (vertices, triangles,
 //! materials, lights). The compute backend additionally stores a BVH node
 //! buffer; the hardware backend additionally builds BLAS/TLAS acceleration
-//! structures (behind the `hw_raytracer` feature).
+//! structures.
 
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat4, Vec3};
@@ -39,7 +39,6 @@ pub struct GpuScene {
     /// Hardware backend only: per-mesh descriptors (`array<RtMeshDesc>`) mapping a
     /// ray query's `primitive_index` to the global triangle table. The compute
     /// backend inlines these offsets into each [`RtInstance`] instead.
-    #[cfg(feature = "hw_raytracer")]
     pub meshes: wgpu::Buffer,
     /// Compute backend: instances (`array<RtInstance>`), reordered so TLAS leaves
     /// are contiguous.
@@ -61,11 +60,9 @@ pub struct GpuScene {
 
     /// Bottom-level acceleration structures, one per mesh (kept alive while
     /// referenced by the TLAS). Hardware backend only.
-    #[cfg(feature = "hw_raytracer")]
     _blas: Vec<wgpu::Blas>,
     /// Top-level acceleration structure bound to the path-tracing pipeline.
     /// Hardware backend only.
-    #[cfg(feature = "hw_raytracer")]
     pub tlas: Option<wgpu::Tlas>,
 }
 
@@ -120,7 +117,6 @@ impl GpuScene {
     pub fn build(scene: &RtScene, backend: RayBackend) -> GpuScene {
         match backend {
             RayBackend::Software => Self::build_compute(scene),
-            #[cfg(feature = "hw_raytracer")]
             RayBackend::Hardware => Self::build_hardware(scene),
         }
     }
@@ -209,7 +205,6 @@ impl GpuScene {
             bvh: buffer_from::<BvhNode>("rt_bvh", &bvh_nodes, wgpu::BufferUsages::STORAGE),
             // The compute backend inlines the per-mesh node/tri bases into instances
             // and does not bind this buffer; it is kept only for the hardware backend.
-            #[cfg(feature = "hw_raytracer")]
             meshes: buffer_from::<RtMeshDesc>(
                 "rt_meshes",
                 &mesh_descs,
@@ -226,9 +221,7 @@ impl GpuScene {
             num_emitters: scene.emitters.len() as u32,
             has_translucent: scene.materials.iter().any(|m| m.base_color[3] < 1.0),
             hash: scene.hash,
-            #[cfg(feature = "hw_raytracer")]
             _blas: Vec::new(),
-            #[cfg(feature = "hw_raytracer")]
             tlas: None,
         }
     }
@@ -240,7 +233,6 @@ impl GpuScene {
     /// `instances` storage buffer (where the hit shader reads mesh + material).
     /// `primitive_index` from a ray query is the triangle within its mesh's BLAS;
     /// the shader maps it to the global table via the mesh's `tri_offset`.
-    #[cfg(feature = "hw_raytracer")]
     fn build_hardware(scene: &RtScene) -> GpuScene {
         use wgpu::{
             AccelerationStructureFlags, AccelerationStructureGeometryFlags,
@@ -438,14 +430,12 @@ impl GpuScene {
 }
 
 /// Identity object→world transform as a 3x4 row-major matrix (wgpu TLAS format).
-#[cfg(feature = "hw_raytracer")]
 fn identity_3x4() -> [f32; 12] {
     [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
 }
 
 /// Converts a column-major 4x4 transform to the 3x4 row-major form a wgpu
 /// `TlasInstance` expects (drops the implicit `[0,0,0,1]` bottom row).
-#[cfg(feature = "hw_raytracer")]
 fn transform_3x4(m: &[[f32; 4]; 4]) -> [f32; 12] {
     // m[col][row], column-major. Row-major 3x4: row r = (m[0][r], m[1][r], m[2][r], m[3][r]).
     [

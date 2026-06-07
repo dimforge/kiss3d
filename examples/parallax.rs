@@ -96,12 +96,19 @@ async fn main() {
 
     let maps = (
         load("examples/media/parallax/cube_color.png", true, false, false),
-        load("examples/media/parallax/cube_normal.png", false, false, true),
+        load(
+            "examples/media/parallax/cube_normal.png",
+            false,
+            false,
+            true,
+        ),
         load("examples/media/parallax/cube_depth.png", false, true, false),
     );
 
     let light_pos = Vec3::new(2.0, 1.0, -1.1);
-    scene.add_light(Light::point(60.0).with_intensity(5.0)).set_position(light_pos);
+    scene
+        .add_light(Light::point(60.0).with_intensity(5.0))
+        .set_position(light_pos);
     scene
         .add_sphere(0.05)
         .translate(light_pos)
@@ -138,7 +145,9 @@ async fn main() {
     let spin_back = Quat::from_axis_angle(Vec3::Y, -0.002);
     while window.render_3d(&mut scene, &mut camera).await {
         let method = if use_relief {
-            ParallaxMethod::Relief { max_steps: relief_steps }
+            ParallaxMethod::Relief {
+                max_steps: relief_steps,
+            }
         } else {
             ParallaxMethod::Occlusion
         };
