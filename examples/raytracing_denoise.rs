@@ -56,7 +56,7 @@ fn build_scene(scene: &mut SceneNode3d) {
         .set_color(WHITE)
         .set_emissive(Color::new(6.0, 6.0, 6.0, 1.0));
     scene
-        .add_light(Light::point(30.0).with_intensity(8.0))
+        .add_light(Light::point(30.0).with_intensity(1.0))
         .set_position(Vec3::new(0.0, 3.5, 1.0));
 }
 

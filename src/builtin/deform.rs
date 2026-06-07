@@ -15,9 +15,11 @@
 //! identical to the plain one (no extra vertex buffers) and a morph-only mesh never
 //! needs fabricated dummy joint/weight buffers.
 //!
-//! All of this needs a 5th bind group, which exceeds the WebGPU/WebGL2 cap of four,
-//! so — like the skinning it generalizes — the deform path is **native-only**; on
-//! the web a skinned/morphed mesh falls back to its base (rest) shape.
+//! The deform data is bound as a single extra bind group (group 3 in the color/prepass
+//! pipelines, group 2 in the shadow pipelines), so the total stays within the
+//! WebGPU/WebGL2 cap of four groups and the deform path runs on **every target,
+//! including web** — both the color pass and the shadow pass deform skinned/morphed
+//! meshes, so an animated caster's shadow tracks its current pose everywhere.
 
 use crate::context::Context;
 use bytemuck::{Pod, Zeroable};

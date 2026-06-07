@@ -428,12 +428,14 @@ impl ShadowMapper {
             &transmittance_tex_bgl,
         );
 
-        // Deformed depth/transmittance pipelines (native only): the deform data needs
-        // a 3rd bind group; we gate it on native so web stays uniformly in the rest
-        // shape (the color pass has no deformed pipeline there either). The deform
-        // bind-group layout is the shared one from `builtin::deform`, so each object's
-        // deform bind group works in both the color and shadow passes.
-        #[cfg(not(target_arch = "wasm32"))]
+        // Deformed depth/transmittance pipelines: the deform data is bound as a 3rd
+        // bind group (4th for transmittance, which also needs the albedo texture), so
+        // these stay within WebGPU's 4-bind-group cap and run on every target —
+        // including web, where the color pass already deforms skinned/morphed meshes.
+        // Gating these off on web would leave the shadow map in the rest pose while the
+        // lit geometry is animated, self-shadowing the moved surfaces (acne). The
+        // deform bind-group layout is the shared one from `builtin::deform`, so each
+        // object's deform bind group works in both the color and shadow passes.
         let (deform_depth_pipeline, deform_transmittance_pipeline) = {
             let deform_layout = crate::builtin::deform::deform_bind_group_layout();
             let depth = Self::create_depth_pipeline_deform(
@@ -451,11 +453,6 @@ impl ShadowMapper {
             );
             (Some(depth), Some(transmittance))
         };
-        #[cfg(target_arch = "wasm32")]
-        let (deform_depth_pipeline, deform_transmittance_pipeline): (
-            Option<wgpu::RenderPipeline>,
-            Option<wgpu::RenderPipeline>,
-        ) = (None, None);
 
         let view_capacity = MAX_SHADOW_VIEWS as u64;
         let view_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
@@ -897,7 +894,6 @@ impl ShadowMapper {
     /// animated/morphed casters cast correctly-posed shadows. The vertex layout is
     /// identical to the non-deformed pass — deform data is read from the storage
     /// buffers by vertex index, not vertex attributes.
-    #[cfg(not(target_arch = "wasm32"))]
     fn create_depth_pipeline_deform(
         ctxt: &Context,
         view_bind_group_layout: &wgpu::BindGroupLayout,
@@ -1007,7 +1003,6 @@ impl ShadowMapper {
     /// stage, so translucent deformable casters tint shadows in their animated/morphed
     /// pose. The vertex layout matches the non-deformed pass plus UVs; deform data is
     /// read from storage by vertex index.
-    #[cfg(not(target_arch = "wasm32"))]
     fn create_transmittance_pipeline_deform(
         ctxt: &Context,
         view_bind_group_layout: &wgpu::BindGroupLayout,
@@ -1623,8 +1618,8 @@ impl ShadowMapper {
                 pass.set_pipeline(&self.depth_pipeline);
                 pass.set_bind_group(0, &self.view_bind_group, &[offset]);
 
-                // Deformable casters (native only) use the deformed depth pipeline so
-                // their shadow tracks the animated/morphed pose.
+                // Deformable casters use the deformed depth pipeline so their shadow
+                // tracks the animated/morphed pose (on every target, web included).
                 let deform = self.deform_depth_pipeline.as_ref();
 
                 // Re-traverse in collection order, binding each object's slot.
@@ -1678,8 +1673,8 @@ impl ShadowMapper {
                 pass.set_pipeline(&self.transmittance_pipeline);
                 pass.set_bind_group(0, &self.view_bind_group, &[offset]);
 
-                // Deformable translucent casters (native) use the deformed
-                // transmittance pipeline so their tinted shadow tracks the pose.
+                // Deformable translucent casters use the deformed transmittance
+                // pipeline so their tinted shadow tracks the pose (web included).
                 let deform = self.deform_transmittance_pipeline.as_ref();
 
                 let mut object_index = 0u32;
