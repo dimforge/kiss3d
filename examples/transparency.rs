@@ -16,6 +16,7 @@ use kiss3d::prelude::*;
 #[kiss3d::main]
 async fn main() {
     let mut window = Window::new("Kiss3d: order-independent transparency").await;
+    window.set_samples(NumSamples::Four);
     window.set_background_color(Color::new(0.1, 0.11, 0.14, 1.0));
     window.set_ambient(0.5);
 
@@ -42,9 +43,10 @@ async fn main() {
         sheet(1.05, Color::new(0.25, 0.9, 0.35, 0.45)),
         sheet(-1.05, Color::new(0.3, 0.45, 0.95, 0.45)),
     ] {
-        let mut s = scene.add_cube(5.0, 2.6, 0.06);
-        s.set_color(color);
-        s.rotate(Quat::from_axis_angle(Vec3::Y, angle));
+        scene
+            .add_cube(5.0, 2.6, 0.06)
+            .set_color(color)
+            .rotate(Quat::from_axis_angle(Vec3::Y, angle));
     }
 
     // A cluster of overlapping translucent spheres floating above.

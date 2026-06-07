@@ -1,6 +1,25 @@
-// Backend-independent path-tracing kernel. Appended after the preamble and an
-// intersection snippet, so `trace_closest` / `trace_any` and all bindings are in
-// scope. One sample per pixel per frame is accumulated as a running mean.
+// Backend-independent path-tracing kernel. Composed (via WESL module imports) with
+// the preamble and the selected intersection module, which provide all scene
+// bindings/types and `trace_closest` / `trace_any`. One sample per pixel per frame
+// is accumulated as a running mean.
+
+// Shared scene data + types from the preamble module (unused items strip away).
+import package::rt_preamble::{
+    RtVertex, RtTriangle, RtMaterial, RtLight, FrameUniforms, Hit, RtEmitter,
+    BSDF_OPAQUE, BSDF_GLASS, BSDF_METAL, BSDF_EMISSIVE, PI, EPS, T_MAX,
+    frame, pixels, vertices, triangles, materials, lights, emitters,
+    tex_array, tex_sampler, env_tex, env_sampler
+};
+// The intersection contract, from whichever backend module is mounted as
+// `package::rt_intersect` (the compute BVH or the hardware ray-query backend).
+import package::rt_intersect::{trace_closest, trace_any};
+// Shared equirectangular mapping (same convention as the rasterizer/skybox).
+import package::pbr_env::equirect_dir_to_uv;
+import package::common::luminance;
+
+// The hardware ray-query backend needs this extension; gated so the compute
+// (software) variant stays portable WGSL.
+@if(hardware) enable wgpu_ray_query;
 
 // ---- Random numbers (PCG hash) ------------------------------------------------
 
@@ -20,10 +39,6 @@ fn rand(state: ptr<function, u32>) -> f32 {
 }
 
 // ---- Sampling helpers ---------------------------------------------------------
-
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
 
 // Power heuristic (beta = 2) used for multiple-importance sampling.
 fn power_heuristic(pf: f32, pg: f32) -> f32 {
@@ -85,6 +100,11 @@ fn fresnel_schlick(f0: vec3<f32>, v_dot_h: f32) -> vec3<f32> {
     return f0 + (vec3<f32>(1.0) - f0) * pow(clamp(1.0 - v_dot_h, 0.0, 1.0), 5.0);
 }
 
+// Scalar Schlick Fresnel (used by the dielectric clearcoat lobe).
+fn fresnel_schlick_scalar(f0: f32, cos_theta: f32) -> f32 {
+    return f0 + (1.0 - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
 // Exact dielectric Fresnel reflectance for unpolarised light.
 // `cos_i` is |cos(theta_i)|, `eta` is n_i / n_t (incident over transmitted).
 fn fresnel_dielectric(cos_i: f32, eta: f32) -> f32 {
@@ -112,6 +132,13 @@ struct Surface {
     bsdf_type: u32,
     subsurface: f32,
     subsurface_radius: f32,
+    reflectance: f32,
+    clearcoat: f32,
+    clearcoat_roughness: f32,
+    light_layers: u32,
+    // Beer-Lambert volume absorption coefficient (per world unit); zero when the
+    // surface has no finite attenuation distance set.
+    sigma_a: vec3<f32>,
 };
 
 fn sample_tex(layer: i32, uv: vec2<f32>) -> vec4<f32> {
@@ -130,6 +157,18 @@ fn resolve_surface(mat: RtMaterial, uv: vec2<f32>) -> Surface {
     s.bsdf_type = mat.bsdf_type;
     s.subsurface = mat.subsurface;
     s.subsurface_radius = mat.subsurface_radius;
+    s.reflectance = mat.reflectance;
+    s.clearcoat = mat.clearcoat;
+    s.clearcoat_roughness = mat.clearcoat_roughness;
+    s.light_layers = mat.light_layers;
+    // Beer-Lambert: sigma_a = -ln(attenuation_color) / attenuation_distance.
+    // attenuation_distance <= 0 means "infinite" (no absorption).
+    if (mat.attenuation_distance > 0.0) {
+        let ac = max(mat.attenuation_color, vec3<f32>(1e-3));
+        s.sigma_a = -log(ac) / max(mat.attenuation_distance, 1e-4);
+    } else {
+        s.sigma_a = vec3<f32>(0.0);
+    }
 
     if (mat.albedo_tex >= 0) {
         let t = sample_tex(mat.albedo_tex, uv);
@@ -162,29 +201,53 @@ fn apply_normal_map(mat: RtMaterial, n: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
 // ---- BSDF evaluation (for NEE / MIS) ------------------------------------------
 
 // Reflective Cook-Torrance lobe value (already multiplied by N·L), with its pdf
-// returned in `pdf` (solid-angle, for the GGX-sampled half vector). Diffuse +
-// specular for the opaque/metal lobes; transmission is sampled stochastically and
-// is not included here.
+// returned in `pdf` (solid-angle, for the GGX-sampled half vector). Front-facing
+// `wi` gives diffuse + specular (+ clearcoat); a back-facing `wi` gives the
+// subsurface diffuse-transmission lobe (so translucent objects can be lit from
+// behind). Refractive glass transmission is sampled stochastically, not here.
 fn brdf_eval(
     s: Surface, n: vec3<f32>, wo: vec3<f32>, wi: vec3<f32>, pdf: ptr<function, f32>,
 ) -> vec3<f32> {
     *pdf = 0.0;
-    let n_dot_l = dot(n, wi);
     let n_dot_v = dot(n, wo);
-    if (n_dot_l <= 0.0 || n_dot_v <= 0.0) {
-        return vec3<f32>(0.0);
+    if (n_dot_v <= 0.0) {
+        return vec3<f32>(0.0); // viewer behind the surface: nothing to shade
     }
+    let n_dot_l = dot(n, wi);
+
+    // Subsurface translucency: a fraction `kt` of the diffuse lobe is transmitted
+    // out the BACK hemisphere (tinted by albedo), the rest reflects off the front.
+    // This is what lets a subsurface object be lit from behind and fills its dark
+    // side. `kt = 0` (opaque, or metal) is plain Lambert reflection.
+    let kt = select(0.0, 0.5 * s.subsurface, s.bsdf_type != BSDF_METAL);
+    let diffuse_color = s.albedo * (1.0 - s.metallic) * (1.0 - s.transmission);
+
+    // p_spec: probability the BSDF sampler picks the specular lobe (for MIS).
+    let dielectric_f0 = 0.16 * s.reflectance * s.reflectance * s.spec_tint;
+    let f0 = mix(dielectric_f0, s.albedo, s.metallic);
+    let lum_s = luminance(f0);
+    let lum_d = luminance(s.albedo * (1.0 - s.metallic));
+    var p_spec = clamp(lum_s / (lum_s + lum_d + 1e-4), 0.1, 0.9);
+    if (s.bsdf_type == BSDF_METAL) {
+        p_spec = 1.0;
+    }
+
+    // Back hemisphere: only the transmitted diffuse lobe (no specular/clearcoat,
+    // which are front-surface reflections).
+    if (n_dot_l <= 0.0) {
+        if (kt <= 0.0) {
+            return vec3<f32>(0.0);
+        }
+        let nl = -n_dot_l;
+        *pdf = (1.0 - p_spec) * kt * nl / PI;
+        return diffuse_color * kt / PI * nl;
+    }
+
+    // Front hemisphere: specular + reflected diffuse (+ clearcoat).
     let h = normalize(wo + wi);
     let n_dot_h = max(dot(n, h), 0.0);
     let v_dot_h = max(dot(wo, h), 0.0);
     let a = max(s.roughness * s.roughness, 1e-3);
-
-    var f0: vec3<f32>;
-    if (s.bsdf_type == BSDF_METAL) {
-        f0 = mix(vec3<f32>(0.04), s.albedo, s.metallic) * s.spec_tint;
-    } else {
-        f0 = mix(vec3<f32>(0.04) * s.spec_tint, s.albedo, s.metallic);
-    }
     let fr = fresnel_schlick(f0, v_dot_h);
     let d = ggx_d(n_dot_h, a);
     let g = smith_g(n_dot_v, n_dot_l, a);
@@ -192,24 +255,33 @@ fn brdf_eval(
 
     var diffuse = vec3<f32>(0.0);
     if (s.bsdf_type != BSDF_METAL) {
+        // The reflected share is (1 - kt) of the diffuse energy.
         let kd = (vec3<f32>(1.0) - fr) * (1.0 - s.metallic) * (1.0 - s.transmission);
-        // Cheap subsurface: lerp toward a wrapped/half-Lambert term.
-        let wrap = clamp((n_dot_l + s.subsurface) / (1.0 + s.subsurface), 0.0, 1.0);
-        let diff_shade = mix(n_dot_l, wrap, s.subsurface);
-        diffuse = kd * s.albedo / PI * diff_shade;
-        // Re-fold the cosine that the spec term carries explicitly below.
-        diffuse = diffuse / max(n_dot_l, 1e-4);
+        diffuse = kd * s.albedo / PI * (1.0 - kt);
     }
 
-    // pdf: weighted average of the diffuse (cosine) and specular (GGX) pdfs.
-    let lum_s = luminance(f0);
-    let lum_d = luminance(s.albedo * (1.0 - s.metallic));
-    let p_spec = clamp(lum_s / (lum_s + lum_d + 1e-4), 0.1, 0.9);
+    // pdf: specular + the reflected (front) share of the diffuse lobe.
     let pdf_spec = d * n_dot_h / (4.0 * v_dot_h + 1e-5);
     let pdf_diff = n_dot_l / PI;
-    *pdf = p_spec * pdf_spec + (1.0 - p_spec) * pdf_diff;
+    *pdf = p_spec * pdf_spec + (1.0 - p_spec) * (1.0 - kt) * pdf_diff;
 
-    return (diffuse + spec) * n_dot_l;
+    // Clearcoat lobe layered over the base (mirrors `sample_bsdf`): the base is
+    // attenuated by (1 - F_cc) and a sharp dielectric coat lobe is added on top.
+    var coat = vec3<f32>(0.0);
+    var base_atten = 1.0;
+    if (s.clearcoat > 0.0) {
+        let cca = max(s.clearcoat_roughness * s.clearcoat_roughness, 1e-3);
+        let fcc_h = fresnel_schlick_scalar(0.04, v_dot_h) * s.clearcoat;
+        let dcc = ggx_d(n_dot_h, cca);
+        let gcc = smith_g(n_dot_v, n_dot_l, cca);
+        coat = vec3<f32>(dcc * gcc * fcc_h / (4.0 * n_dot_v * n_dot_l + 1e-5));
+        let fcc_v = fresnel_schlick_scalar(0.04, n_dot_v) * s.clearcoat;
+        base_atten = 1.0 - fcc_v;
+        let pdf_cc = dcc * n_dot_h / (4.0 * v_dot_h + 1e-5);
+        *pdf = mix(*pdf, pdf_cc, fcc_v);
+    }
+
+    return ((diffuse + spec) * base_atten + coat) * n_dot_l;
 }
 
 // ---- Environment --------------------------------------------------------------
@@ -222,10 +294,7 @@ fn env_rotate(rd: vec3<f32>) -> vec3<f32> {
 }
 
 fn dir_to_equirect(rd: vec3<f32>) -> vec2<f32> {
-    let d = env_rotate(rd);
-    let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
-    let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
-    return vec2<f32>(u, v);
+    return equirect_dir_to_uv(env_rotate(rd));
 }
 
 // Radiance seen where a ray escapes the scene: the HDRI environment map if one is
@@ -248,6 +317,33 @@ fn env_pdf(rd: vec3<f32>) -> f32 {
         return 0.0;
     }
     return 1.0 / (4.0 * PI);
+}
+
+// Distance fog, mirroring the rasterizer's `apply_fog`: blends `color` toward the
+// fog color by an amount derived from the camera distance and (optionally) the
+// world height. `fog_params = (mode, param_a, param_b, height_falloff)`.
+fn apply_fog(color: vec3<f32>, view_dist: f32, world_y: f32) -> vec3<f32> {
+    let mode = frame.fog_params.x;
+    if (mode < 0.5) {
+        return color;
+    }
+    var f = 0.0;
+    if (mode < 1.5) {
+        // Linear: param_a = start, param_b = end.
+        f = clamp((view_dist - frame.fog_params.y) / max(frame.fog_params.z - frame.fog_params.y, 1e-4), 0.0, 1.0);
+    } else if (mode < 2.5) {
+        // Exponential: param_a = density.
+        f = 1.0 - exp(-frame.fog_params.y * view_dist);
+    } else {
+        // Exponential squared.
+        let d = frame.fog_params.y * view_dist;
+        f = 1.0 - exp(-d * d);
+    }
+    let hf = frame.fog_params.w;
+    if (hf > 0.0) {
+        f = f * exp(-max(world_y, 0.0) * hf);
+    }
+    return mix(color, frame.fog_color.rgb, clamp(f, 0.0, 1.0) * frame.fog_color.a);
 }
 
 // ---- Next-event estimation: analytic lights -----------------------------------
@@ -288,9 +384,15 @@ fn sample_analytic_light(light: RtLight, p: vec3<f32>, rng: ptr<function, u32>) 
     let dist2 = dot(d, d);
     ls.dist = sqrt(dist2);
     ls.wi = d / ls.dist;
-    let atten = 1.0 / max(dist2, 1e-4);
-    let win = pow(clamp(1.0 - pow(ls.dist / max(light.attenuation_radius, 1e-3), 4.0), 0.0, 1.0), 2.0);
-    ls.radiance = light.color * light.intensity * atten * win;
+    // Match the rasterizer's `calculate_point_attenuation`: a smooth window that
+    // reaches zero at `attenuation_radius`, with NO inverse-square term. kiss3d's
+    // light `intensity` is defined by that artistic model (the rasterizer is the
+    // reference), so using physical 1/d² falloff here would make the same point
+    // light look ~orders of magnitude dimmer under the path tracer.
+    let nd = ls.dist / max(light.attenuation_radius, 1e-3);
+    let win = clamp(1.0 - nd * nd, 0.0, 1.0);
+    let atten = win * win;
+    ls.radiance = light.color * light.intensity * atten;
     if (light.light_type == 2u) {
         let cd = dot(normalize(light.direction), -ls.wi);
         let sp = clamp((cd - light.outer_cone_cos) / max(light.inner_cone_cos - light.outer_cone_cos, 1e-3), 0.0, 1.0);
@@ -308,23 +410,95 @@ fn tri_positions(e: RtEmitter) -> mat3x3<f32> {
 
 // Direct lighting from one randomly chosen analytic light, returning radiance
 // already weighted by the BSDF and MIS against the BSDF-sampling strategy.
+// A surface counts as opaque for shadowing at/above this alpha.
+const ALPHA_OPAQUE: f32 = 0.999;
+
+// Colored shadow-ray visibility from `ro` toward a light `max_dist` away.
+//
+// In a fully-opaque scene with every object casting shadows this is the cheap
+// binary occlusion test — identical to the old behavior, no extra cost. When the
+// scene has translucent casters (`frame.background.a >= 0.5`) or objects that opt
+// out of casting shadows (`frame.flags.x != 0`), it walks the occluders
+// front-to-back instead: non-casters are skipped (they never occlude), translucent
+// surfaces accumulate the colored transmittance `T = 1 - a*(1 - albedo)` (matching
+// the rasterizer's transmittance shadow, tinted by base color × albedo texture),
+// and the first opaque caster fully blocks (returns 0).
+fn shadow_visibility(ro: vec3<f32>, rd: vec3<f32>, max_dist: f32) -> vec3<f32> {
+    let needs_walk = frame.background.a >= 0.5 || frame.flags.x != 0u;
+    if (!needs_walk) {
+        return select(vec3<f32>(1.0), vec3<f32>(0.0), trace_any(ro, rd, max_dist));
+    }
+
+    var transmittance = vec3<f32>(1.0);
+    var origin = ro;
+    var remaining = max_dist;
+    // Bounded walk through stacked occluders.
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let hit = trace_closest(origin, rd, remaining);
+        if (!hit.valid) {
+            break; // reached the light unobstructed
+        }
+        let mat = materials[hit.material_id];
+        // Objects opted out of casting shadows never occlude: step past them.
+        if (mat.casts_shadows == 0u) {
+            let step = hit.t + EPS;
+            origin = origin + rd * step;
+            remaining = remaining - step;
+            if (remaining <= EPS) { break; }
+            continue;
+        }
+        if (mat.base_color.a >= ALPHA_OPAQUE) {
+            return vec3<f32>(0.0); // opaque occluder fully blocks
+        }
+        let s = resolve_surface(mat, hit.uv);
+        let a = mat.base_color.a;
+        transmittance = transmittance * (vec3<f32>(1.0) - a * (vec3<f32>(1.0) - s.albedo));
+        let step = hit.t + EPS;
+        origin = origin + rd * step;
+        remaining = remaining - step;
+        if (remaining <= EPS || all(transmittance < vec3<f32>(0.0025))) {
+            break;
+        }
+    }
+    return transmittance;
+}
+
 fn sample_lights(
     s: Surface, p: vec3<f32>, n: vec3<f32>, wo: vec3<f32>, rng: ptr<function, u32>,
 ) -> vec3<f32> {
     var result = vec3<f32>(0.0);
+
+    // A subsurface material also scatters light arriving from behind (its diffuse
+    // transmission lobe), so direct lighting is evaluated on BOTH hemispheres when
+    // `kt > 0`; otherwise only the front (`dot(n, wi) > 0`).
+    let kt = select(0.0, 0.5 * s.subsurface, s.bsdf_type != BSDF_METAL);
 
     // --- Analytic lights ---
     if (frame.num_lights > 0u) {
         let li = min(u32(rand(rng) * f32(frame.num_lights)), frame.num_lights - 1u);
         let light = lights[li];
         let ls = sample_analytic_light(light, p, rng);
-        if (ls.valid && dot(n, ls.wi) > 0.0 &&
-            !trace_any(p + n * EPS, ls.wi, ls.dist - 2.0 * EPS)) {
-            var bpdf: f32;
-            let f = brdf_eval(s, n, wo, ls.wi, &bpdf);
-            // Delta lights: no MIS (pdf is infinite). Multiply by N to undo the
-            // 1-of-N uniform light pick.
-            result += f * ls.radiance * f32(frame.num_lights);
+        // Light layers: this light only affects the surface when their bitmasks
+        // overlap (matches the rasterizer's `object_layers & light_layers`).
+        let layered = (s.light_layers & light.layers) != 0u;
+        let ndl = dot(n, ls.wi);
+        if (layered && ls.valid && (ndl > 0.0 || kt > 0.0)) {
+            // A light with shadow-casting disabled illuminates every surface
+            // unoccluded; otherwise trace a (possibly colored) shadow ray. The
+            // ray is offset onto the light's side of the surface (back-lit
+            // subsurface samples cross to the far side).
+            let soff = select(-n, n, ndl > 0.0) * EPS;
+            var vis = vec3<f32>(1.0);
+            if (light.casts_shadows != 0u) {
+                vis = shadow_visibility(p + soff, ls.wi, ls.dist - 2.0 * EPS);
+            }
+            if (any(vis > vec3<f32>(0.0))) {
+                var bpdf: f32;
+                let f = brdf_eval(s, n, wo, ls.wi, &bpdf);
+                // Delta lights: no MIS (pdf is infinite). Multiply by N to undo the
+                // 1-of-N uniform light pick. `vis` tints/dims through translucent occluders.
+                result += f * ls.radiance * vis * f32(frame.num_lights);
+            }
         }
     }
 
@@ -353,16 +527,20 @@ fn sample_lights(
         if (dot(ln, -wi) < 0.0) { ln = -ln; }
         let cos_l = dot(ln, -wi);
 
-        if (dot(n, wi) > 0.0 && cos_l > 1e-4 && area > 1e-8 &&
-            !trace_any(p + n * EPS, wi, dist - 2.0 * EPS)) {
-            // Area pdf -> solid-angle pdf, averaged over the emitter count.
-            let pdf_area = 1.0 / (area * f32(frame.num_emitters));
-            let pdf_sa = pdf_area * dist2 / cos_l;
-            var bpdf: f32;
-            let f = brdf_eval(s, n, wo, wi, &bpdf);
-            let le = e.emission;
-            let w = power_heuristic(pdf_sa, bpdf);
-            result += f * le * w / max(pdf_sa, 1e-6);
+        let ndl_e = dot(n, wi);
+        if ((ndl_e > 0.0 || kt > 0.0) && cos_l > 1e-4 && area > 1e-8) {
+            let soff = select(-n, n, ndl_e > 0.0) * EPS;
+            let vis = shadow_visibility(p + soff, wi, dist - 2.0 * EPS);
+            if (any(vis > vec3<f32>(0.0))) {
+                // Area pdf -> solid-angle pdf, averaged over the emitter count.
+                let pdf_area = 1.0 / (area * f32(frame.num_emitters));
+                let pdf_sa = pdf_area * dist2 / cos_l;
+                var bpdf: f32;
+                let f = brdf_eval(s, n, wo, wi, &bpdf);
+                let le = e.emission;
+                let w = power_heuristic(pdf_sa, bpdf);
+                result += f * le * w * vis / max(pdf_sa, 1e-6);
+            }
         }
     }
 
@@ -436,8 +614,15 @@ fn sample_bsdf(
                 bs.transmitted = true;
             }
         }
-        bs.specular = (a <= 1e-3);
-        // Smooth glass is treated as a delta lobe (pdf folded into throughput).
+        // The glass lobe is sampled as a single outgoing direction with its
+        // BSDF/pdf folded into `tint` (no separate solid-angle pdf is produced,
+        // and next-event estimation can't sample it). It must therefore be flagged
+        // as a delta/specular event: otherwise the downstream environment- and
+        // emitter-MIS weights (`power_heuristic` against this bounce's pdf, which
+        // is left at 0) would zero out every refracted/reflected path that escapes
+        // to the sky or a light, turning the glass black. Rough glass uses a
+        // GGX-perturbed microfacet normal but is still treated as a delta lobe.
+        bs.specular = true;
         var tint = vec3<f32>(1.0);
         if (bs.transmitted) {
             tint = s.albedo;
@@ -448,18 +633,43 @@ fn sample_bsdf(
     }
 
     // --- Opaque / metal: diffuse + GGX specular ---
-    var f0: vec3<f32>;
-    if (s.bsdf_type == BSDF_METAL) {
-        f0 = mix(vec3<f32>(0.04), s.albedo, s.metallic) * s.spec_tint;
-    } else {
-        f0 = mix(vec3<f32>(0.04) * s.spec_tint, s.albedo, s.metallic);
-    }
+    // Dielectric reflectance remap (matches the rasterizer): F0 = 0.16·reflectance²
+    // tinted by specular_tint, lerped toward the albedo as the surface turns metallic.
+    let dielectric_f0 = 0.16 * s.reflectance * s.reflectance * s.spec_tint;
+    let f0 = mix(dielectric_f0, s.albedo, s.metallic);
     let diffuse_color = s.albedo * (1.0 - s.metallic);
     let lum_s = luminance(f0);
     let lum_d = luminance(diffuse_color);
     var p_spec = clamp(lum_s / (lum_s + lum_d + 1e-4), 0.1, 0.9);
     if (s.bsdf_type == BSDF_METAL) {
         p_spec = 1.0;
+    }
+
+    // Clearcoat: a thin sharp dielectric layer (F0 = 0.04) over the base lobes,
+    // sampled stochastically with probability equal to its Fresnel reflectance so
+    // the base lobes are implicitly attenuated by (1 - F) — the selection
+    // complement cancels the factor, leaving the base path below unchanged. Only
+    // active when `clearcoat > 0`, so default materials are unaffected.
+    if (s.clearcoat > 0.0) {
+        let n_dot_v0 = max(dot(n, wo), 1e-4);
+        let fcc = fresnel_schlick_scalar(0.04, n_dot_v0) * s.clearcoat;
+        if (rand(rng) < fcc) {
+            let ca = max(s.clearcoat_roughness * s.clearcoat_roughness, 1e-3);
+            let h = ggx_sample_h(n, ca, rand(rng), rand(rng));
+            bs.wi = reflect(-wo, h);
+            let n_dot_l = dot(n, bs.wi);
+            if (n_dot_l <= 0.0) { return bs; }
+            let n_dot_h = max(dot(n, h), 1e-4);
+            let v_dot_h = max(dot(wo, h), 1e-4);
+            let g = smith_g(n_dot_v0, n_dot_l, ca);
+            // Fresnel folded into the selection probability, so it cancels here.
+            bs.throughput = vec3<f32>(g * v_dot_h / (n_dot_v0 * n_dot_h));
+            bs.specular = (ca <= 1e-3);
+            let d = ggx_d(n_dot_h, ca);
+            bs.pdf = fcc * d * n_dot_h / (4.0 * v_dot_h);
+            bs.valid = true;
+            return bs;
+        }
     }
 
     if (rand(rng) < p_spec) {
@@ -477,13 +687,23 @@ fn sample_bsdf(
         let d = ggx_d(n_dot_h, a);
         bs.pdf = p_spec * d * n_dot_h / (4.0 * v_dot_h);
     } else {
-        bs.wi = cosine_sample(n, rand(rng), rand(rng));
-        let n_dot_l = max(dot(n, bs.wi), 0.0);
-        // Subsurface wrap shading folded into the diffuse throughput.
-        let wrap = clamp((n_dot_l + s.subsurface) / (1.0 + s.subsurface), 0.0, 1.0);
-        let shade = mix(1.0, wrap / max(n_dot_l, 1e-4), s.subsurface);
-        bs.throughput = diffuse_color * (1.0 - s.transmission) * shade / (1.0 - p_spec);
-        bs.pdf = (1.0 - p_spec) * n_dot_l / PI;
+        // Diffuse lobe, split into front reflection and back transmission for
+        // subsurface materials: a fraction `kt` of the diffuse energy scatters out
+        // the BACK hemisphere. The selection probability equals the energy share,
+        // so the throughput is just the (tinted) diffuse colour either way.
+        let kt = 0.5 * s.subsurface;
+        bs.throughput = diffuse_color * (1.0 - s.transmission) / (1.0 - p_spec);
+        if (rand(rng) < kt) {
+            // Diffuse transmission: cosine lobe about the back-facing normal.
+            bs.wi = cosine_sample(-n, rand(rng), rand(rng));
+            bs.transmitted = true;
+            let nl = max(dot(-n, bs.wi), 1e-4);
+            bs.pdf = (1.0 - p_spec) * kt * nl / PI;
+        } else {
+            bs.wi = cosine_sample(n, rand(rng), rand(rng));
+            let nl = max(dot(n, bs.wi), 1e-4);
+            bs.pdf = (1.0 - p_spec) * (1.0 - kt) * nl / PI;
+        }
     }
     bs.valid = true;
     return bs;
@@ -496,6 +716,10 @@ struct PathResult {
     radiance: vec3<f32>,
     first_albedo: vec3<f32>,
     first_normal: vec3<f32>,
+    // Distance from the camera to the first surface hit, and that hit's world
+    // height — used to apply distance fog after the path is traced.
+    first_dist: f32,
+    first_world_y: f32,
     has_first: bool,
 };
 
@@ -536,6 +760,10 @@ fn sample_pixel(gid: vec3<u32>, rng: ptr<function, u32>) -> PathResult {
     var throughput = vec3<f32>(1.0);
     var prev_pdf = 0.0;      // BSDF pdf used to reach the current vertex
     var prev_specular = true; // first hit / specular bounces take full emission
+    // Beer-Lambert absorption coefficient of the medium the ray is currently inside
+    // (zero in vacuum). Set when a glass ray refracts into a volume, cleared when it
+    // refracts back out. Single-level (no nested-medium stack), the common approx.
+    var medium_sigma = vec3<f32>(0.0);
 
     for (var bounce = 0u; bounce < frame.max_bounces; bounce = bounce + 1u) {
         let hit = trace_closest(ro, rd, T_MAX);
@@ -547,19 +775,28 @@ fn sample_pixel(gid: vec3<u32>, rng: ptr<function, u32>) -> PathResult {
                 // so the visible background isn't washed out by the fill light.
                 res.radiance += throughput * sky(rd);
             } else {
-                // Scattered (diffuse/glossy) miss: this is the environment as a
-                // LIGHT. A uniform ambient term (a constant white dome of radiance
-                // `frame.ambient`) fills surfaces like the rasterizer's ambient,
-                // plus the HDRI environment (MIS-weighted) when bound. The flat
-                // background is deliberately excluded so it never tints objects.
-                var lit = vec3<f32>(frame.ambient);
+                // Scattered (diffuse/glossy) miss: the fill light seen along this
+                // escaped ray. When an environment is bound it IS the ambient/IBL
+                // source (MIS-weighted) — and the flat `frame.ambient` is NOT added
+                // on top, matching the rasterizer, which REPLACES its flat ambient
+                // with the IBL term whenever a skybox is set (so a dim skybox dims
+                // the fill instead of leaving a constant dome). The flat colored
+                // ambient is used only as the fallback when no environment is bound.
+                // The flat background color is excluded so it never tints objects.
+                var lit: vec3<f32>;
                 if (frame.has_env != 0u) {
-                    lit += sky(rd) * power_heuristic(prev_pdf, env_pdf(rd));
+                    lit = sky(rd) * power_heuristic(prev_pdf, env_pdf(rd));
+                } else {
+                    lit = frame.ambient_color.rgb * frame.ambient;
                 }
                 res.radiance += throughput * lit;
             }
             break;
         }
+
+        // Beer-Lambert: absorb along the segment just travelled through the current
+        // medium (a no-op in vacuum, where `medium_sigma` is zero).
+        throughput *= exp(-medium_sigma * hit.t);
 
         let mat = materials[hit.material_id];
         let p = ro + rd * hit.t;
@@ -601,10 +838,13 @@ fn sample_pixel(gid: vec3<u32>, rng: ptr<function, u32>) -> PathResult {
             res.radiance += throughput * s.emissive * w;
         }
 
-        // Record first-hit guides (albedo + world normal) for the denoiser.
+        // Record first-hit guides (albedo + world normal) for the denoiser, plus
+        // the camera distance + world height used for distance fog below.
         if (!res.has_first) {
             res.first_albedo = s.albedo;
             res.first_normal = n;
+            res.first_dist = hit.t;
+            res.first_world_y = p.y;
             res.has_first = true;
         }
 
@@ -620,6 +860,14 @@ fn sample_pixel(gid: vec3<u32>, rng: ptr<function, u32>) -> PathResult {
         prev_pdf = bs.pdf;
         prev_specular = bs.specular;
 
+        // Entering/leaving a refractive volume updates the active medium so the next
+        // segment is absorbed (Beer-Lambert) by this object's attenuation color. Only
+        // true glass refraction changes the medium — subsurface diffuse transmission
+        // also sets `bs.transmitted` but does not enter an absorbing volume.
+        if (bs.transmitted && (s.bsdf_type == BSDF_GLASS || s.transmission > 0.0)) {
+            medium_sigma = select(vec3<f32>(0.0), s.sigma_a, entering);
+        }
+
         // Offset along the correct side: transmitted rays cross the surface.
         let offset_n = select(gn, -gn, dot(gn, bs.wi) < 0.0);
         ro = p + offset_n * EPS;
@@ -633,6 +881,13 @@ fn sample_pixel(gid: vec3<u32>, rng: ptr<function, u32>) -> PathResult {
             }
             throughput = throughput / q;
         }
+    }
+
+    // Distance fog over directly-seen geometry (camera→first-hit distance), matching
+    // the rasterizer. Rays that escape to the sky/background are left unfogged, just
+    // as the skybox pass draws without fog.
+    if (res.has_first) {
+        res.radiance = apply_fog(res.radiance, res.first_dist, res.first_world_y);
     }
 
     return res;

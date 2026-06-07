@@ -117,6 +117,17 @@ pub trait Camera3d {
         1usize
     }
 
+    /// Returns the render-layer mask this camera draws.
+    ///
+    /// An object is rendered by this camera only when its own render-layer mask
+    /// (see [`Object3d::set_render_layers`](crate::scene::Object3d::set_render_layers))
+    /// shares at least one bit with this mask. The default, `u32::MAX`, renders
+    /// objects on every layer.
+    #[inline]
+    fn render_layers(&self) -> u32 {
+        u32::MAX
+    }
+
     /// Called at the start of each rendering pass.
     ///
     /// Override this to perform per-pass setup (e.g., setting viewport for stereo rendering).

@@ -10,6 +10,12 @@ use super::Window;
 pub(crate) struct EguiContext {
     pub(crate) renderer: EguiRenderer,
     pub(crate) raw_input: RawInput,
+    /// Whether an egui pass is currently open. A pass is opened lazily by the
+    /// first `draw_ui` of the frame and closed by `finish_egui_pass` (called at
+    /// render time). This lets several `draw_ui` / `draw_inspector` calls share a
+    /// single pass instead of each starting its own (which would overwrite the
+    /// previous one's shapes).
+    pub(crate) pass_active: bool,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) start_time: std::time::Instant,
 }
@@ -19,6 +25,7 @@ impl EguiContext {
         Self {
             renderer: EguiRenderer::new(),
             raw_input: RawInput::default(),
+            pass_active: false,
             #[cfg(not(target_arch = "wasm32"))]
             start_time: std::time::Instant::now(),
         }
@@ -255,6 +262,22 @@ impl Window {
     where
         F: FnOnce(&egui::Context),
     {
+        // Open the egui pass lazily so that several `draw_ui` (and
+        // `draw_inspector`) calls in the same frame all run their widgets into
+        // the *same* pass. The pass is closed at render time by
+        // `finish_egui_pass`. Beginning a fresh pass per call would have the
+        // second call's `end_frame` overwrite the first call's shapes (and the
+        // `std::mem::take` below would starve it of input).
+        if !self.egui_context.pass_active {
+            self.begin_egui_pass();
+        }
+
+        ui_fn(self.egui_context.renderer.context());
+    }
+
+    /// Begins a new egui pass, feeding it the events accumulated since the last
+    /// pass. Idempotent callers should guard on `pass_active`.
+    fn begin_egui_pass(&mut self) {
         // Get time for animations - use egui context's own start time
         #[cfg(not(target_arch = "wasm32"))]
         let time = Some(self.egui_context.start_time.elapsed().as_secs_f64());
@@ -287,10 +310,21 @@ impl Window {
         raw_input.predicted_dt = 1.0 / 60.0;
 
         self.egui_context.renderer.begin_frame(raw_input);
-        ui_fn(self.egui_context.renderer.context());
-        self.egui_context.renderer.end_frame();
+        self.egui_context.pass_active = true;
+    }
 
-        // Reset raw_input for next frame (but keep it properly initialized)
-        self.egui_context.raw_input = RawInput::default();
+    /// Closes the egui pass opened by `draw_ui`/`draw_inspector`, if any, so the
+    /// accumulated shapes are ready to be painted by the egui renderer. Called
+    /// once per frame from the render path. No-op when no UI was drawn.
+    pub(crate) fn finish_egui_pass(&mut self) {
+        if self.egui_context.pass_active {
+            self.egui_context.renderer.end_frame();
+            self.egui_context.pass_active = false;
+        }
+        // Note: `raw_input` is *not* reset here. It is drained by
+        // `begin_egui_pass` (via `std::mem::take`) when the next pass opens, and
+        // events fed by `handle_events` between this point and that next pass
+        // must be preserved — resetting here would discard them and the UI would
+        // stop responding to input.
     }
 }

@@ -9,18 +9,10 @@ use winit::window::WindowAttributes;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NumSamples {
-    /// Multisampling disabled.
-    Zero = 0,
     /// One sample
     One = 1,
-    /// Two samples
-    Two = 2,
     /// Four samples
     Four = 4,
-    /// Eight samples
-    Eight = 8,
-    /// Sixteen samples
-    Sixteen = 16,
 }
 
 impl NumSamples {
@@ -28,12 +20,8 @@ impl NumSamples {
     /// Returns `None` if `i` is invalid.
     pub fn from_u32(i: u32) -> Option<NumSamples> {
         match i {
-            0 => Some(NumSamples::Zero),
             1 => Some(NumSamples::One),
-            2 => Some(NumSamples::Two),
             4 => Some(NumSamples::Four),
-            8 => Some(NumSamples::Eight),
-            16 => Some(NumSamples::Sixteen),
             _ => None,
         }
     }
@@ -67,7 +55,7 @@ impl Default for CanvasSetup {
     fn default() -> Self {
         CanvasSetup {
             vsync: true,
-            samples: NumSamples::Zero,
+            samples: NumSamples::Four,
             canvas_id: "canvas".to_string(),
         }
     }
@@ -136,6 +124,22 @@ impl Canvas {
     /// Gets the sample count for MSAA.
     pub fn sample_count(&self) -> u32 {
         self.canvas.sample_count()
+    }
+
+    /// Sets the MSAA sample count, recreating the render targets to match. Takes
+    /// effect on the next rendered frame.
+    pub fn set_samples(&mut self, samples: NumSamples) {
+        self.canvas.set_sample_count(samples as u32)
+    }
+
+    /// Whether vsync is currently enabled.
+    pub fn vsync(&self) -> bool {
+        self.canvas.vsync()
+    }
+
+    /// Enables/disables vsync at runtime (reconfigures the surface present mode).
+    pub fn set_vsync(&mut self, enabled: bool) {
+        self.canvas.set_vsync(enabled)
     }
 
     /// Gets the surface format.

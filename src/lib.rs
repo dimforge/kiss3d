@@ -136,6 +136,9 @@ pub mod scene;
 pub mod text;
 pub mod window;
 
+#[cfg(test)]
+mod shader_validity;
+
 pub mod prelude {
     pub use crate::builtin::*;
     pub use crate::camera::*;

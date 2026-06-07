@@ -1,6 +1,6 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="text" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
-    <option name="command" value="run --package kiss3d --example text" />
+    <option name="command" value="run --package kiss3d --example text --features rt_switcher" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <option name="emulateTerminal" value="true" />
     <option name="channel" value="DEFAULT" />

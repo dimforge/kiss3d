@@ -3,12 +3,20 @@
 //     trace_closest(origin, dir, tmax) -> Hit
 //     trace_any(origin, dir, tmax)     -> bool
 //
-// The module is assembled with `enable wgpu_ray_query;` prepended (see
-// pipeline.rs). The TLAS holds one instance per scene copy; each instance points
-// at a shared per-mesh BLAS and carries (via its custom index) an index into the
-// `instances` buffer, where the hit shader reads the mesh + material. A committed
-// `primitive_index` is the triangle within that mesh's BLAS; the mesh's
-// `tri_offset` maps it to the global (mesh-local) triangle/vertex tables.
+// The `enable wgpu_ray_query;` directive is emitted by the root kernel module
+// (gated `@if(hardware)`). The TLAS holds one instance per scene copy; each
+// instance points at a shared per-mesh BLAS and carries (via its custom index) an
+// index into the `instances` buffer, where the hit shader reads the mesh +
+// material. A committed `primitive_index` is the triangle within that mesh's BLAS;
+// the mesh's `tri_offset` maps it to the global (mesh-local) triangle/vertex tables.
+
+// Shared scene data + types from the preamble module (unused items strip away).
+import package::rt_preamble::{
+    RtVertex, RtTriangle, RtMaterial, RtLight, FrameUniforms, Hit, RtEmitter,
+    BSDF_OPAQUE, BSDF_GLASS, BSDF_METAL, BSDF_EMISSIVE, PI, EPS, T_MAX,
+    frame, pixels, vertices, triangles, materials, lights, emitters,
+    tex_array, tex_sampler, env_tex, env_sampler
+};
 
 struct RtMeshDesc {
     node_offset: u32,

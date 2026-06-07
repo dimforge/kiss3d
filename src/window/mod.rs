@@ -6,6 +6,8 @@ mod drawing;
 #[cfg(feature = "egui")]
 mod egui_integration;
 mod events;
+#[cfg(feature = "egui")]
+mod inspector;
 #[cfg(not(target_arch = "wasm32"))]
 mod offscreen;
 #[cfg(feature = "recording")]
@@ -17,6 +19,8 @@ mod window;
 mod window_cache;
 
 pub use canvas::{Canvas, CanvasSetup, NumSamples};
+#[cfg(feature = "egui")]
+pub use inspector::{Inspector, InspectorTab};
 #[cfg(not(target_arch = "wasm32"))]
 pub use offscreen::OffscreenSurface;
 #[cfg(feature = "recording")]

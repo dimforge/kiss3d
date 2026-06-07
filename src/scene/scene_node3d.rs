@@ -1,14 +1,14 @@
 use crate::camera::Camera3d;
 use crate::color::Color;
-use crate::light::{CollectedLight, Light, LightCollection, LightType, MAX_LIGHTS};
+use crate::light::{CollectedLight, Light, LightCollection, LightType};
 use crate::procedural;
 use crate::procedural::{IndexBuffer, RenderMesh};
 use crate::resource::vertex_index::VertexIndex;
 use crate::resource::{
     GpuMesh3d, Material3d, MaterialManager3d, MeshManager3d, RenderContext, Texture, TextureManager,
 };
-use crate::scene::{Bsdf, InstanceData3d, Object3d};
-use glamx::{Mat3, Pose3, Quat, Vec2, Vec3};
+use crate::scene::{AlphaMode, AnimationPlayer, Bsdf, InstanceData3d, Object3d};
+use glamx::{Mat3, Mat4, Pose3, Quat, Vec2, Vec3};
 use std::cell::{Ref, RefCell, RefMut};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -35,6 +35,18 @@ pub struct SceneNodeData3d {
 #[derive(Clone)]
 pub struct SceneNode3d {
     data: Rc<RefCell<SceneNodeData3d>>,
+}
+
+/// A loaded glTF / GLB model: the scene subtree plus its animations.
+///
+/// Produced by [`SceneNode3d::add_gltf`]. The `root` has already been added to
+/// the scene graph; drive `player` each frame with
+/// [`AnimationPlayer::update`](crate::scene::AnimationPlayer::update).
+pub struct GltfModel {
+    /// Root node of the loaded model's subtree.
+    pub root: SceneNode3d,
+    /// Player owning every animation clip found in the file.
+    pub player: AnimationPlayer,
 }
 
 impl SceneNodeData3d {
@@ -74,6 +86,21 @@ impl SceneNodeData3d {
     #[inline]
     pub fn has_object(&self) -> bool {
         self.object.is_some()
+    }
+
+    /// Whether this node has a [`Light`] attached.
+    #[inline]
+    pub fn has_light(&self) -> bool {
+        self.light.is_some()
+    }
+
+    /// The direct children of this node.
+    ///
+    /// Useful for walking the scene graph (e.g. to build a tree view). The
+    /// returned handles are cheap `Rc` clones of the children when collected.
+    #[inline]
+    pub fn children(&self) -> &[SceneNode3d] {
+        &self.children
     }
 
     /// Whether this node has no parent.
@@ -125,7 +152,7 @@ impl SceneNodeData3d {
     fn do_collect_lights(&mut self, lights: &mut LightCollection) {
         // Collect light if present and enabled
         if let Some(ref light) = self.light {
-            if light.enabled && lights.lights.len() < MAX_LIGHTS {
+            if light.enabled {
                 let local_direction = match light.light_type {
                     LightType::Directional(direction) => direction.normalize_or(Vec3::NEG_Z),
                     _ => Vec3::NEG_Z,
@@ -139,6 +166,7 @@ impl SceneNodeData3d {
                     world_direction: self.world_transform.rotation * local_direction,
                     radius: light.radius,
                     casts_shadows: light.casts_shadows,
+                    layers: light.layers,
                 });
             }
         }
@@ -225,6 +253,31 @@ impl SceneNodeData3d {
         }
     }
 
+    /// Renders only this node's own object (not its children). Used by the
+    /// refractive-transmission pass, which draws glass objects individually in
+    /// back-to-front order so each can refract the ones already drawn behind it.
+    #[doc(hidden)]
+    pub fn render_object_only(
+        &mut self,
+        pass: usize,
+        camera: &mut dyn Camera3d,
+        lights: &LightCollection,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        context: &RenderContext,
+    ) {
+        if let Some(ref mut o) = self.object {
+            o.render(
+                self.world_transform,
+                self.world_scale,
+                pass,
+                camera,
+                lights,
+                render_pass,
+                context,
+            )
+        }
+    }
+
     /// Collects the world transform and scale of every shadow-casting object.
     ///
     /// Used by the rasterizer's shadow pre-pass: the callback is invoked once per
@@ -233,11 +286,11 @@ impl SceneNodeData3d {
     ///
     /// [`render_depth_only`]: Self::render_depth_only
     #[doc(hidden)]
-    pub fn collect_shadow_models(&self, f: &mut dyn FnMut(Pose3, Vec3)) {
+    pub fn collect_shadow_models(&self, f: &mut dyn FnMut(Pose3, Vec3, Color)) {
         if self.visible {
             if let Some(ref o) = self.object {
                 if o.casts_shadows() {
-                    f(self.world_transform, self.world_scale);
+                    f(self.world_transform, self.world_scale, o.data().color());
                 }
             }
             for c in self.children.iter() {
@@ -274,6 +327,42 @@ impl SceneNodeData3d {
         if let Some(ref o) = self.object {
             if o.casts_shadows() {
                 let mesh = o.mesh().borrow();
+                // A skinned mesh is deformed in world space by its joint palette
+                // (its node + instance transforms are ignored), so bound the actual
+                // CPU-skinned world vertices instead of the bind-pose mesh.
+                if let (true, Some(skin)) = (mesh.has_skin_vertices(), o.data().skin()) {
+                    let coords_lock = mesh.coords().read().unwrap();
+                    if let (Some(coords), Some(jl), Some(wl)) = (
+                        coords_lock.data().as_ref(),
+                        mesh.skin_joints(),
+                        mesh.skin_weights(),
+                    ) {
+                        let jlk = jl.read().unwrap();
+                        let wlk = wl.read().unwrap();
+                        let palette = skin.palette();
+                        let jmat =
+                            |j: u32| palette.get(j as usize).copied().unwrap_or(Mat4::IDENTITY);
+                        if let (Some(js), Some(ws)) = (jlk.data().as_ref(), wlk.data().as_ref()) {
+                            for (idx, &local) in coords.iter().enumerate() {
+                                let j = js[idx];
+                                let w = ws[idx];
+                                let s = w[0] + w[1] + w[2] + w[3];
+                                let inv = if s > 0.0 { 1.0 / s } else { 1.0 };
+                                let m = jmat(j[0]) * (w[0] * inv)
+                                    + jmat(j[1]) * (w[1] * inv)
+                                    + jmat(j[2]) * (w[2] * inv)
+                                    + jmat(j[3]) * (w[3] * inv);
+                                let world = m.transform_point3(local);
+                                *min = min.min(world);
+                                *max = max.max(world);
+                            }
+                        }
+                    }
+                    for c in self.children.iter() {
+                        c.data().accumulate_caster_aabb(min, max);
+                    }
+                    return;
+                }
                 let coords_lock = mesh.coords().read().unwrap();
                 if let Some(coords) = coords_lock.data().as_ref() {
                     // Local AABB of the mesh after the node's own scale. We expand it
@@ -340,18 +429,27 @@ impl SceneNodeData3d {
         }
     }
 
-    /// Draws every shadow-casting object's depth into the active shadow pass.
+    /// Draws shadow-casting objects' geometry into the active shadow pass,
+    /// filtered by opacity: `only_transparent == false` draws the opaque casters
+    /// (depth pre-pass), `true` draws the transparent ones (colored transmittance
+    /// pass). An object counts as transparent when its color alpha is below
+    /// `alpha_threshold`.
     ///
-    /// `object_index` is incremented for each drawn object and used to compute the
-    /// per-object model uniform offset; it must match the order used by
-    /// [`collect_shadow_models`](Self::collect_shadow_models).
+    /// `object_index` is incremented for **every** caster regardless of the
+    /// filter, so each object keeps the same per-object model-uniform slot as
+    /// [`collect_shadow_models`](Self::collect_shadow_models) assigned it.
     #[doc(hidden)]
-    pub fn render_depth_only(
+    pub fn render_shadow_casters(
         &mut self,
         render_pass: &mut wgpu::RenderPass<'_>,
+        base_pipeline: &wgpu::RenderPipeline,
+        deform_pipeline: Option<&wgpu::RenderPipeline>,
+        transmittance_tex: Option<&wgpu::BindGroupLayout>,
         model_bind_group: &wgpu::BindGroup,
         model_stride: u32,
         object_index: &mut u32,
+        only_transparent: bool,
+        alpha_threshold: f32,
     ) {
         if !self.visible {
             return;
@@ -359,15 +457,36 @@ impl SceneNodeData3d {
 
         if let Some(ref mut o) = self.object {
             if o.casts_shadows() {
-                let offset = *object_index * model_stride;
-                o.render_depth_only(render_pass, model_bind_group, offset);
+                let transparent = o.data().color().a < alpha_threshold;
+                if transparent == only_transparent {
+                    let offset = *object_index * model_stride;
+                    o.render_depth_only(
+                        render_pass,
+                        base_pipeline,
+                        deform_pipeline,
+                        transmittance_tex,
+                        model_bind_group,
+                        offset,
+                    );
+                }
+                // Increment for every caster so slots stay aligned across both passes.
                 *object_index += 1;
             }
         }
 
         for c in self.children.iter_mut() {
             let mut bc = c.data_mut();
-            bc.render_depth_only(render_pass, model_bind_group, model_stride, object_index);
+            bc.render_shadow_casters(
+                render_pass,
+                base_pipeline,
+                deform_pipeline,
+                transmittance_tex,
+                model_bind_group,
+                model_stride,
+                object_index,
+                only_transparent,
+                alpha_threshold,
+            );
         }
     }
 
@@ -765,6 +884,51 @@ impl SceneNode3d {
         self.data.borrow_mut()
     }
 
+    /// This node's world-space position (the translation of its world transform,
+    /// valid after the per-frame transform propagation in `prepare`).
+    #[doc(hidden)]
+    pub fn world_position(&self) -> Vec3 {
+        self.data().world_transform.translation
+    }
+
+    /// Collects (handles to) every visible refractive (glass, `transmission > 0`)
+    /// object in this subtree. The transmission pass renders these individually,
+    /// depth-sorted, so glass can be seen through other glass.
+    #[doc(hidden)]
+    pub fn collect_refractive(&self, out: &mut Vec<SceneNode3d>) {
+        let d = self.data();
+        if !d.visible {
+            return;
+        }
+        let is_glass = d.object.as_ref().is_some_and(|o| {
+            let od = o.data();
+            od.surface_rendering_active() && od.transmission() > 0.0
+        });
+        if is_glass {
+            out.push(self.clone());
+        }
+        for c in d.children.iter() {
+            c.collect_refractive(out);
+        }
+    }
+
+    /// A stable, process-unique identifier for this node, derived from the
+    /// address of its shared data.
+    ///
+    /// Two handles to the same node return the same id; the id stays valid for
+    /// as long as the node is alive. Useful as a key for per-node UI state (e.g.
+    /// the built-in inspector's scene tree).
+    #[inline]
+    pub fn ptr_id(&self) -> u64 {
+        Rc::as_ptr(&self.data) as *const () as u64
+    }
+
+    /// Whether `self` and `other` are handles to the same underlying node.
+    #[inline]
+    pub fn same_node(&self, other: &SceneNode3d) -> bool {
+        Rc::ptr_eq(&self.data, &other.data)
+    }
+
     /*
      *
      * Methods to add objects.
@@ -972,6 +1136,69 @@ impl SceneNode3d {
         node
     }
 
+    /// Adds a planar **reflector** (mirror) of size `width` × `height` as a child,
+    /// returning its node.
+    ///
+    /// This is a convenience over [`Self::add_quad`] + [`Self::set_reflector`]: a
+    /// flat quad (local XY plane, normal +Z) carrying the **default PBR material**
+    /// plus a [`Reflector`](crate::renderer::Reflector). Each frame the window
+    /// renders the scene from a mirror camera into the reflector's texture and the
+    /// surface composites it over its PBR shading — so you can still
+    /// [`set_color`](Self::set_color)/[`set_texture`](Self::set_texture)/
+    /// [`set_roughness`](Self::set_roughness) it. Place and orient it with the usual
+    /// node transforms (the reflection plane follows the node's world transform), so
+    /// wall, floor and angled mirrors all work, and use as many as you like.
+    pub fn add_reflector(&mut self, width: f32, height: f32) -> SceneNode3d {
+        let mut node = self.add_quad(width, height, 1, 1);
+        node.set_reflector(Some(crate::renderer::Reflector::new()));
+        node
+    }
+
+    /// Makes this node's surface a planar reflector (or clears it). See
+    /// [`Object3d::set_reflector`](crate::scene::Object3d::set_reflector).
+    pub fn set_reflector(&mut self, reflector: Option<crate::renderer::Reflector>) -> Self {
+        // `Reflector` isn't `Clone`, so move it into the (single) object this node
+        // owns; deeper descendants are unaffected.
+        let mut slot = reflector;
+        self.apply_to_object_mut(&mut |o| o.set_reflector(slot.take()));
+        self.clone()
+    }
+
+    /// Sets the reflection intensity in `[0, 1]` of this node's reflector (scales the
+    /// composited reflection). No-op on non-reflector nodes. See [`Self::add_reflector`].
+    pub fn set_reflector_intensity(&mut self, intensity: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| {
+            if let Some(r) = o.reflector_mut() {
+                r.set_intensity(intensity);
+            }
+        });
+        self.clone()
+    }
+
+    /// Sets the object-space plane normal of this node's reflector. No-op on
+    /// non-reflector nodes. See [`Reflector::with_local_normal`](crate::renderer::Reflector::with_local_normal).
+    pub fn set_reflector_normal(&mut self, normal: Vec3) -> Self {
+        self.apply_to_object_mut(&mut |o| {
+            if let Some(r) = o.reflector_mut() {
+                r.set_local_normal(normal);
+            }
+        });
+        self.clone()
+    }
+
+    /// Sets the normal-alignment falloff of this node's reflector: the reflection
+    /// fades where the surface normal diverges from the reflector's plane normal
+    /// (`0` = uniform; larger fades faster). No-op on non-reflector nodes. See
+    /// [`Reflector::with_normal_falloff`](crate::renderer::Reflector::with_normal_falloff).
+    pub fn set_reflector_normal_falloff(&mut self, falloff: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| {
+            if let Some(r) = o.reflector_mut() {
+                r.set_normal_falloff(falloff);
+            }
+        });
+        self.clone()
+    }
+
     /// Adds a double-sided quad with the specified vertices.
     pub fn add_quad_with_vertices(
         &mut self,
@@ -1086,6 +1313,157 @@ impl SceneNode3d {
         });
 
         result.unwrap()
+    }
+
+    /// Loads a glTF / GLB file and adds it as a child of this node.
+    ///
+    /// Returns a [`GltfModel`] bundling the loaded subtree's `root` (already added
+    /// here) and an [`AnimationPlayer`] holding every animation in the file. The
+    /// player is stopped initially; call `model.player.play(name)` to start one
+    /// and `model.player.update(dt)` each frame before rendering.
+    ///
+    /// # Panics
+    /// Panics if the file cannot be read or parsed.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use kiss3d::scene::SceneNode3d;
+    /// # use std::path::Path;
+    /// # use glamx::Vec3;
+    /// # let mut scene = SceneNode3d::empty();
+    /// let mut model = scene.add_gltf(Path::new("character.glb"), Vec3::ONE);
+    /// model.player.play("Walk");
+    /// ```
+    pub fn add_gltf(&mut self, path: &Path, scale: Vec3) -> GltfModel {
+        let mut model = crate::loader::gltf::load(path).expect("Failed to load the glTF/GLB file.");
+        model.root.set_local_scale(scale.x, scale.y, scale.z);
+        self.add_child(model.root.clone());
+        model
+    }
+
+    /// Loads a glTF/GLB model from an in-memory byte slice and adds it as a child.
+    ///
+    /// Like [`add_gltf`](Self::add_gltf) but reads from memory instead of a path —
+    /// pass an `include_bytes!`-embedded, self-contained `.glb` to run on targets
+    /// without a filesystem (e.g. wasm). Returns the [`GltfModel`] (its animation
+    /// `player` is stopped initially).
+    pub fn add_gltf_from_memory(&mut self, bytes: &[u8], scale: Vec3) -> GltfModel {
+        let mut model =
+            crate::loader::gltf::load_from_slice(bytes).expect("Failed to load the glTF/GLB data.");
+        model.root.set_local_scale(scale.x, scale.y, scale.z);
+        self.add_child(model.root.clone());
+        model
+    }
+
+    /// Returns a weak handle to this node's shared data. Used by the glTF loader
+    /// to let a [`crate::scene::Skin3d`] reference its skeleton's joint nodes
+    /// without keeping them (or the scene graph) alive.
+    pub(crate) fn downgrade(&self) -> Weak<RefCell<SceneNodeData3d>> {
+        Rc::downgrade(&self.data)
+    }
+
+    /// Refreshes the joint-matrix palette of every skinned object in this subtree.
+    ///
+    /// Call once per frame **after** world transforms are propagated (i.e. after
+    /// [`prepare`](SceneNodeData3d::prepare)) and **before** rendering. The window
+    /// render loop does this automatically.
+    ///
+    /// This is deliberately *not* part of the render/prepare depth-first walks: a
+    /// skinned mesh's joints may be ancestors of the mesh node, which those walks
+    /// hold mutably borrowed. Instead it first collects the skinned nodes, then
+    /// reads each joint's (already-final) world matrix under an independent short
+    /// borrow, so no node is ever borrowed twice at once.
+    pub fn update_deformations(&self) {
+        let mut nodes = Vec::new();
+        self.collect_deformable(&mut nodes);
+        for node in nodes {
+            // 1. Skinned nodes: recompute and upload the joint-matrix palette.
+            //    Snapshot the joint handles under a short shared borrow.
+            let joints: Option<Vec<Weak<RefCell<SceneNodeData3d>>>> = {
+                let data = node.data.borrow();
+                data.object
+                    .as_ref()
+                    .and_then(|o| o.data().skin())
+                    .map(|skin| skin.joints.clone())
+            };
+            if let Some(joints) = joints {
+                // Read each joint's world matrix (each an independent short borrow).
+                let joint_world: Vec<Mat4> = joints
+                    .iter()
+                    .map(|w| match w.upgrade() {
+                        Some(rc) => node_global_matrix(&rc),
+                        None => Mat4::IDENTITY,
+                    })
+                    .collect();
+                // Write the palette back under a short exclusive borrow.
+                let mut data = node.data.borrow_mut();
+                if let Some(skin) = data.object.as_mut().and_then(|o| o.data_mut().skin_mut()) {
+                    for (slot, (jw, ibm)) in skin
+                        .palette
+                        .iter_mut()
+                        .zip(joint_world.iter().zip(skin.inverse_bind.iter()))
+                    {
+                        *slot = *jw * *ibm;
+                    }
+                    // Upload once here so the color, prepass, and shadow passes all
+                    // read the same fresh palette buffer this frame.
+                    skin.upload();
+                }
+            }
+
+            // 2. Refresh the per-object deform GPU state (skin flag + morph weights +
+            //    deform bind group) now that the palette is current. Runs on all
+            //    targets: the deform group is now group 3 (shadows moved into the view
+            //    group), so it fits within WebGPU's 4-bind-group cap on web too.
+            {
+                let mut data = node.data.borrow_mut();
+                if let Some(obj) = data.object.as_mut() {
+                    let mesh_rc = obj.mesh().clone();
+                    let mesh = mesh_rc.borrow();
+                    obj.data_mut().update_deform(&mesh);
+                }
+            }
+        }
+    }
+
+    /// Collects every node in this subtree whose object is deformable (skinned and/or
+    /// morphed) and therefore needs a per-frame deform refresh.
+    fn collect_deformable(&self, out: &mut Vec<SceneNode3d>) {
+        let children = {
+            let data = self.data.borrow();
+            if data
+                .object
+                .as_ref()
+                .is_some_and(|o| o.data().is_deformable())
+            {
+                out.push(self.clone());
+            }
+            data.children.clone()
+        };
+        for c in &children {
+            c.collect_deformable(out);
+        }
+    }
+
+    /// Sets the morph-target weights on this node's object and every descendant
+    /// object whose target count matches `weights.len()`.
+    ///
+    /// glTF attaches each mesh primitive as a child object node and shares one weight
+    /// vector across them, so an animation channel targeting the mesh node fans the
+    /// weights out to all its primitives here.
+    pub fn set_morph_weights(&self, weights: &[f32]) {
+        let children = {
+            let mut data = self.data.borrow_mut();
+            if let Some(obj) = data.object.as_mut() {
+                if obj.data().morph_target_count() == weights.len() && !weights.is_empty() {
+                    obj.data_mut().set_morph_weights(weights);
+                }
+            }
+            data.children.clone()
+        };
+        for c in &children {
+            c.set_morph_weights(weights);
+        }
     }
 
     /// Applies a closure to each object contained by this node and its descendants.
@@ -1730,6 +2108,16 @@ impl SceneNode3d {
         self.clone()
     }
 
+    /// Sets this node's object's per-object screen-space-reflection properties.
+    /// `None` opts the object out of SSR; `Some(SsrMaterial { .. })` sets per-object
+    /// intensity / infinite-thick / Fresnel / distance attenuation. See
+    /// [`Object3d::set_ssr`](crate::scene::Object3d::set_ssr).
+    #[inline]
+    pub fn set_ssr(&mut self, ssr: Option<crate::renderer::SsrMaterial>) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_ssr(ssr));
+        self.clone()
+    }
+
     /// Sets the metallic factor for this node's object and all its descendants.
     ///
     /// # Arguments
@@ -1812,10 +2200,27 @@ impl SceneNode3d {
         self.clone()
     }
 
-    /// Sets the transmission (specular-transmittance) factor in `[0, 1]`.
+    /// Sets the refractive transmission factor in `[0, 1]` (`> 0` = glass). See
+    /// [`Object3d::set_transmission`](crate::scene::Object3d::set_transmission).
     #[inline]
     pub fn set_transmission(&mut self, transmission: f32) -> Self {
         self.apply_to_object_mut(&mut |o| o.set_transmission(transmission));
+        self.clone()
+    }
+
+    /// Sets the volume thickness (world units) of a transmissive surface. See
+    /// [`Object3d::set_thickness`](crate::scene::Object3d::set_thickness).
+    #[inline]
+    pub fn set_thickness(&mut self, thickness: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_thickness(thickness));
+        self.clone()
+    }
+
+    /// Sets the volume attenuation (absorption) color + distance for a transmissive
+    /// surface. See [`Object3d::set_attenuation`](crate::scene::Object3d::set_attenuation).
+    #[inline]
+    pub fn set_attenuation(&mut self, color: crate::color::Color, distance: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_attenuation(color, distance));
         self.clone()
     }
 
@@ -1830,6 +2235,65 @@ impl SceneNode3d {
     #[inline]
     pub fn set_subsurface(&mut self, factor: f32, radius: f32) -> Self {
         self.apply_to_object_mut(&mut |o| o.set_subsurface(factor, radius));
+        self.clone()
+    }
+
+    // === Extended PBR surface properties (rasterizer + path tracer) ===
+
+    /// Sets the dielectric specular reflectance in `[0, 1]` (`F0 = 0.16·r²`).
+    /// See [`Object3d::set_reflectance`](crate::scene::Object3d::set_reflectance).
+    #[inline]
+    pub fn set_reflectance(&mut self, reflectance: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_reflectance(reflectance));
+        self.clone()
+    }
+
+    /// Sets the clearcoat layer strength and roughness, both in `[0, 1]`.
+    /// See [`Object3d::set_clearcoat`](crate::scene::Object3d::set_clearcoat).
+    #[inline]
+    pub fn set_clearcoat(&mut self, strength: f32, roughness: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_clearcoat(strength, roughness));
+        self.clone()
+    }
+
+    /// Sets the specular anisotropy strength (`[-1, 1]`) and rotation (radians).
+    /// See [`Object3d::set_anisotropy`](crate::scene::Object3d::set_anisotropy).
+    #[inline]
+    pub fn set_anisotropy(&mut self, strength: f32, rotation: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_anisotropy(strength, rotation));
+        self.clone()
+    }
+
+    /// Sets how this node's object interprets alpha (see [`AlphaMode`]).
+    #[inline]
+    pub fn set_alpha_mode(&mut self, alpha_mode: AlphaMode) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_alpha_mode(alpha_mode));
+        self.clone()
+    }
+
+    /// Sets this node's object render-layer bitmask (see
+    /// [`Object3d::set_render_layers`](crate::scene::Object3d::set_render_layers)).
+    #[inline]
+    pub fn set_render_layers(&mut self, layers: u32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_render_layers(layers));
+        self.clone()
+    }
+
+    /// Sets this node's object light-layer bitmask, i.e. which lights affect it
+    /// (see [`Object3d::set_light_layers`](crate::scene::Object3d::set_light_layers)).
+    #[inline]
+    pub fn set_light_layers(&mut self, layers: u32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_light_layers(layers));
+        self.clone()
+    }
+
+    /// Sets whether this node's object occludes lights in the shadow pass (see
+    /// [`Object3d::set_casts_shadows`](crate::scene::Object3d::set_casts_shadows)).
+    /// Set `false` for a visible object that should not cast a shadow, e.g. an
+    /// emissive marker at a light's position.
+    #[inline]
+    pub fn set_casts_shadows(&mut self, casts_shadows: bool) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_casts_shadows(casts_shadows));
         self.clone()
     }
 
@@ -2079,6 +2543,48 @@ impl SceneNode3d {
         self.clone()
     }
 
+    /// Sets the parallax height/displacement map from a file (this node only).
+    #[inline]
+    pub fn set_height_map_from_file(&mut self, path: &Path, name: &str) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_height_map_from_file(path, name));
+        self.clone()
+    }
+
+    /// Sets the parallax height/displacement map (this node only).
+    #[inline]
+    pub fn set_height_map(&mut self, texture: Arc<Texture>) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_height_map(texture.clone()));
+        self.clone()
+    }
+
+    /// Clears the parallax height map (this node only).
+    #[inline]
+    pub fn clear_height_map(&mut self) -> Self {
+        self.apply_to_object_mut(&mut |o| o.clear_height_map());
+        self.clone()
+    }
+
+    /// Sets the parallax displacement scale (this node only); `0` disables it.
+    #[inline]
+    pub fn set_parallax_scale(&mut self, scale: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_parallax_scale(scale));
+        self.clone()
+    }
+
+    /// Sets the max parallax search layer count (this node only).
+    #[inline]
+    pub fn set_parallax_layers(&mut self, layers: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_parallax_layers(layers));
+        self.clone()
+    }
+
+    /// Sets the parallax search method (this node only).
+    #[inline]
+    pub fn set_parallax_method(&mut self, method: crate::scene::ParallaxMethod) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_parallax_method(method));
+        self.clone()
+    }
+
     /// Applies a closure to this node's object (if any).
     ///
     /// # See also
@@ -2160,6 +2666,37 @@ impl SceneNode3d {
         for c in data.children.iter() {
             c.apply_to_objects_recursive(f)
         }
+    }
+
+    /// Whether any surface in this subtree renders in the transparent (OIT) pass,
+    /// using the same classification the material applies per object
+    /// ([`AlphaMode::is_transparent`] on the object color). Lets the renderer skip
+    /// the OIT geometry + composite passes entirely for fully-opaque scenes — the
+    /// common case — which would otherwise clear, resolve and composite the MSAA
+    /// transparency targets every frame for nothing.
+    pub(crate) fn has_transparent_surfaces(&self) -> bool {
+        let mut any = false;
+        self.apply_to_objects_recursive(&mut |obj| {
+            let d = obj.data();
+            if d.surface_rendering_active() && d.alpha_mode().is_transparent(d.color().a) {
+                any = true;
+            }
+        });
+        any
+    }
+
+    /// Whether any surface in this subtree is refractive (glass): `transmission > 0`.
+    /// Lets the renderer run the prepass + background snapshot + glass pass only when
+    /// glass is actually present.
+    pub(crate) fn has_refractive_surfaces(&self) -> bool {
+        let mut any = false;
+        self.apply_to_objects_recursive(&mut |obj| {
+            let d = obj.data();
+            if d.surface_rendering_active() && d.transmission() > 0.0 {
+                any = true;
+            }
+        });
+        any
     }
 
     // TODO: add folding?
@@ -2564,5 +3101,30 @@ impl SceneNode3d {
     pub fn set_instances(&mut self, instances: &[InstanceData3d]) -> Self {
         self.data_mut().get_object_mut().set_instances(instances);
         self.clone()
+    }
+}
+
+/// The proper world matrix of a node, composing full per-node TRS (`T · R · S`)
+/// matrices from the root down to the node.
+///
+/// This is **not** the same as `from_scale_rotation_translation(world_scale,
+/// world_rotation, world_translation)`: kiss3d propagates pose (rotation +
+/// translation) and scale separately and applies scale at the leaf, which is only
+/// equivalent to a full matrix composition when there is no scaling above the
+/// node. Skeletal skinning needs the true global matrix (matching how glTF authors
+/// the inverse-bind matrices), where an ancestor scale — e.g. the user's model
+/// scale on the glTF root — sits at the outermost of the chain and therefore also
+/// scales the (centimeter-scale) bone offsets. Composing per-node matrices up the
+/// parent chain gives exactly that.
+fn node_global_matrix(node: &Rc<RefCell<SceneNodeData3d>>) -> Mat4 {
+    let data = node.borrow();
+    let local = Mat4::from_scale_rotation_translation(
+        data.local_scale,
+        data.local_transform.rotation,
+        data.local_transform.translation,
+    );
+    match data.parent.as_ref().and_then(|p| p.upgrade()) {
+        Some(parent) => node_global_matrix(&parent) * local,
+        None => local,
     }
 }

@@ -104,6 +104,9 @@ impl Texture {
 
         // Generate and upload remaining mip levels
         if generate_mipmaps && mip_level_count > 1 {
+            // Color (sRGB) textures must be averaged in linear space; data
+            // textures (normal/metallic-roughness/AO) are already linear.
+            let srgb = matches!(format, wgpu::TextureFormat::Rgba8UnormSrgb);
             let mut current_data = data.to_vec();
             let mut current_width = width;
             let mut current_height = height;
@@ -112,7 +115,8 @@ impl Texture {
                 let new_width = (current_width / 2).max(1);
                 let new_height = (current_height / 2).max(1);
 
-                let new_data = Self::downsample_rgba(&current_data, current_width, current_height);
+                let new_data =
+                    Self::downsample_rgba(&current_data, current_width, current_height, srgb);
 
                 ctxt.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -166,7 +170,31 @@ impl Texture {
     }
 
     /// Downsamples an RGBA image by half using box filtering.
-    fn downsample_rgba(data: &[u8], width: u32, height: u32) -> Vec<u8> {
+    ///
+    /// When `srgb` is set, RGB channels are decoded to linear light before
+    /// averaging and re-encoded afterward (alpha is always linear), so color
+    /// mip chains don't darken — the gamma-correct behavior. Data textures pass
+    /// `srgb = false` and are averaged directly.
+    fn downsample_rgba(data: &[u8], width: u32, height: u32, srgb: bool) -> Vec<u8> {
+        // sRGB transfer-function helpers (IEC 61966-2-1).
+        fn srgb_to_linear(u: u8) -> f32 {
+            let c = u as f32 / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        }
+        fn linear_to_srgb(c: f32) -> u8 {
+            let c = c.clamp(0.0, 1.0);
+            let s = if c <= 0.0031308 {
+                c * 12.92
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            };
+            (s * 255.0 + 0.5) as u8
+        }
+
         let new_width = (width / 2).max(1);
         let new_height = (height / 2).max(1);
         let mut new_data = vec![0u8; (new_width * new_height * 4) as usize];
@@ -177,11 +205,11 @@ impl Texture {
                 let src_x = (x * 2) as usize;
                 let src_y = (y * 2) as usize;
 
-                let mut r = 0u32;
-                let mut g = 0u32;
-                let mut b = 0u32;
-                let mut a = 0u32;
-                let mut count = 0u32;
+                let mut r = 0f32;
+                let mut g = 0f32;
+                let mut b = 0f32;
+                let mut a = 0f32;
+                let mut count = 0f32;
 
                 for dy in 0..2 {
                     for dx in 0..2 {
@@ -189,20 +217,33 @@ impl Texture {
                         let sy = src_y + dy;
                         if sx < width as usize && sy < height as usize {
                             let idx = (sy * width as usize + sx) * 4;
-                            r += data[idx] as u32;
-                            g += data[idx + 1] as u32;
-                            b += data[idx + 2] as u32;
-                            a += data[idx + 3] as u32;
-                            count += 1;
+                            if srgb {
+                                r += srgb_to_linear(data[idx]);
+                                g += srgb_to_linear(data[idx + 1]);
+                                b += srgb_to_linear(data[idx + 2]);
+                            } else {
+                                r += data[idx] as f32 / 255.0;
+                                g += data[idx + 1] as f32 / 255.0;
+                                b += data[idx + 2] as f32 / 255.0;
+                            }
+                            a += data[idx + 3] as f32 / 255.0;
+                            count += 1.0;
                         }
                     }
                 }
 
+                let inv = 1.0 / count;
                 let dst_idx = ((y * new_width + x) * 4) as usize;
-                new_data[dst_idx] = (r / count) as u8;
-                new_data[dst_idx + 1] = (g / count) as u8;
-                new_data[dst_idx + 2] = (b / count) as u8;
-                new_data[dst_idx + 3] = (a / count) as u8;
+                if srgb {
+                    new_data[dst_idx] = linear_to_srgb(r * inv);
+                    new_data[dst_idx + 1] = linear_to_srgb(g * inv);
+                    new_data[dst_idx + 2] = linear_to_srgb(b * inv);
+                } else {
+                    new_data[dst_idx] = ((r * inv) * 255.0 + 0.5) as u8;
+                    new_data[dst_idx + 1] = ((g * inv) * 255.0 + 0.5) as u8;
+                    new_data[dst_idx + 2] = ((b * inv) * 255.0 + 0.5) as u8;
+                }
+                new_data[dst_idx + 3] = ((a * inv) * 255.0 + 0.5) as u8;
             }
         }
 
@@ -260,6 +301,21 @@ impl Texture {
             1,
             &ao_pixel,
             wgpu::TextureFormat::Rgba8Unorm, // Data texture, not sRGB
+            wgpu::AddressMode::Repeat,
+            false,
+        )
+    }
+
+    /// Creates a default height map (1x1, mid-gray). Only used as a placeholder
+    /// when no height map is set; parallax is gated by a flag, so its value is
+    /// irrelevant.
+    pub fn new_default_height_map() -> Arc<Texture> {
+        let pixel: [u8; 4] = [128, 128, 128, 255];
+        Self::new(
+            1,
+            1,
+            &pixel,
+            wgpu::TextureFormat::Rgba8Unorm,
             wgpu::AddressMode::Repeat,
             false,
         )
@@ -356,6 +412,42 @@ impl TextureManager {
             image::load_from_memory(image_data).expect("Invalid data"),
             name,
         )
+    }
+
+    /// Registers a texture from a [`DynamicImage`], choosing the color space and
+    /// using glTF-style `Repeat` wrapping.
+    ///
+    /// Color/emissive textures are authored in sRGB (`srgb = true`); data textures
+    /// — normal, metallic-roughness, occlusion — are linear (`srgb = false`). This
+    /// is what the glTF loader needs, since [`add_image`](Self::add_image) always
+    /// assumes sRGB. If a texture with the same name exists it is returned as-is.
+    pub fn add_image_with_color_space(
+        &mut self,
+        image: DynamicImage,
+        name: &str,
+        srgb: bool,
+    ) -> Arc<Texture> {
+        let generate_mipmaps = self.generate_mipmaps;
+        self.textures
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                let (width, height) = image.dimensions();
+                let rgba_image = image.to_rgba8();
+                let format = if srgb {
+                    wgpu::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                };
+                Texture::new(
+                    width,
+                    height,
+                    rgba_image.as_raw(),
+                    format,
+                    wgpu::AddressMode::Repeat,
+                    generate_mipmaps,
+                )
+            })
+            .clone()
     }
 
     /// Loads a texture from a DynamicImage.

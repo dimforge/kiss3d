@@ -30,21 +30,26 @@ use wgpu::ExperimentalFeatures;
 
 /// Computes the device features to request.
 ///
-/// With the `hw_raytracer` feature enabled, this opts into wgpu's experimental ray
-/// query + acceleration-structure features when the adapter supports them, so the
-/// path tracer can use the hardware backend. Otherwise no extra features are
-/// requested and the portable compute backend is used.
+/// Opts into wgpu's experimental ray query + acceleration-structure features
+/// whenever the adapter supports them, so the path tracer can use the hardware
+/// backend; on platforms without support the feature is simply not requested and
+/// the portable compute backend is used as a fallback.
 fn raytracing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-    #[allow(unused_mut)]
     let mut features = wgpu::Features::empty();
-    #[cfg(feature = "hw_raytracer")]
-    {
-        let supported = adapter.features();
-        if supported.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
-            features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
-        }
+    let supported = adapter.features();
+
+    // Per-pass GPU timestamp queries power the inspector's render timings. Only
+    // requested when the adapter supports it; otherwise GPU timing is disabled
+    // (and only the CPU submit/present/total timings are reported).
+    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
+        features |= wgpu::Features::TIMESTAMP_QUERY;
     }
-    let _ = adapter;
+
+    // Hardware ray queries for the path tracer, when the platform supports them.
+    if supported.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+        features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+    }
+
     features
 }
 
@@ -55,16 +60,12 @@ fn raytracing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
 /// feature without enabling the token makes `request_device` fail. Returns the
 /// enabled token only when ray query is actually being requested.
 fn experimental_features(required: wgpu::Features) -> ExperimentalFeatures {
-    #[cfg(feature = "hw_raytracer")]
-    {
-        if required.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
-            // SAFETY: we opt into wgpu's experimental hardware ray-query API. It may
-            // still contain bugs; the path tracer's hardware backend accepts that to
-            // use GPU-accelerated ray tracing where available.
-            return unsafe { ExperimentalFeatures::enabled() };
-        }
+    if required.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+        // SAFETY: we opt into wgpu's experimental hardware ray-query API. It may
+        // still contain bugs; the path tracer's hardware backend accepts that to
+        // use GPU-accelerated ray tracing where available.
+        return unsafe { ExperimentalFeatures::enabled() };
     }
-    let _ = required;
     ExperimentalFeatures::disabled()
 }
 
@@ -764,6 +765,32 @@ impl WgpuCanvas {
     ///
     /// For an off-screen (headless) canvas this is the only way to change the
     /// render size, since there is no window to emit resize events.
+    /// Whether vsync (the `AutoVsync` present mode) is currently enabled.
+    pub fn vsync(&self) -> bool {
+        self.surface_config.present_mode == wgpu::PresentMode::AutoVsync
+    }
+
+    /// Enables/disables vsync at runtime by switching the surface present mode
+    /// (`AutoVsync` ↔ `AutoNoVsync`) and reconfiguring the surface. With vsync off,
+    /// frames present as fast as the GPU produces them (uncapped), which is what you
+    /// want when measuring GPU-bound throughput; on, presentation is paced to the
+    /// display refresh. No-op on a headless/offscreen canvas (no surface).
+    pub fn set_vsync(&mut self, enabled: bool) {
+        let present_mode = if enabled {
+            wgpu::PresentMode::AutoVsync
+        } else {
+            wgpu::PresentMode::AutoNoVsync
+        };
+        if self.surface_config.present_mode == present_mode {
+            return;
+        }
+        self.surface_config.present_mode = present_mode;
+        if let Some(surface) = &self.surface {
+            let ctxt = Context::get();
+            surface.configure(&ctxt.device, &self.surface_config);
+        }
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);
@@ -797,6 +824,46 @@ impl WgpuCanvas {
 
         self.readback_texture =
             Self::create_readback_texture(&ctxt.device, width, height, self.surface_config.format);
+    }
+
+    /// Changes the MSAA sample count, recreating the size-dependent attachments
+    /// (depth + MSAA color) to match.
+    ///
+    /// The swapchain is single-sample regardless, so it is left untouched. The HDR
+    /// film, OIT targets and the rasterization pipelines re-derive the new count on
+    /// the next frame (the pipelines are cached per sample count), so no other state
+    /// needs to be rebuilt here.
+    pub fn set_sample_count(&mut self, sample_count: u32) {
+        let sample_count = sample_count.max(1);
+        if self.sample_count == sample_count {
+            return;
+        }
+        self.sample_count = sample_count;
+
+        let ctxt = Context::get();
+        let width = self.surface_config.width.max(1);
+        let height = self.surface_config.height.max(1);
+
+        let (depth_texture, depth_view) =
+            Self::create_depth_texture(&ctxt.device, width, height, sample_count);
+        self.depth_texture = depth_texture;
+        self.depth_view = depth_view;
+
+        if sample_count > 1 {
+            let (msaa_texture, msaa_view) = Self::create_msaa_texture(
+                &ctxt.device,
+                width,
+                height,
+                self.surface_config.format,
+                sample_count,
+            );
+            self.msaa_texture = Some(msaa_texture);
+            self.msaa_view = Some(msaa_view);
+        } else {
+            // Drop the (now unused) multisampled color attachment.
+            self.msaa_texture = None;
+            self.msaa_view = None;
+        }
     }
 
     fn create_depth_texture(

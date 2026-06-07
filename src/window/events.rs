@@ -6,6 +6,9 @@ use crate::event::{Action, EventManager, Key, MouseButton, WindowEvent};
 
 use super::Window;
 
+#[cfg(feature = "rt_switcher")]
+use crate::prelude::{RayTracer, RayTracerPreset};
+
 impl Window {
     /// Returns an event manager for accessing window events.
     ///
@@ -108,6 +111,27 @@ impl Window {
                 }
             }
         }
+
+        #[cfg(feature = "rt_switcher")]
+        match event {
+            WindowEvent::Key(Key::F4, Action::Release, _) => {
+                self.raytracer.1 = false;
+            }
+            WindowEvent::Key(Key::F5, Action::Release, _) => {
+                self.raytracer.0 = Some(RayTracer::preset(RayTracerPreset::Low));
+            }
+            WindowEvent::Key(Key::F6, Action::Release, _) => {
+                self.raytracer.0 = Some(RayTracer::preset(RayTracerPreset::Medium));
+            }
+            WindowEvent::Key(Key::F7, Action::Release, _) => {
+                self.raytracer.0 = Some(RayTracer::preset(RayTracerPreset::High));
+            }
+            WindowEvent::Key(Key::F8, Action::Release, _) => {
+                self.raytracer.0 = Some(RayTracer::preset(RayTracerPreset::Ultra));
+            }
+            _ => {}
+        }
+
         if *event == WindowEvent::Close {
             self.close();
         }

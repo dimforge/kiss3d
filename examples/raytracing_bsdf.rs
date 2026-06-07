@@ -80,7 +80,7 @@ async fn main() {
     raytracer.set_aperture(0.06, 6.0);
 
     while window
-        .render_raytraced(&mut scene, &mut camera, &mut raytracer)
+        .raytrace_3d(&mut scene, &mut camera, &mut raytracer)
         .await
     {}
 }

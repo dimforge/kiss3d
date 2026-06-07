@@ -101,8 +101,13 @@ impl Waves {
         });
 
         // Load shader
-        let shader =
-            ctxt.create_shader_module(Some("waves_shader"), include_str!("../builtin/waves.wgsl"));
+        let shader = ctxt.create_shader_module(
+            Some("waves_shader"),
+            &crate::builtin::compile_shader_with_common(
+                "package::waves",
+                include_str!("../builtin/waves.wgsl"),
+            ),
+        );
 
         // Vertex buffer layout
         let vertex_buffer_layout = wgpu::VertexBufferLayout {

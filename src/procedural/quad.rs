@@ -127,9 +127,9 @@ pub fn unit_quad(usubdivs: usize, vsubdivs: usize) -> RenderMesh {
         }
     }
 
-    // create the normals
+    // create the normals (the quad lies in the XY plane, so it faces +Z)
     for _ in 0..(vsubdivs + 1) * (usubdivs + 1) {
-        normals.push(Vec3::new(1.0, 0.0, 0.0))
+        normals.push(Vec3::new(0.0, 0.0, 1.0))
     }
 
     // create triangles

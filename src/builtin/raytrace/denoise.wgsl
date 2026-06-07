@@ -1,3 +1,4 @@
+import package::common::luminance;
 // Edge-aware à-trous wavelet denoiser for the path tracer.
 //
 // One iteration of an SVGF-style à-trous filter: a 5x5 B-spline kernel is
@@ -10,9 +11,9 @@
 // radiance by (albedo + eps) so only the incident lighting is filtered (the
 // `demodulate` flag computes this on the fly when reading from the raw
 // accumulation buffer); after the last iteration the result is re-multiplied by
-// the albedo in the tonemap pass... no — to keep the tonemap pass untouched we
-// re-multiply here on the final iteration via the `remodulate` flag. This keeps
-// crisp texture/albedo detail while smoothing the noisy lighting.
+// the albedo on the final iteration via the `remodulate` flag, so `dst` holds
+// final HDR radiance and the tonemap pass is left untouched. This keeps crisp
+// texture/albedo detail while smoothing the noisy lighting.
 
 struct DenoiseUniforms {
     width: u32,
@@ -43,9 +44,7 @@ struct DenoiseUniforms {
 
 const EPS: f32 = 1e-3;
 
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
+
 
 // First-hit albedo guide at pixel `idx` (region 1 of the shared buffer).
 fn guide_albedo(idx: u32) -> vec3<f32> {

@@ -1,8 +1,10 @@
 // Fullscreen tonemap pass: reads the HDR accumulation buffer and applies the
-// selected tonemap operator + gamma via the shared `apply_tonemap` (see
-// `tonemap_ops.wgsl`, concatenated as a prefix — it also declares the Tony
-// McMapface LUT at group(0) bindings 6 & 7). Upscales from the traced resolution
-// to the framebuffer if they differ.
+// selected tonemap operator + gamma via the shared `apply_tonemap`, imported from
+// the `tonemap_ops` WESL module (which also declares the Tony McMapface LUT at
+// group(0) bindings 6 & 7). Upscales from the traced resolution to the framebuffer
+// if they differ.
+
+import package::tonemap_ops::apply_tonemap;
 
 struct TonemapUniforms {
     src_width: u32,

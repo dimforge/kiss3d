@@ -69,7 +69,7 @@ pub struct RtEmitter {
     pub _pad3: f32,
 }
 
-/// Unified Disney-style material parameters, std430 96-byte layout (6 × vec4).
+/// Unified Disney-style material parameters, std430 128-byte layout (8 × vec4).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable)]
 pub struct RtMaterial {
@@ -93,8 +93,24 @@ pub struct RtMaterial {
     pub subsurface: f32,
     /// Subsurface scattering radius (world units).
     pub subsurface_radius: f32,
+    /// Dielectric specular reflectance remap in `[0, 1]`; F0 = 0.16·reflectance².
+    pub reflectance: f32,
+    /// Light-layer bitmask (lighting channels); a light affects this object only if
+    /// `(light_layers & light.layers) != 0`.
+    pub light_layers: u32,
+    /// Volume absorption (Beer-Lambert) color, RGB (transmissive surfaces).
+    pub attenuation_color: [f32; 3],
+    /// Distance over which transmitted light is absorbed to `attenuation_color`
+    /// (world units); `<= 0` (or non-finite) disables volume absorption.
+    pub attenuation_distance: f32,
+    /// Clearcoat layer strength in `[0, 1]` (a second, sharp dielectric lobe).
+    pub clearcoat: f32,
+    /// Clearcoat layer roughness in `[0, 1]`.
+    pub clearcoat_roughness: f32,
+    /// `1` if this object casts shadows (occludes shadow rays), `0` if it is excluded
+    /// from shadow-ray occlusion (see [`Object3d::set_casts_shadows`](crate::scene::Object3d::set_casts_shadows)).
+    pub casts_shadows: u32,
     pub _pad0: f32,
-    pub _pad1: f32,
     /// Texture-array layer index for the albedo map (-1 = none).
     pub albedo_tex: i32,
     /// Texture-array layer index for the normal map (-1 = none).
@@ -118,8 +134,14 @@ impl Default for RtMaterial {
             bsdf_type: 0,
             subsurface: 0.0,
             subsurface_radius: 0.0,
+            reflectance: 0.5,
+            light_layers: u32::MAX,
+            attenuation_color: [1.0, 1.0, 1.0],
+            attenuation_distance: -1.0,
+            clearcoat: 0.0,
+            clearcoat_roughness: 0.0,
+            casts_shadows: 1,
             _pad0: 0.0,
-            _pad1: 0.0,
             albedo_tex: -1,
             normal_tex: -1,
             mr_tex: -1,
@@ -128,7 +150,7 @@ impl Default for RtMaterial {
     }
 }
 
-/// A light in world space, padded to a 64-byte std430 layout.
+/// A light in world space, padded to an 80-byte std430 layout (5 × vec4).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Default, Pod, Zeroable)]
 pub struct RtLight {
@@ -150,7 +172,15 @@ pub struct RtLight {
     pub outer_cone_cos: f32,
     /// Sphere radius for soft shadows (0 = delta point/spot light).
     pub radius: f32,
-    pub _pad: f32,
+    /// Light-layer bitmask: this light affects an object only if
+    /// `(object.light_layers & layers) != 0`.
+    pub layers: u32,
+    /// `1` if this light casts shadows (a shadow ray is traced), `0` if it lights
+    /// every surface unoccluded.
+    pub casts_shadows: u32,
+    pub _pad0: f32,
+    pub _pad1: f32,
+    pub _pad2: f32,
 }
 
 /// One instance for the two-level (compute) acceleration structure: a reference
@@ -236,6 +266,13 @@ pub struct RtScene {
     pub textures: Vec<std::sync::Arc<crate::resource::Texture>>,
     /// Global ambient intensity (drives the sky term in the kernel).
     pub ambient: f32,
+    /// Global ambient light color (multiplies `ambient`).
+    pub ambient_color: [f32; 3],
+    /// Distance-fog color (RGB) + its overall strength (A); see [`crate::light::Fog`].
+    pub fog_color: [f32; 4],
+    /// Fog falloff encoding `(mode, param_a, param_b, height_falloff)` from
+    /// [`Fog::params`](crate::light::Fog).
+    pub fog_params: [f32; 4],
     /// Content hash used to detect changes that require a GPU rebuild.
     pub hash: u64,
 }
@@ -288,9 +325,24 @@ impl Fnv {
 /// Produces the two-level (instanced) representation used by both backends: each
 /// unique mesh once in local space, plus per-instance transforms + materials. See
 /// [`RtScene`].
-pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
+///
+/// `render_layers` is the camera's render-layer mask: an object is gathered only
+/// when its own `render_layers` shares a bit with it (matching the rasterizer).
+pub fn gather(scene: &SceneNode3d, lights: &LightCollection, render_layers: u32) -> RtScene {
     let mut out = RtScene {
         ambient: lights.ambient,
+        ambient_color: [
+            lights.ambient_color.r,
+            lights.ambient_color.g,
+            lights.ambient_color.b,
+        ],
+        fog_color: [
+            lights.fog.color.r,
+            lights.fog.color.g,
+            lights.fog.color.b,
+            lights.fog.color.a,
+        ],
+        fog_params: lights.fog.params(),
         ..Default::default()
     };
     let mut hasher = Fnv::new();
@@ -306,6 +358,10 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
             return;
         };
         if !obj.data().surface_rendering_active() {
+            return;
+        }
+        // Render-layer filtering: skip objects the camera's layer mask excludes.
+        if obj.data().render_layers() & render_layers == 0 {
             return;
         }
 
@@ -329,6 +385,45 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
         let color = odata.color();
         let emissive = odata.emissive();
         let tint = odata.specular_tint();
+        let atten = odata.attenuation_color();
+        // `attenuation_distance` is `f32::INFINITY` (or set non-positive) when volume
+        // tinting is disabled; encode that as `-1.0` for the kernel's `> 0` test.
+        let atten_dist = odata.attenuation_distance();
+        let atten_dist = if atten_dist.is_finite() && atten_dist > 0.0 {
+            atten_dist
+        } else {
+            -1.0
+        };
+
+        // Whether this object is a skinned mesh whose palette is ready: if so its
+        // geometry is CPU-skinned into world space below.
+        let use_skin = odata.has_skin()
+            && mesh.has_skin_vertices()
+            && odata.skin().is_some_and(|s| !s.palette().is_empty());
+
+        // CPU morph targets: the path tracer has no GPU morph either, so blend the
+        // weighted position/normal deltas into the base mesh here (before any
+        // skinning), mirroring the deform vertex shader. `local_pos`/`local_nrm`
+        // then return the morphed value, or the base value when not morphed.
+        let morph_weights = odata.morph_weights();
+        let morphed: Option<(Vec<Vec3>, Option<Vec<Vec3>>)> =
+            if mesh.has_morph() && morph_weights.iter().any(|&w| w != 0.0) {
+                cpu_morph(&mesh, coords, normals, morph_weights)
+            } else {
+                None
+            };
+        let local_pos = |i: usize| -> Vec3 {
+            match &morphed {
+                Some((p, _)) => p[i],
+                None => coords[i],
+            }
+        };
+        let local_nrm = |i: usize| -> Vec3 {
+            match &morphed {
+                Some((_, Some(n))) => n[i],
+                _ => normals.and_then(|n| n.get(i)).copied().unwrap_or(Vec3::Y),
+            }
+        };
 
         // A non-instanced object still carries one default instance (identity
         // deformation, zero offset, white color); an object with `set_instances`
@@ -379,8 +474,14 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
             bsdf_type: odata.bsdf().tag(),
             subsurface: odata.subsurface(),
             subsurface_radius: odata.subsurface_radius(),
+            reflectance: odata.reflectance(),
+            light_layers: odata.light_layers(),
+            attenuation_color: [atten.r, atten.g, atten.b],
+            attenuation_distance: atten_dist,
+            clearcoat: odata.clearcoat(),
+            clearcoat_roughness: odata.clearcoat_roughness(),
+            casts_shadows: odata.casts_shadows() as u32,
             _pad0: 0.0,
-            _pad1: 0.0,
             albedo_tex,
             normal_tex,
             mr_tex,
@@ -429,18 +530,56 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
             // Store the mesh once in LOCAL space; place copies via instances. Both
             // backends use this representation (compute builds a CPU two-level BVH;
             // the hardware backend builds one BLAS per mesh + a TLAS of instances).
+            // A skinned mesh is deformed per-frame by its joint palette. The path
+            // tracer has no GPU skinning, so we CPU-skin the vertices into WORLD
+            // space here and place the mesh with an identity instance transform.
+            // (The skinned rasterizer ignores the mesh node + instance transforms
+            // too, so a single world-space copy matches it.)
+            let skinned_verts: Option<Vec<(Vec3, Vec3)>> = if use_skin {
+                let skin = odata.skin().unwrap();
+                let palette = skin.palette();
+                let joints_lock = mesh.skin_joints().unwrap().read().unwrap();
+                let weights_lock = mesh.skin_weights().unwrap().read().unwrap();
+                match (joints_lock.data().as_ref(), weights_lock.data().as_ref()) {
+                    (Some(joints), Some(weights)) => Some(
+                        (0..coords.len())
+                            .map(|i| {
+                                let local_n = local_nrm(i);
+                                let m = skin_matrix(palette, joints[i], weights[i]);
+                                let wp = m.transform_point3(local_pos(i));
+                                let wn = Mat3::from_mat4(m) * local_n;
+                                let wn = if wn.length_squared() > 1.0e-12 {
+                                    wn.normalize()
+                                } else {
+                                    local_n
+                                };
+                                (wp, wn)
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            // A successfully-skinned mesh is already in world space.
+            let skinned = skinned_verts.is_some();
+
             let mesh_id = out.mesh_ranges.len() as u32;
             let vert_start = out.mesh_vertices.len() as u32;
-            for (i, &local_pos) in coords.iter().enumerate() {
-                let local_n = normals.and_then(|n| n.get(i)).copied().unwrap_or(Vec3::Y);
+            for i in 0..coords.len() {
+                let (pos, normal) = match &skinned_verts {
+                    Some(sv) => sv[i],
+                    None => (local_pos(i), local_nrm(i)),
+                };
                 let uv = uvs
                     .and_then(|u| u.get(i))
                     .copied()
                     .unwrap_or(glamx::Vec2::ZERO);
                 out.mesh_vertices.push(RtVertex {
-                    position: [local_pos.x, local_pos.y, local_pos.z],
+                    position: [pos.x, pos.y, pos.z],
                     u: uv.x,
-                    normal: [local_n.x, local_n.y, local_n.z],
+                    normal: [normal.x, normal.y, normal.z],
                     v: uv.y,
                 });
             }
@@ -460,8 +599,15 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
                 tri_count: faces.len() as u32,
             });
 
-            for inst in 0..num_instances {
-                let m = instance_transform(inst);
+            // Skinned meshes are baked in world space → a single identity instance.
+            // Non-skinned meshes keep their per-instance world placements.
+            let instance_count = if skinned { 1 } else { num_instances };
+            for inst in 0..instance_count {
+                let m = if skinned {
+                    Mat4::IDENTITY
+                } else {
+                    instance_transform(inst)
+                };
                 let material_id = out.materials.len() as u32;
                 out.materials.push(instance_material(inst));
                 out.instances.push(RtInstance {
@@ -477,9 +623,17 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
                 // Bake this instance's emissive triangles into world-space emitters.
                 if emissive_obj {
                     for f in faces {
-                        let p0 = m.transform_point3(coords[f[0] as usize]);
-                        let p1 = m.transform_point3(coords[f[1] as usize]);
-                        let p2 = m.transform_point3(coords[f[2] as usize]);
+                        // Skinned vertices are already world-space; otherwise place
+                        // the local vertex by the instance transform.
+                        let world = |idx: u32| -> Vec3 {
+                            match &skinned_verts {
+                                Some(sv) => sv[idx as usize].0,
+                                None => m.transform_point3(local_pos(idx as usize)),
+                            }
+                        };
+                        let p0 = world(f[0]);
+                        let p1 = world(f[1]);
+                        let p2 = world(f[2]);
                         out.emitters.push(RtEmitter {
                             p0: p0.to_array(),
                             _pad0: 0.0,
@@ -497,6 +651,8 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
 
         hash_object(&mut hasher, pose, scale, odata, coords.len(), faces.len());
         hash_instances(&mut hasher, &instances);
+        hash_skin(&mut hasher, odata);
+        hash_morph(&mut hasher, odata);
     });
 
     // Lights also influence the rendered image; fold them into the hash so a
@@ -505,16 +661,39 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
         out.lights.push(collected_to_rt(cl));
         hash_light(&mut hasher, cl);
     }
-    hasher.write_f32(lights.ambient);
+    hash_scene_globals(&mut hasher, lights);
 
     out.hash = hasher.0;
     out
 }
 
+/// Folds the scene-global lighting state (ambient intensity + color and fog) into
+/// the change hash, so editing any of them resets accumulation. Must hash the same
+/// bytes in [`gather`] and [`scene_hash`].
+fn hash_scene_globals(h: &mut Fnv, lights: &LightCollection) {
+    h.write_f32(lights.ambient);
+    for c in [
+        lights.ambient_color.r,
+        lights.ambient_color.g,
+        lights.ambient_color.b,
+        lights.fog.color.r,
+        lights.fog.color.g,
+        lights.fog.color.b,
+        lights.fog.color.a,
+    ] {
+        h.write_f32(c);
+    }
+    for p in lights.fog.params() {
+        h.write_f32(p);
+    }
+}
+
 /// Computes the same content hash as [`gather`] without building the (expensive)
 /// vertex/triangle/material arrays. Used every frame to detect whether the GPU
-/// scene must be rebuilt; only on a change does the full [`gather`] run.
-pub fn scene_hash(scene: &SceneNode3d, lights: &LightCollection) -> u64 {
+/// scene must be rebuilt; only on a change does the full [`gather`] run. Must apply
+/// the same `render_layers` filter as [`gather`] so toggling the camera mask is
+/// detected as a change.
+pub fn scene_hash(scene: &SceneNode3d, lights: &LightCollection, render_layers: u32) -> u64 {
     let mut hasher = Fnv::new();
 
     scene.apply_to_visible_scene_nodes_recursive(&mut |node| {
@@ -528,6 +707,10 @@ pub fn scene_hash(scene: &SceneNode3d, lights: &LightCollection) -> u64 {
         if !obj.data().surface_rendering_active() {
             return;
         }
+        // Render-layer filtering: skip objects the camera's layer mask excludes.
+        if obj.data().render_layers() & render_layers == 0 {
+            return;
+        }
 
         let mesh = obj.mesh().borrow();
         let ncoords = mesh.coords().read().unwrap().len();
@@ -539,12 +722,14 @@ pub fn scene_hash(scene: &SceneNode3d, lights: &LightCollection) -> u64 {
         let odata = obj.data();
         hash_object(&mut hasher, pose, scale, odata, ncoords, nfaces);
         hash_instances(&mut hasher, &obj.instances().borrow());
+        hash_skin(&mut hasher, odata);
+        hash_morph(&mut hasher, odata);
     });
 
     for cl in &lights.lights {
         hash_light(&mut hasher, cl);
     }
-    hasher.write_f32(lights.ambient);
+    hash_scene_globals(&mut hasher, lights);
 
     hasher.0
 }
@@ -553,6 +738,86 @@ pub fn scene_hash(scene: &SceneNode3d, lights: &LightCollection) -> u64 {
 /// colors) into the change hash, so adding/moving/recoloring instances rebuilds the
 /// GPU scene and resets accumulation. Must hash exactly the same bytes in [`gather`]
 /// and [`scene_hash`].
+/// The blended skinning matrix for one vertex: a weight-normalized combination of
+/// its (up to four) joint palette matrices. Out-of-range joint indices fall back to
+/// identity. Mirrors the skinned vertex shader so the path tracer and rasterizer
+/// agree.
+fn skin_matrix(palette: &[Mat4], joints: [u32; 4], weights: [f32; 4]) -> Mat4 {
+    let wsum = weights[0] + weights[1] + weights[2] + weights[3];
+    let inv = if wsum > 0.0 { 1.0 / wsum } else { 1.0 };
+    let get = |j: u32| palette.get(j as usize).copied().unwrap_or(Mat4::IDENTITY);
+    get(joints[0]) * (weights[0] * inv)
+        + get(joints[1]) * (weights[1] * inv)
+        + get(joints[2]) * (weights[2] * inv)
+        + get(joints[3]) * (weights[3] * inv)
+}
+
+/// Folds a skinned object's joint-matrix palette into the change hash, so an
+/// animated pose rebuilds the path-traced scene (and resets accumulation). Must
+/// hash the same bytes in [`gather`] and [`scene_hash`]. No-op for non-skinned
+/// objects.
+fn hash_skin(h: &mut Fnv, odata: &crate::scene::ObjectData3d) {
+    if let Some(skin) = odata.skin() {
+        for m in skin.palette() {
+            for c in m.to_cols_array() {
+                h.write_f32(c);
+            }
+        }
+    }
+}
+
+/// CPU-applies morph-target weights to the base mesh, returning blended local
+/// positions and — when the mesh carries normal deltas — blended normals. Mirrors
+/// the deform vertex shader so the path tracer matches the rasterizer. Returns
+/// `None` if the morph deltas aren't CPU-resident.
+fn cpu_morph(
+    mesh: &crate::resource::GpuMesh3d,
+    coords: &[Vec3],
+    normals: Option<&Vec<Vec3>>,
+    weights: &[f32],
+) -> Option<(Vec<Vec3>, Option<Vec<Vec3>>)> {
+    let nv = mesh.morph_vertex_count();
+    let nt = mesh.morph_target_count().min(weights.len());
+    let pos_lock = mesh.morph_positions()?.read().unwrap();
+    let mpos = pos_lock.data().as_ref()?;
+    let nrm_lock = mesh.morph_normals().map(|n| n.read().unwrap());
+    let mnrm = nrm_lock.as_ref().and_then(|g| g.data().as_ref());
+
+    let count = coords.len().min(nv);
+    let mut positions = coords.to_vec();
+    let mut out_normals = mnrm.is_some().then(|| match normals {
+        Some(n) => n.clone(),
+        None => vec![Vec3::Y; coords.len()],
+    });
+
+    for (t, &w) in weights.iter().take(nt).enumerate() {
+        if w == 0.0 {
+            continue;
+        }
+        let base = t * nv;
+        for v in 0..count {
+            let d = mpos[base + v];
+            positions[v] += w * Vec3::new(d[0], d[1], d[2]);
+        }
+        if let (Some(mn), Some(on)) = (mnrm, out_normals.as_mut()) {
+            for v in 0..count {
+                let d = mn[base + v];
+                on[v] += w * Vec3::new(d[0], d[1], d[2]);
+            }
+        }
+    }
+    Some((positions, out_normals))
+}
+
+/// Folds an object's current morph-target weights into the change hash, so a
+/// morphing pose rebuilds the path-traced scene (and resets accumulation). Must
+/// hash the same bytes in [`gather`] and [`scene_hash`]. No-op for non-morph objects.
+fn hash_morph(h: &mut Fnv, odata: &crate::scene::ObjectData3d) {
+    for &w in odata.morph_weights() {
+        h.write_f32(w);
+    }
+}
+
 fn hash_instances(h: &mut Fnv, instances: &InstancesBuffer3d) {
     h.write_u32(instances.len() as u32);
     if let Some(p) = instances.positions.data() {
@@ -611,6 +876,16 @@ fn hash_object(
     }
     h.write_f32(odata.subsurface());
     h.write_f32(odata.subsurface_radius());
+    h.write_f32(odata.reflectance());
+    h.write_u32(odata.light_layers());
+    h.write_u32(odata.casts_shadows() as u32);
+    h.write_f32(odata.clearcoat());
+    h.write_f32(odata.clearcoat_roughness());
+    let atten = odata.attenuation_color();
+    for c in [atten.r, atten.g, atten.b] {
+        h.write_f32(c);
+    }
+    h.write_f32(odata.attenuation_distance());
     // Texture-map presence (pointers) so attaching/detaching a map rebuilds.
     let tex_id = |t: Option<&std::sync::Arc<crate::resource::Texture>>| -> u32 {
         t.map(|a| std::sync::Arc::as_ptr(a) as usize as u32)
@@ -630,6 +905,8 @@ fn hash_light(h: &mut Fnv, cl: &CollectedLight) {
     h.write_vec3(cl.color);
     h.write_f32(cl.intensity);
     h.write_f32(cl.radius);
+    h.write_u32(cl.layers);
+    h.write_u32(cl.casts_shadows as u32);
 }
 
 fn collected_to_rt(cl: &CollectedLight) -> RtLight {
@@ -666,6 +943,10 @@ fn collected_to_rt(cl: &CollectedLight) -> RtLight {
         inner_cone_cos,
         outer_cone_cos,
         radius: cl.radius,
-        _pad: 0.0,
+        layers: cl.layers,
+        casts_shadows: cl.casts_shadows as u32,
+        _pad0: 0.0,
+        _pad1: 0.0,
+        _pad2: 0.0,
     }
 }

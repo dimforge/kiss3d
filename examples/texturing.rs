@@ -1,4 +1,5 @@
 use kiss3d::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 #[kiss3d::main]
@@ -13,10 +14,13 @@ async fn main() {
         .add_light(Light::point(100.0))
         .set_position(Vec3::new(0.0, 2.0, -10.0));
 
-    let mut c = scene_3d
-        .add_cube(1.0, 1.0, 1.0)
-        .set_color(RED)
-        .set_texture_from_file(Path::new("./examples/media/kitten.png"), "kitten");
+    let mut c = scene_3d.add_cube(1.0, 1.0, 1.0).set_color(RED);
+    // Embed the texture into the binary on wasm (no filesystem); read it from the
+    // path on native.
+    #[cfg(not(target_arch = "wasm32"))]
+    c.set_texture_from_file(Path::new("./examples/media/kitten.png"), "kitten");
+    #[cfg(target_arch = "wasm32")]
+    c.set_texture_from_memory(include_bytes!("media/kitten.png"), "kitten");
 
     let mut r = scene_2d
         .add_rectangle(100.0, 100.0)

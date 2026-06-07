@@ -100,7 +100,10 @@ impl OculusStereo {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("oculus_shader"),
-            include_str!("../builtin/oculus.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::oculus",
+                include_str!("../builtin/oculus.wgsl"),
+            ),
         );
 
         // Vertex buffer layout

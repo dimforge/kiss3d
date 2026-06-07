@@ -7,7 +7,7 @@ use crate::camera::Camera3d;
 use crate::color::Color;
 use crate::context::Context;
 use crate::renderer::Renderer3d;
-use crate::resource::RenderContext;
+use crate::resource::{multisample_state, PipelineCache, RenderContext};
 use bytemuck::{Pod, Zeroable};
 use glamx::{Pose3, Vec3};
 
@@ -107,7 +107,7 @@ impl Polyline3d {
 
 /// Structure which manages the display of polylines with configurable width.
 pub struct PolylineRenderer3d {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: PipelineCache,
     view_bind_group_layout: wgpu::BindGroupLayout,
     view_uniform_buffer: wgpu::Buffer,
     segment_buffer: wgpu::Buffer,
@@ -155,92 +155,93 @@ impl PolylineRenderer3d {
             include_str!("../builtin/polyline3d.wgsl"),
         );
 
-        // Vertex buffer layout - each instance is a line segment with material data
-        let vertex_buffer_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<LineSegment>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                // point_a (vec3)
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                // width (f32)
-                wgpu::VertexAttribute {
-                    offset: 12,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32,
-                },
-                // point_b (vec3)
-                wgpu::VertexAttribute {
-                    offset: 16,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
-                },
-                // depth_bias (f32)
-                wgpu::VertexAttribute {
-                    offset: 28,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Float32,
-                },
-                // color (vec4)
-                wgpu::VertexAttribute {
-                    offset: 32,
-                    shader_location: 4,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-                // perspective (u32)
-                wgpu::VertexAttribute {
-                    offset: 48,
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Uint32,
-                },
-            ],
-        };
+        // Pipeline is built lazily per MSAA sample count (see `PipelineCache`):
+        // polylines render into the (optionally multisampled) HDR film.
+        let pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            // Vertex buffer layout - each instance is a line segment with material data
+            let vertex_buffer_layout = wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<LineSegment>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    // point_a (vec3)
+                    wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 0,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    // width (f32)
+                    wgpu::VertexAttribute {
+                        offset: 12,
+                        shader_location: 1,
+                        format: wgpu::VertexFormat::Float32,
+                    },
+                    // point_b (vec3)
+                    wgpu::VertexAttribute {
+                        offset: 16,
+                        shader_location: 2,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    // depth_bias (f32)
+                    wgpu::VertexAttribute {
+                        offset: 28,
+                        shader_location: 3,
+                        format: wgpu::VertexFormat::Float32,
+                    },
+                    // color (vec4)
+                    wgpu::VertexAttribute {
+                        offset: 32,
+                        shader_location: 4,
+                        format: wgpu::VertexFormat::Float32x4,
+                    },
+                    // perspective (u32)
+                    wgpu::VertexAttribute {
+                        offset: 48,
+                        shader_location: 5,
+                        format: wgpu::VertexFormat::Uint32,
+                    },
+                ],
+            };
 
-        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("polyline_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_buffer_layout],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Context::depth_format(),
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("polyline_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_buffer_layout],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Context::depth_format(),
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // Create view uniform buffer
@@ -397,7 +398,8 @@ impl Renderer3d for PolylineRenderer3d {
         // Create view bind group
         let view_bind_group = self.create_view_bind_group();
 
-        render_pass.set_pipeline(&self.pipeline);
+        let pipeline = self.pipeline.get(context.sample_count);
+        render_pass.set_pipeline(&pipeline);
         render_pass.set_bind_group(0, &view_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.segment_buffer.slice(..));
 

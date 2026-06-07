@@ -96,6 +96,20 @@ pub struct Light {
     /// attenuates the light contribution of occluded fragments. Has no effect on
     /// the path tracer, which always computes ray-traced shadows.
     pub casts_shadows: bool,
+    /// Light-layer bitmask (lighting channels). This light only affects an object
+    /// when their masks share at least one bit (`object_layers & light_layers != 0`),
+    /// the same idea as a per-light culling mask. Defaults to
+    /// `u32::MAX` (every bit set), so by default a light affects every object. See
+    /// [`Object3d::set_light_layers`](crate::scene::Object3d::set_light_layers).
+    #[cfg_attr(feature = "serde", serde(default = "all_layers"))]
+    pub layers: u32,
+}
+
+/// Default light-layer mask (all channels) — used by serde so scenes serialized
+/// before the `layers` field deserialize as "affects every object" rather than `0`.
+#[cfg(feature = "serde")]
+fn all_layers() -> u32 {
+    u32::MAX
 }
 
 impl Default for Light {
@@ -107,6 +121,7 @@ impl Default for Light {
             radius: 0.0,
             enabled: true,
             casts_shadows: true,
+            layers: u32::MAX,
         }
     }
 }
@@ -192,6 +207,17 @@ impl Light {
         self.casts_shadows = casts_shadows;
         self
     }
+
+    /// Sets the light-layer bitmask (lighting channels).
+    ///
+    /// The light only affects objects whose own layer mask (see
+    /// [`Object3d::set_light_layers`](crate::scene::Object3d::set_light_layers))
+    /// shares at least one bit with `layers`. Defaults to `u32::MAX` (affects every
+    /// object). Use this to confine a light to a subset of the scene.
+    pub fn with_layers(mut self, layers: u32) -> Self {
+        self.layers = layers;
+        self
+    }
 }
 
 /// A light that has been collected from the scene tree with its world-space transform.
@@ -211,6 +237,103 @@ pub struct CollectedLight {
     pub radius: f32,
     /// Whether this light should cast shadows in the rasterization pipeline.
     pub casts_shadows: bool,
+    /// Light-layer bitmask (lighting channels); see [`Light::layers`].
+    pub layers: u32,
+}
+
+/// Distance-fog falloff curve.
+///
+/// The common distance-fog falloff modes:
+/// a `Linear` ramp between two distances, or physically-motivated `Exponential`
+/// / `ExponentialSquared` density curves.
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum FogMode {
+    /// Fog disabled.
+    #[default]
+    Off,
+    /// Linear ramp: no fog before `start`, full fog past `end` (both view-space
+    /// distances in world units).
+    Linear { start: f32, end: f32 },
+    /// Exponential falloff `1 - exp(-density * distance)`.
+    Exponential { density: f32 },
+    /// Exponential-squared falloff `1 - exp(-(density * distance)^2)`; denser, with
+    /// a sharper onset.
+    ExponentialSquared { density: f32 },
+}
+
+/// Distance fog applied to the rendered scene during shading.
+///
+/// Fog blends each shaded fragment toward [`color`](Self::color) by an amount
+/// determined by [`mode`](Self::mode) and the fragment's view-space distance,
+/// optionally thinned with altitude by [`height_falloff`](Self::height_falloff).
+#[derive(Copy, Clone, Debug, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct Fog {
+    /// The fog/ambient color fragments are blended toward.
+    pub color: Color,
+    /// The falloff curve (and whether fog is active at all).
+    pub mode: FogMode,
+    /// Optional exponential thinning of fog with world-space height `y`
+    /// (`0` disables it). Larger values clear the fog faster as you go up.
+    pub height_falloff: f32,
+}
+
+impl Default for Fog {
+    fn default() -> Self {
+        Self {
+            color: crate::color::Color::new(0.6, 0.7, 0.8, 1.0),
+            mode: FogMode::Off,
+            height_falloff: 0.0,
+        }
+    }
+}
+
+impl Fog {
+    /// Linear fog ramping from `start` to `end` (view-space distances).
+    pub fn linear(color: Color, start: f32, end: f32) -> Self {
+        Self {
+            color,
+            mode: FogMode::Linear { start, end },
+            height_falloff: 0.0,
+        }
+    }
+
+    /// Exponential fog of the given density.
+    pub fn exponential(color: Color, density: f32) -> Self {
+        Self {
+            color,
+            mode: FogMode::Exponential { density },
+            height_falloff: 0.0,
+        }
+    }
+
+    /// Exponential-squared fog of the given density.
+    pub fn exponential_squared(color: Color, density: f32) -> Self {
+        Self {
+            color,
+            mode: FogMode::ExponentialSquared { density },
+            height_falloff: 0.0,
+        }
+    }
+
+    /// Sets the height falloff (exponential thinning of fog with world height).
+    pub fn with_height_falloff(mut self, height_falloff: f32) -> Self {
+        self.height_falloff = height_falloff.max(0.0);
+        self
+    }
+
+    /// GPU-friendly encoding: `(mode_code, param_a, param_b, height_falloff)`.
+    /// `mode_code` is 0 off / 1 linear / 2 exp / 3 exp2; for linear `param_a/b`
+    /// are start/end, otherwise `param_a` is the density.
+    pub(crate) fn params(&self) -> [f32; 4] {
+        match self.mode {
+            FogMode::Off => [0.0, 0.0, 0.0, 0.0],
+            FogMode::Linear { start, end } => [1.0, start, end, self.height_falloff],
+            FogMode::Exponential { density } => [2.0, density, 0.0, self.height_falloff],
+            FogMode::ExponentialSquared { density } => [3.0, density, 0.0, self.height_falloff],
+        }
+    }
 }
 
 /// A collection of lights gathered from the scene tree during the prepare phase.
@@ -220,6 +343,10 @@ pub struct LightCollection {
     pub lights: Vec<CollectedLight>,
     /// Global ambient lighting intensity.
     pub ambient: f32,
+    /// Global ambient light color (multiplied by [`ambient`](Self::ambient)).
+    pub ambient_color: Color,
+    /// Distance fog applied to the scene during shading.
+    pub fog: Fog,
 }
 
 impl Default for LightCollection {
@@ -234,6 +361,8 @@ impl LightCollection {
         Self {
             lights: Vec::with_capacity(MAX_LIGHTS),
             ambient: 0.2,
+            ambient_color: crate::color::WHITE,
+            fog: Fog::default(),
         }
     }
 
@@ -242,24 +371,76 @@ impl LightCollection {
         Self {
             lights: Vec::with_capacity(MAX_LIGHTS),
             ambient,
+            ambient_color: crate::color::WHITE,
+            fog: Fog::default(),
         }
     }
 
-    /// Adds a light to the collection if there's room.
+    /// Adds a light to the collection.
     ///
-    /// Returns `true` if the light was added, `false` if the collection is full.
+    /// All lights are collected; the renderer later splits them into the fixed
+    /// "primary" tier (rendered through the uniform array with shadows) and the
+    /// "clustered" overflow tier via [`split_primary_clustered`](Self::split_primary_clustered).
+    /// Always returns `true` (the bool is kept for backwards compatibility).
     pub fn add(&mut self, light: CollectedLight) -> bool {
-        if self.lights.len() < MAX_LIGHTS {
-            self.lights.push(light);
-            true
-        } else {
-            false
-        }
+        self.lights.push(light);
+        true
     }
 
-    /// Returns `true` if the collection has reached the maximum number of lights.
+    /// Returns `true` if the collection has reached the [`MAX_LIGHTS`] primary budget.
+    ///
+    /// This no longer prevents further lights from being collected — extra lights
+    /// spill into the clustered tier — but remains useful to detect when the cheap
+    /// shadow-capable primary slots are exhausted.
     pub fn is_full(&self) -> bool {
         self.lights.len() >= MAX_LIGHTS
+    }
+
+    /// Splits the collected lights into the primary and clustered tiers.
+    ///
+    /// The **primary** tier (at most [`MAX_LIGHTS`] lights) is rendered through the
+    /// fixed uniform array and keeps full shadow-mapping support. The **clustered**
+    /// tier holds the overflow, shaded by the clustered forward+ path without shadows.
+    ///
+    /// Returns two lists of indices into [`lights`](Self::lights). Both the object
+    /// material's uniform upload and the shadow atlas must consume the **same**
+    /// primary ordering so that uniform slot `i` and shadow view `i` refer to the
+    /// same light.
+    ///
+    /// Selection: when the scene has `<= MAX_LIGHTS` lights, every light is primary
+    /// in collection order (byte-identical to the legacy fixed path). Otherwise the
+    /// primary slots go to shadow-casting lights first, then directional lights, then
+    /// the remaining lights by descending intensity (collection order breaks ties).
+    pub fn split_primary_clustered(&self) -> (Vec<usize>, Vec<usize>) {
+        let n = self.lights.len();
+        if n <= MAX_LIGHTS {
+            return ((0..n).collect(), Vec::new());
+        }
+
+        // Lower key sorts earlier (higher priority for a primary slot).
+        fn tier(l: &CollectedLight) -> u8 {
+            if l.casts_shadows {
+                0
+            } else if matches!(l.light_type, LightType::Directional(_)) {
+                1
+            } else {
+                2
+            }
+        }
+
+        let mut order: Vec<usize> = (0..n).collect();
+        // `sort_by` is stable, so equal-priority lights keep their collection order.
+        order.sort_by(|&a, &b| {
+            let (la, lb) = (&self.lights[a], &self.lights[b]);
+            tier(la).cmp(&tier(lb)).then_with(|| {
+                lb.intensity
+                    .partial_cmp(&la.intensity)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        });
+
+        let clustered = order.split_off(MAX_LIGHTS);
+        (order, clustered)
     }
 
     /// Returns the number of lights in the collection.

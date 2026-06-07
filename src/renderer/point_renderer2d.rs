@@ -3,7 +3,7 @@
 use crate::camera::Camera2d;
 use crate::color::Color;
 use crate::context::Context;
-use crate::resource::RenderContext2dEncoder;
+use crate::resource::{multisample_state, PipelineCache, RenderContext2dEncoder};
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat3, Vec2};
 
@@ -31,7 +31,7 @@ struct FrameUniforms2D {
 
 /// Structure which manages the display of short-living 2D points.
 pub struct PointRenderer2d {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: PipelineCache,
     bind_group_layout: wgpu::BindGroupLayout,
     frame_uniform_buffer: wgpu::Buffer,
     point_storage_buffer: wgpu::Buffer,
@@ -88,46 +88,50 @@ impl PointRenderer2d {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("planar_point_renderer_shader"),
-            include_str!("../builtin/points2d.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::points2d",
+                include_str!("../builtin/points2d.wgsl"),
+            ),
         );
 
-        // No vertex buffers - using storage buffer and vertex_index
-        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("planar_point_renderer_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None, // 2D rendering doesn't use depth
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+        // No vertex buffers - using storage buffer and vertex_index. Built lazily per
+        // MSAA sample count: 2D points render into the (optionally multisampled) HDR
+        // film.
+        let pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("planar_point_renderer_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None, // 2D rendering doesn't use depth
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // Create uniform buffer
@@ -255,6 +259,8 @@ impl PointRenderer2d {
         // Create bind group
         let bind_group = self.create_bind_group();
 
+        let pipeline = self.pipeline.get(context.sample_count);
+
         // Create render pass (no depth for 2D)
         {
             let mut render_pass = context
@@ -276,7 +282,7 @@ impl PointRenderer2d {
                     multiview_mask: None,
                 });
 
-            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, &bind_group, &[]);
 
             // Draw 6 vertices per point (2 triangles forming a quad)

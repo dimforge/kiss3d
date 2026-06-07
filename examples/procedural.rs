@@ -2,6 +2,7 @@ use kiss3d::prelude::*;
 use kiss3d::procedural::path::StrokePattern;
 use kiss3d::procedural::path::{ArrowheadCap, PolylinePath, PolylinePattern};
 use kiss3d::procedural::RenderMesh;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 #[kiss3d::main]
@@ -22,13 +23,16 @@ async fn main() {
         .set_position(Vec3::new(1.0, 0.0, 0.0));
     #[cfg(not(target_arch = "wasm32"))]
     c.set_texture_from_file(Path::new("./examples/media/kitten.png"), "kitten");
+    #[cfg(target_arch = "wasm32")]
+    c.set_texture_from_memory(include_bytes!("media/kitten.png"), "kitten");
 
     /*
      * A sphere.
      */
     let sphere = kiss3d::procedural::sphere(0.4f32, 20, 20, true);
     let mut s = scene.add_render_mesh(sphere, Vec3::splat(1.0));
-    #[cfg(not(target_arch = "wasm32"))]
+    // Reuses the "kitten" texture registered above (embedded on wasm, from file on
+    // native), so it's available on both targets.
     s.set_texture_with_name("kitten");
 
     /*

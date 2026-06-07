@@ -6,7 +6,7 @@ This directory contains run configurations for all Kiss3d examples and common de
 
 ### Example Configurations (72 total)
 
-For each of the 36 examples, two run configurations are provided:
+For each of the 37 examples, two run configurations are provided:
 
 1. **Native** - `<example>.run.xml`
    - Runs the example on the native platform
@@ -27,6 +27,7 @@ For each of the 36 examples, two run configurations are provided:
 - custom_mesh
 - custom_mesh_shared
 - decomp
+- depth_of_field
 - event
 - group
 - instancing2d

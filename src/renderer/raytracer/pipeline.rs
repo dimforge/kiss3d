@@ -60,11 +60,20 @@ pub struct FrameUniforms {
     /// is bound. Lands at offset 144; its 16 bytes also pad the uniform to the
     /// 160-byte stride WGSL rounds this struct up to (mat4x4/vec4 alignment).
     pub background: [f32; 4],
+    /// Ambient light color (RGB; A unused), multiplying the scalar `ambient` fill.
+    pub ambient_color: [f32; 4],
+    /// Distance-fog color (RGB) + overall strength (A).
+    pub fog_color: [f32; 4],
+    /// Fog falloff encoding `(mode, param_a, param_b, height_falloff)`; `mode == 0`
+    /// disables fog. See [`crate::light::Fog`].
+    pub fog_params: [f32; 4],
+    /// Misc flags. `x = 1` when some object opts out of casting shadows (the kernel
+    /// then walks shadow-ray occluders to skip non-casters). The rest are reserved.
+    pub flags: [u32; 4],
 }
 
 const PREAMBLE: &str = include_str!("../../builtin/raytrace/rt_preamble.wgsl");
 const INTERSECT_BVH: &str = include_str!("../../builtin/raytrace/rt_intersect_bvh.wgsl");
-#[cfg(feature = "hw_raytracer")]
 const INTERSECT_RAYQUERY: &str = include_str!("../../builtin/raytrace/rt_intersect_rayquery.wgsl");
 const KERNEL: &str = include_str!("../../builtin/raytrace/rt_kernel.wgsl");
 
@@ -81,19 +90,27 @@ impl PathTracePipeline {
     pub fn new(backend: RayBackend) -> PathTracePipeline {
         let ctxt = Context::get();
 
-        let intersect = match backend {
-            RayBackend::Software => INTERSECT_BVH,
-            #[cfg(feature = "hw_raytracer")]
-            RayBackend::Hardware => INTERSECT_RAYQUERY,
+        // Compose the kernel with the preamble and the backend-specific intersection
+        // module via WESL imports (instead of source concatenation). The selected
+        // intersect file is mounted as `package::rt_intersect`; the `hardware` feature
+        // gates the `enable wgpu_ray_query;` directive in the kernel.
+        let hardware = matches!(backend, RayBackend::Hardware);
+        let intersect = if hardware {
+            INTERSECT_RAYQUERY
+        } else {
+            INTERSECT_BVH
         };
-        // The `enable` directive must precede all declarations, so it is prepended
-        // to the whole module for the ray-query backend.
-        let prologue = match backend {
-            RayBackend::Software => "",
-            #[cfg(feature = "hw_raytracer")]
-            RayBackend::Hardware => "enable wgpu_ray_query;\n",
-        };
-        let source = format!("{prologue}{PREAMBLE}\n{intersect}\n{KERNEL}");
+        let source = crate::builtin::compile_wesl(
+            &[
+                ("package::rt_preamble", PREAMBLE),
+                ("package::rt_intersect", intersect),
+                ("package::rt_kernel", KERNEL),
+                ("package::pbr_env", crate::builtin::PBR_ENV_WESL),
+                ("package::common", crate::builtin::COMMON_WESL),
+            ],
+            "package::rt_kernel",
+            &[("hardware", hardware)],
+        );
         let shader = ctxt.create_shader_module(Some("rt_path_tracer"), &source);
 
         let group0_layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -159,21 +176,6 @@ impl PathTracePipeline {
         entries.push(storage_entry(12, true)); // instances
     }
 
-    #[cfg(not(feature = "hw_raytracer"))]
-    fn group1_entries(_backend: RayBackend) -> Vec<wgpu::BindGroupLayoutEntry> {
-        let mut entries = vec![
-            storage_entry(0, true), // mesh vertices
-            storage_entry(1, true), // mesh triangles
-            storage_entry(2, true), // materials
-            storage_entry(3, true), // lights
-            storage_entry(4, true), // TLAS nodes
-        ];
-        Self::group1_shared_tail(&mut entries);
-        Self::group1_two_level_tail(&mut entries);
-        entries
-    }
-
-    #[cfg(feature = "hw_raytracer")]
     fn group1_entries(backend: RayBackend) -> Vec<wgpu::BindGroupLayoutEntry> {
         let mut entries = vec![
             storage_entry(0, true), // (mesh) vertices
@@ -238,6 +240,7 @@ impl PathTracePipeline {
         env: &Environment,
         width: u32,
         height: u32,
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
         let ctxt = Context::get();
 
@@ -295,9 +298,10 @@ impl PathTracePipeline {
             ],
         });
 
+        let trace_ts = gpu.compute_scope("trace");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("rt_path_trace_pass"),
-            timestamp_writes: None,
+            timestamp_writes: trace_ts,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group0, &[]);
@@ -312,7 +316,6 @@ impl PathTracePipeline {
     /// Phase 2: builds bind group 1 with the TLAS bound at binding 4 instead of
     /// the BVH buffer. The shared kernel and group 0 are identical to the compute
     /// path.
-    #[cfg(feature = "hw_raytracer")]
     pub fn dispatch_hardware(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -321,6 +324,7 @@ impl PathTracePipeline {
         env: &Environment,
         width: u32,
         height: u32,
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
         let ctxt = Context::get();
 
@@ -387,9 +391,10 @@ impl PathTracePipeline {
             ],
         });
 
+        let trace_ts = gpu.compute_scope("trace");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("rt_path_trace_pass_hw"),
-            timestamp_writes: None,
+            timestamp_writes: trace_ts,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group0, &[]);

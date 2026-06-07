@@ -122,8 +122,13 @@ impl SobelEdgeHighlight {
         });
 
         // Load shader
-        let shader =
-            ctxt.create_shader_module(Some("sobel_shader"), include_str!("../builtin/sobel.wgsl"));
+        let shader = ctxt.create_shader_module(
+            Some("sobel_shader"),
+            &crate::builtin::compile_shader_with_common(
+                "package::sobel",
+                include_str!("../builtin/sobel.wgsl"),
+            ),
+        );
 
         // Vertex buffer layout
         let vertex_buffer_layout = wgpu::VertexBufferLayout {

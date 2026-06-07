@@ -2,3 +2,12 @@
 [default.extend-words]
 # Multiple Importance Sampling (a standard path-tracing term).
 MIS = "MIS"
+# Level Of Detail (mip levels / prefiltered roughness), a standard graphics term.
+lod = "lod"
+
+# Project-specific identifiers (local variable names) to leave untouched.
+[default.extend-identifiers]
+# Normalized distance, in the path-tracing light attenuation falloff.
+nd = "nd"
+# glTF occlusion texture handle.
+ot = "ot"

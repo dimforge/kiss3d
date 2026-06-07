@@ -12,7 +12,7 @@ EXAMPLES=(
     primitives
     primitives_scale
     primitives2d
-    multi_light
+    clustered_lights
     wireframe
     lines
     lines2d
@@ -32,12 +32,25 @@ EXAMPLES=(
     quad
     rectangle
     obj
+    gltf
     texturing
     texturing_mipmaps
     stereo
     post_processing
     hdr_bloom
     tonemapping
+    color_grading
+    antialiasing
+    material_pbr
+    fog
+    camera_modes
+    skybox
+    reflections
+    depth_of_field
+    transmission
+    mirror
+    mirror_sphere
+    parallax
     shadows
     transparency
     aov
@@ -57,6 +70,7 @@ EXAMPLES=(
     window
     multi_windows
     ui
+    inspector
 )
 
 echo "Running ${#EXAMPLES[@]} kiss3d examples..."
@@ -65,7 +79,7 @@ echo ""
 
 for example in "${EXAMPLES[@]}"; do
     echo "=== Running: $example ==="
-    cargo run --release --example "$example" --features egui
+    cargo run --release --example "$example" --features egui,rt_switcher
     echo ""
 done
 

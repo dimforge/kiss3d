@@ -6,15 +6,16 @@ pub use crate::resource::framebuffer_manager::{
 };
 pub use crate::resource::gpu_vector::{AllocationType, BufferType, GPUVec};
 pub use crate::resource::material::{
-    GpuData, Material2d, Material3d, RenderContext, RenderContext2d, RenderContext2dEncoder,
-    RenderPhase,
+    EnvLight, GpuData, Material2d, Material3d, ProbeData, ProbeLighting, RenderContext,
+    RenderContext2d, RenderContext2dEncoder, RenderPhase, ShadowResources,
 };
 pub use crate::resource::material_manager2d::MaterialManager2d;
 pub use crate::resource::material_manager3d::MaterialManager3d;
 pub use crate::resource::mesh2d::GpuMesh2d;
-pub use crate::resource::mesh3d::GpuMesh3d;
+pub use crate::resource::mesh3d::{GpuMesh3d, MorphTargets, SkinVertexData};
 pub use crate::resource::mesh_manager2d::MeshManager2d;
 pub use crate::resource::mesh_manager3d::MeshManager3d;
+pub use crate::resource::pipeline_cache::{multisample_state, PipelineCache};
 pub use crate::resource::texture_manager::{Texture, TextureManager, TextureWrapping};
 
 mod dynamic_buffer;
@@ -27,5 +28,6 @@ mod mesh2d;
 mod mesh3d;
 mod mesh_manager2d;
 mod mesh_manager3d;
+mod pipeline_cache;
 mod texture_manager;
 pub mod vertex_index;

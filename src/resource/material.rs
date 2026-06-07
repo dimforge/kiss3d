@@ -16,11 +16,18 @@ use std::any::Any;
 /// matching surfaces (and to pick the opaque vs. OIT pipeline).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum RenderPhase {
+    /// Depth + view-position prepass (single target), rendered before the opaque
+    /// pass to drive screen-space effects such as SSAO.
+    Prepass,
     /// Opaque surfaces (alpha == 1), plus wireframe/point overlays.
     #[default]
     Opaque,
     /// Transparent surfaces (alpha < 1), drawn into the OIT accumulation targets.
     Transparent,
+    /// Refractive (glass) surfaces, drawn into the resolved HDR scene after the
+    /// opaque pass so they can sample the scene behind them (screen-space
+    /// refraction). Single-sample; reads the transmission-background snapshot.
+    Transmission,
 }
 
 /// Context passed to materials during rendering.
@@ -38,12 +45,87 @@ pub struct RenderContext {
     pub viewport_width: u32,
     /// The viewport height in pixels.
     pub viewport_height: u32,
-    /// Shadow bind group (group 4) supplied by the window's shadow mapper.
+    /// Render-layer mask of the camera being rendered. An object is drawn only
+    /// when its own layer mask shares a bit with this one. `u32::MAX` (the
+    /// default) renders every layer.
+    pub render_layers: u32,
+    /// Forces back-face culling off for this pass. Set by the planar-reflector
+    /// mirror render, whose reflected projection flips triangle winding (so normal
+    /// back-face culling would render closed objects inside-out).
+    pub force_no_cull: bool,
+    /// Shadow-map GPU resources supplied by the window's shadow mapper, folded into
+    /// the object material's view (group 0) bind group.
     ///
-    /// When `None`, materials fall back to their own neutral "no shadows" bind
-    /// group so rendering stays correct when shadows are disabled. Cloning a
-    /// `wgpu::BindGroup` is cheap (it is a reference-counted handle).
-    pub shadow_bind_group: Option<wgpu::BindGroup>,
+    /// When `None`, materials fall back to their own neutral "no shadows" resources
+    /// so rendering stays correct when shadows are disabled. Cloning the handles is
+    /// cheap (they are reference-counted).
+    pub shadow: Option<ShadowResources>,
+}
+
+/// The shadow mapper's GPU resources, handed to the object material so it can bind
+/// them as part of its view (group 0) bind group — rather than a separate group, so
+/// the per-object deform group fits within WebGPU's 4-bind-group cap. All fields are
+/// cheap-to-clone reference-counted wgpu handles.
+#[derive(Clone)]
+pub struct ShadowResources {
+    /// Depth atlas array view (sampled for comparison).
+    pub atlas: wgpu::TextureView,
+    /// Comparison sampler for hardware PCF.
+    pub compare_sampler: wgpu::Sampler,
+    /// Shadow uniforms buffer.
+    pub uniform: wgpu::Buffer,
+    /// Colored-transmittance atlas array view.
+    pub transmittance: wgpu::TextureView,
+    /// Filtering sampler for the transmittance atlas.
+    pub transmittance_sampler: wgpu::Sampler,
+}
+
+/// The environment-lighting (IBL) resources a window supplies to materials each
+/// frame: a mip-chained equirectangular environment map plus its orientation and
+/// intensity. Materials that support image-based lighting consume this in
+/// [`Material3d::set_environment_lighting`].
+pub struct EnvLight<'a> {
+    /// View over the mip-chained equirectangular environment.
+    pub view: &'a wgpu::TextureView,
+    /// Sampler for the environment (trilinear).
+    pub sampler: &'a wgpu::Sampler,
+    /// Number of mip levels (max sampleable LOD is `mip_count - 1`).
+    pub mip_count: u32,
+    /// Luminance multiplier.
+    pub intensity: f32,
+    /// Y-axis rotation in radians (matches the skybox).
+    pub rotation: f32,
+}
+
+/// One reflection probe's placement, as supplied to materials each frame in
+/// [`ProbeLighting`]. Mirrors `renderer::ReflectionProbe` but decoupled from the
+/// renderer module so materials only depend on the trait crate.
+#[derive(Copy, Clone, Debug)]
+pub struct ProbeData {
+    /// World-space center (capture viewpoint).
+    pub center: Vec3,
+    /// Half-extents of the parallax/influence box (world AABB), centered on `center`.
+    pub half_extents: Vec3,
+    /// Soft-edge width (world units) over which the probe fades to the global env.
+    pub falloff: f32,
+    /// Luminance multiplier.
+    pub intensity: f32,
+    /// Y-axis rotation (radians), matching the skybox convention.
+    pub rotation: f32,
+    /// Array layer holding this probe's equirectangular map.
+    pub layer: u32,
+}
+
+/// The reflection-probe resources a window supplies to materials each frame: the
+/// shared mip-chained equirectangular probe array plus the active probe records.
+/// Consumed in [`Material3d::set_reflection_probes`].
+pub struct ProbeLighting<'a> {
+    /// View over the mip-chained equirectangular probe array (one layer per probe).
+    pub array_view: &'a wgpu::TextureView,
+    /// Active probes (at most `renderer::MAX_PROBES`).
+    pub probes: &'a [ProbeData],
+    /// Maximum sampleable LOD of the probe array (max roughness → this mip).
+    pub max_lod: f32,
 }
 
 /// Per-object GPU data for a material.
@@ -120,6 +202,56 @@ pub trait Material3d {
     /// keep this `false`, otherwise its pipeline will be incompatible with that pass.
     fn renders_in_transparent_phase(&self) -> bool {
         false
+    }
+
+    /// Supplies (or clears) the image-based-lighting environment for this frame.
+    ///
+    /// Called once per frame by the window with the active skybox environment, or
+    /// `None` when no skybox/IBL is set. Materials that don't support IBL ignore
+    /// it (the default no-op).
+    fn set_environment_lighting(&mut self, _env: Option<EnvLight<'_>>) {}
+
+    /// Supplies (or clears) the reflection probes for this frame: the shared
+    /// equirectangular probe array plus the active probe records. Reflective
+    /// surfaces inside a probe's influence box sample it (parallax-corrected)
+    /// instead of the global environment. `None` (or an empty probe list)
+    /// disables probes. Default no-op (materials without probe support).
+    fn set_reflection_probes(&mut self, _probes: Option<ProbeLighting<'_>>) {}
+
+    /// Supplies (or clears) the screen-space ambient-occlusion texture for this
+    /// frame. The material samples it per pixel to darken ambient lighting.
+    /// `None` disables it. Default no-op.
+    fn set_ssao(&mut self, _ao: Option<&wgpu::TextureView>) {}
+
+    /// Supplies (or clears) the transmission background — the resolved opaque scene
+    /// color (with a blurred mip chain) that refractive (glass) objects sample to
+    /// refract the scene behind them. `None` falls back to a placeholder. No-op by
+    /// default (materials without refractive-transmission support).
+    fn set_transmission_background(&mut self, _bg: Option<&wgpu::TextureView>) {}
+
+    /// Toggles reflection-probe *capture mode* for the next frame uniform: while
+    /// on, the material renders with the fixed-light (non-clustered) path, since
+    /// the per-face capture views have no clustered cull data. Default no-op.
+    fn set_capture_mode(&mut self, _on: bool) {}
+
+    /// Sets a world-space clip plane `(a, b, c, d)` for the next frame: fragments
+    /// with `dot((a,b,c), world_pos) + d < 0` are discarded. Used by reflector
+    /// capture to clip geometry behind the mirror. `None` disables it. Default no-op.
+    fn set_clip_plane(&mut self, _plane: Option<[f32; 4]>) {}
+
+    /// Supplies the clustered forward+ storage buffers for this frame (the light
+    /// list, per-cluster light grid, and global light-index list). Called by the
+    /// window after the light-culling compute pass when clustered lighting is
+    /// active; `force_rebind` is set when the light buffer was reallocated. Default
+    /// no-op (materials without clustered support, or backends that fall back to
+    /// the fixed-light path).
+    fn set_clustered_buffers(
+        &mut self,
+        _lights: &wgpu::Buffer,
+        _grid: &wgpu::Buffer,
+        _index: &wgpu::Buffer,
+        _force_rebind: bool,
+    ) {
     }
 
     /// Renders an object using this material (phase 3).

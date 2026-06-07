@@ -30,11 +30,12 @@ async fn main() {
     let intensities = [0.5_f32, 1.0, 2.0, 4.0, 8.0];
     for (i, &intensity) in intensities.iter().enumerate() {
         let x = (i as f32 - (intensities.len() as f32 - 1.0) * 0.5) * 2.5;
-        let mut sphere = scene.add_sphere(0.7);
-        sphere.translate(Vec3::new(x, 0.0, 0.0));
-        // Warm emissive color scaled past 1.0 for the bright ones.
-        sphere.set_color(Color::new(0.02, 0.02, 0.02, 1.0));
-        sphere.set_emissive(Color::new(intensity, intensity * 0.7, intensity * 0.3, 1.0));
+        scene
+            .add_sphere(0.7)
+            .translate(Vec3::new(x, 0.0, 0.0))
+            // Warm emissive color scaled past 1.0 for the bright ones.
+            .set_color(Color::new(0.02, 0.02, 0.02, 1.0))
+            .set_emissive(Color::new(intensity, intensity * 0.7, intensity * 0.3, 1.0));
     }
 
     // A non-emissive floor so the lit, sub-1.0 part of the image is visible too.

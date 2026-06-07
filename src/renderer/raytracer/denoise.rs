@@ -13,6 +13,16 @@
 //! The pass ping-pongs between two scratch storage buffers of the same shape as
 //! the accumulation buffer; the final iteration writes back into a buffer that
 //! the tonemap pass reads. Everything operates at the traced (guide) resolution.
+//!
+//! ## Cached bind groups
+//!
+//! The per-iteration uniforms (`width`, `height`, `step`, the demodulate/
+//! remodulate flags, the edge-stopping sigmas) and the bind groups are fully
+//! determined by the resolution and the iteration count, so they are built once
+//! and reused across frames — rebuilt only when the resolution or the iteration
+//! count changes. On a progressive renderer the denoiser runs every frame, so
+//! re-creating bind groups and re-uploading identical uniforms each frame was
+//! pure per-frame CPU/driver overhead.
 
 use bytemuck::{Pod, Zeroable};
 
@@ -41,22 +51,35 @@ struct DenoiseUniforms {
 }
 
 const PIXEL_SIZE: u64 = 16; // vec4<f32>
+const SIGMA_NORMAL: f32 = 64.0;
+const SIGMA_LUMINANCE: f32 = 4.0;
 
-/// Owns the à-trous compute pipeline and its two ping-pong scratch buffers.
+/// Cached per-iteration GPU state for a specific (resolution, iteration count).
+/// Rebuilt only when that key changes, then reused every frame.
+struct Cache {
+    width: u32,
+    height: u32,
+    iterations: usize,
+    /// Two scratch buffers (`array<vec4<f32>>`) the filter ping-pongs between.
+    scratch: [wgpu::Buffer; 2],
+    /// Per-iteration uniform buffers (held to keep them alive for the bind
+    /// groups that reference them; the shader reads them, this code does not).
+    _uniforms: Vec<wgpu::Buffer>,
+    /// Per-iteration bind groups.
+    bind_groups: Vec<wgpu::BindGroup>,
+}
+
+/// Owns the à-trous compute pipeline and the cached per-resolution state.
 pub struct Denoise {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
-    /// Per-iteration uniform buffers (one per possible iteration; sized lazily).
-    uniforms: Vec<wgpu::Buffer>,
-    /// Two scratch buffers (`array<vec4<f32>>`) the filter ping-pongs between.
-    scratch: [wgpu::Buffer; 2],
-    width: u32,
-    height: u32,
+    cache: Option<Cache>,
 }
 
 impl Denoise {
-    /// Builds the denoiser pipeline. Scratch buffers are (re)allocated lazily to
-    /// match the accumulation resolution on the first `run`.
+    /// Builds the denoiser pipeline. Scratch buffers, uniforms, and bind groups
+    /// are created lazily to match the accumulation resolution on the first
+    /// `run`.
     pub fn new() -> Denoise {
         let ctxt = Context::get();
 
@@ -78,7 +101,10 @@ impl Denoise {
 
         let shader = ctxt.create_shader_module(
             Some("rt_denoise_shader"),
-            include_str!("../../builtin/raytrace/denoise.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::denoise",
+                include_str!("../../builtin/raytrace/denoise.wgsl"),
+            ),
         );
 
         let pipeline = ctxt
@@ -95,13 +121,7 @@ impl Denoise {
         Denoise {
             pipeline,
             bind_group_layout,
-            uniforms: Vec::new(),
-            scratch: [
-                Self::make_scratch(1, 1, "rt_denoise_scratch0"),
-                Self::make_scratch(1, 1, "rt_denoise_scratch1"),
-            ],
-            width: 1,
-            height: 1,
+            cache: None,
         }
     }
 
@@ -114,83 +134,64 @@ impl Denoise {
         )
     }
 
-    /// Resizes the scratch buffers if the accumulation resolution changed.
-    fn ensure(&mut self, width: u32, height: u32) {
-        if width == self.width && height == self.height {
-            return;
+    /// (Re)builds the cached scratch buffers, uniforms, and bind groups if the
+    /// resolution or the iteration count changed.
+    ///
+    /// All cached state references either `accum.buffer` (stable while the
+    /// resolution is unchanged — `Accumulation::ensure` only recreates it on a
+    /// resize) or the scratch buffers, so the bind groups stay valid across
+    /// frames until the key changes.
+    fn ensure_cache(&mut self, accum: &Accumulation, iterations: usize) {
+        let width = accum.width;
+        let height = accum.height;
+
+        if let Some(c) = &self.cache {
+            if c.width == width && c.height == height && c.iterations == iterations {
+                return;
+            }
         }
-        self.scratch = [
+
+        let ctxt = Context::get();
+        let scratch = [
             Self::make_scratch(width, height, "rt_denoise_scratch0"),
             Self::make_scratch(width, height, "rt_denoise_scratch1"),
         ];
-        self.width = width;
-        self.height = height;
-    }
 
-    /// Lazily grows the pool of per-iteration uniform buffers to at least `n`.
-    fn ensure_uniforms(&mut self, n: usize) {
-        let ctxt = Context::get();
-        while self.uniforms.len() < n {
-            self.uniforms.push(ctxt.create_buffer_simple(
+        // One uniform buffer per iteration: each pass needs a distinct
+        // step/demodulate/remodulate. Written once here; constant across frames.
+        let mut uniforms = Vec::with_capacity(iterations);
+        let mut bind_groups = Vec::with_capacity(iterations);
+        for i in 0..iterations {
+            let uniform = ctxt.create_buffer_simple(
                 Some("rt_denoise_uniform"),
                 std::mem::size_of::<DenoiseUniforms>() as u64,
                 wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            ));
-        }
-    }
-
-    /// Runs `iterations` à-trous passes over the radiance in `accum`, returning a
-    /// reference to the storage buffer holding the denoised HDR radiance (laid
-    /// out exactly like `accum.buffer`, so the tonemap pass can read it directly).
-    ///
-    /// `iterations` must be at least 1; the caller is responsible for skipping
-    /// the denoiser entirely when it is disabled.
-    pub fn run<'a>(
-        &'a mut self,
-        encoder: &mut wgpu::CommandEncoder,
-        accum: &'a Accumulation,
-        iterations: u32,
-    ) -> &'a wgpu::Buffer {
-        let ctxt = Context::get();
-        let width = accum.width;
-        let height = accum.height;
-        self.ensure(width, height);
-
-        let iterations = iterations.max(1) as usize;
-        self.ensure_uniforms(iterations);
-
-        // Ping-pong: iteration 0 reads the raw accumulation buffer (demodulating
-        // on the fly) and writes scratch[0]; subsequent iterations alternate
-        // between the two scratch buffers. The final write lands in
-        // `scratch[(iterations - 1) % 2]`, which is what we return.
-        for i in 0..iterations {
-            let step = 1i32 << i as u32;
-            let demodulate = (i == 0) as u32;
-            let remodulate = (i == iterations - 1) as u32;
-
+            );
             ctxt.write_buffer(
-                &self.uniforms[i],
+                &uniform,
                 0,
                 bytemuck::bytes_of(&DenoiseUniforms {
                     width,
                     height,
-                    step,
-                    demodulate,
-                    remodulate,
-                    sigma_normal: 64.0,
-                    sigma_luminance: 4.0,
+                    step: 1i32 << i as u32,
+                    demodulate: (i == 0) as u32,
+                    remodulate: (i == iterations - 1) as u32,
+                    sigma_normal: SIGMA_NORMAL,
+                    sigma_luminance: SIGMA_LUMINANCE,
                     _pad0: 0.0,
                 }),
             );
 
+            // Iteration 0 reads the raw accumulation buffer (demodulating on the
+            // fly); later iterations alternate between the two scratch buffers.
             let src = if i == 0 {
                 &accum.buffer
             } else {
-                &self.scratch[(i - 1) % 2]
+                &scratch[(i - 1) % 2]
             };
-            let dst = &self.scratch[i % 2];
+            let dst = &scratch[i % 2];
 
-            let bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            bind_groups.push(ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("rt_denoise_bind_group"),
                 layout: &self.bind_group_layout,
                 entries: &[
@@ -210,21 +211,55 @@ impl Denoise {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: self.uniforms[i].as_entire_binding(),
+                        resource: uniform.as_entire_binding(),
                     },
                 ],
-            });
-
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("rt_denoise_pass"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+            }));
+            uniforms.push(uniform);
         }
 
-        &self.scratch[(iterations - 1) % 2]
+        self.cache = Some(Cache {
+            width,
+            height,
+            iterations,
+            scratch,
+            _uniforms: uniforms,
+            bind_groups,
+        });
+    }
+
+    /// Runs `iterations` à-trous passes over the radiance in `accum`, returning a
+    /// reference to the storage buffer holding the denoised HDR radiance (laid
+    /// out exactly like `accum.buffer`, so the tonemap pass can read it directly).
+    ///
+    /// `iterations` must be at least 1; the caller is responsible for skipping
+    /// the denoiser entirely when it is disabled or the image has converged.
+    pub fn run<'a>(
+        &'a mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        accum: &Accumulation,
+        iterations: u32,
+        gpu: &mut crate::renderer::timings::GpuTimer,
+    ) -> &'a wgpu::Buffer {
+        let iterations = iterations.max(1) as usize;
+        self.ensure_cache(accum, iterations);
+        let cache = self.cache.as_ref().expect("cache just ensured");
+
+        let groups_x = accum.width.div_ceil(8);
+        let groups_y = accum.height.div_ceil(8);
+        for bind_group in &cache.bind_groups {
+            let denoise_ts = gpu.compute_scope("denoise");
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("rt_denoise_pass"),
+                timestamp_writes: denoise_ts,
+            });
+            pass.set_pipeline(&self.pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.dispatch_workgroups(groups_x, groups_y, 1);
+        }
+
+        // The final iteration's destination is `scratch[(iterations - 1) % 2]`.
+        &self.cache.as_ref().expect("cache ensured").scratch[(iterations - 1) % 2]
     }
 }
 

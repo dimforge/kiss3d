@@ -93,7 +93,10 @@ impl GpuData for NormalMaterialGpuData {
 
 /// A material that draws normals of an object.
 pub struct NormalMaterial {
-    pipeline: wgpu::RenderPipeline,
+    /// The scene's MSAA sample count is only known at render time and may differ
+    /// between windows, so the pipeline is built lazily per sample count instead
+    /// of being baked at construction.
+    pipeline: PipelineCache,
     frame_bind_group_layout: wgpu::BindGroupLayout,
     object_bind_group_layout: wgpu::BindGroupLayout,
 }
@@ -169,51 +172,52 @@ impl NormalMaterial {
             },
         ];
 
-        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("custom_material_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &vertex_buffer_layouts,
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    // The scene is rendered into the linear HDR film (resolved to the
-                    // surface by the tonemap pass), so custom materials must target
-                    // the HDR render format, not the surface format.
-                    format: Context::render_format(),
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Context::depth_format(),
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+        let pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("custom_material_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &vertex_buffer_layouts,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        // The scene is rendered into the linear HDR film (resolved to the
+                        // surface by the tonemap pass), so custom materials must target
+                        // the HDR render format, not the surface format.
+                        format: Context::render_format(),
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Context::depth_format(),
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                // Must match the scene's MSAA sample count or the pipeline is
+                // incompatible with the render pass.
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         NormalMaterial {
@@ -342,7 +346,7 @@ impl Material3d for NormalMaterial {
         _instances: &mut InstancesBuffer3d,
         gpu_data: &mut dyn GpuData,
         render_pass: &mut wgpu::RenderPass<'_>,
-        _context: &RenderContext,
+        context: &RenderContext,
     ) {
         if !data.surface_rendering_active() {
             return;
@@ -386,7 +390,8 @@ impl Material3d for NormalMaterial {
             .as_ref()
             .expect("prepare() must be called before render()");
 
-        render_pass.set_pipeline(&self.pipeline);
+        let pipeline = self.pipeline.get(context.sample_count);
+        render_pass.set_pipeline(&pipeline);
         render_pass.set_bind_group(0, frame_bind_group, &[]);
         render_pass.set_bind_group(1, object_bind_group, &[]);
 

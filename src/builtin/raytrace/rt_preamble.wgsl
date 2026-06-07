@@ -27,7 +27,8 @@ const BSDF_GLASS: u32 = 1u;       // smooth/rough dielectric (refraction)
 const BSDF_METAL: u32 = 2u;       // pure conductor (reflection only)
 const BSDF_EMISSIVE: u32 = 3u;    // emitter (treated as opaque shading-wise)
 
-// Unified Disney-style material, std430 96-byte layout (6 x vec4).
+// Unified Disney-style material, std430 128-byte layout (8 x vec4). Field order
+// MUST match the Rust `RtMaterial`.
 struct RtMaterial {
     base_color: vec4<f32>,
     emissive: vec4<f32>,
@@ -39,11 +40,20 @@ struct RtMaterial {
     // specular tint (rgb) + bsdf type packed in w (as a bitcast u32).
     specular_tint: vec3<f32>,
     bsdf_type: u32,
-    // subsurface factor, subsurface radius, then two reserved scalars.
+    // subsurface factor, subsurface radius, dielectric reflectance remap, and the
+    // per-object light-layer bitmask.
     subsurface: f32,
     subsurface_radius: f32,
+    reflectance: f32,
+    light_layers: u32,
+    // Beer-Lambert volume absorption color (rgb) + distance (<= 0 disables it).
+    attenuation_color: vec3<f32>,
+    attenuation_distance: f32,
+    // clearcoat strength, clearcoat roughness, shadow-casting flag (1 = casts), pad.
+    clearcoat: f32,
+    clearcoat_roughness: f32,
+    casts_shadows: u32,
     pad0: f32,
-    pad1: f32,
     // Texture-array layer indices (-1 = none): albedo, normal, MR, emissive.
     albedo_tex: i32,
     normal_tex: i32,
@@ -62,7 +72,12 @@ struct RtLight {
     outer_cone_cos: f32,
     // Sphere radius for soft shadows (0 = delta point/spot light).
     radius: f32,
-    pad: f32,
+    // Light-layer bitmask and shadow-casting flag (1 = trace a shadow ray).
+    layers: u32,
+    casts_shadows: u32,
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
 };
 
 struct FrameUniforms {
@@ -89,6 +104,14 @@ struct FrameUniforms {
     // environment map is bound. Cosmetic only — it does NOT light the scene (unlike
     // an HDRI environment), so it never tints objects via indirect bounces.
     background: vec4<f32>,
+    // Ambient light color (rgb; a unused), multiplying the scalar `ambient` fill.
+    ambient_color: vec4<f32>,
+    // Distance fog: color (rgb) + strength (a), and the falloff encoding
+    // (mode, param_a, param_b, height_falloff). mode == 0 disables fog.
+    fog_color: vec4<f32>,
+    fog_params: vec4<f32>,
+    // Misc flags: x = 1 when some object opts out of casting shadows.
+    flags: vec4<u32>,
 };
 
 // Result of a closest-hit query. `valid == false` means the ray escaped.

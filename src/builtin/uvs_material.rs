@@ -2,7 +2,10 @@ use crate::camera::Camera3d;
 use crate::context::Context;
 use crate::light::LightCollection;
 use crate::resource::vertex_index::VERTEX_INDEX_FORMAT;
-use crate::resource::{DynamicUniformBuffer, GpuData, GpuMesh3d, Material3d, RenderContext};
+use crate::resource::{
+    multisample_state, DynamicUniformBuffer, GpuData, GpuMesh3d, Material3d, PipelineCache,
+    RenderContext,
+};
 use crate::scene::{InstancesBuffer3d, ObjectData3d};
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat3, Pose3, Vec3};
@@ -64,10 +67,10 @@ impl GpuData for UvsMaterialGpuData {
 /// - Frame uniforms (view, projection) are written once per frame
 /// - Object uniforms are accumulated in a dynamic buffer and flushed once
 pub struct UvsMaterial {
-    /// Pipeline with backface culling enabled
-    pipeline_cull: wgpu::RenderPipeline,
-    /// Pipeline with backface culling disabled
-    pipeline_no_cull: wgpu::RenderPipeline,
+    /// Pipeline with backface culling enabled (lazily built per MSAA sample count)
+    pipeline_cull: PipelineCache,
+    /// Pipeline with backface culling disabled (lazily built per MSAA sample count)
+    pipeline_no_cull: PipelineCache,
     object_bind_group_layout: wgpu::BindGroupLayout,
 
     // === Dynamic uniform buffer system ===
@@ -141,79 +144,86 @@ impl UvsMaterial {
         let shader =
             ctxt.create_shader_module(Some("uvs_material_shader"), include_str!("uvs.wgsl"));
 
-        // Vertex buffer layouts
-        let vertex_buffer_layouts = [
-            // Vertex positions
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                }],
-            },
-            // UVs
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                }],
-            },
-        ];
+        // Shared pipeline builder, parameterized by cull mode and MSAA sample count.
+        // Wrapped in `Rc` so the cull and no-cull `PipelineCache`s can share it; each
+        // builds its pipeline lazily on first use for a given sample count.
+        let build = std::rc::Rc::new(
+            move |cull_mode: Option<wgpu::Face>, label: &'static str, sample_count: u32| {
+                let ctxt = Context::get();
+                // Vertex buffer layouts
+                let vertex_buffer_layouts = [
+                    // Vertex positions
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 0,
+                            format: wgpu::VertexFormat::Float32x3,
+                        }],
+                    },
+                    // UVs
+                    wgpu::VertexBufferLayout {
+                        array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                        step_mode: wgpu::VertexStepMode::Vertex,
+                        attributes: &[wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 1,
+                            format: wgpu::VertexFormat::Float32x2,
+                        }],
+                    },
+                ];
 
-        // Helper to create a pipeline with specific cull mode
-        let create_pipeline = |cull_mode: Option<wgpu::Face>, label: &str| {
-            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &vertex_buffer_layouts,
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                        blend: Some(wgpu::BlendState::REPLACE),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: Context::depth_format(),
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview_mask: None,
-                cache: None,
-            })
-        };
+                ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &vertex_buffer_layouts,
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                            blend: Some(wgpu::BlendState::REPLACE),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: Context::depth_format(),
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: multisample_state(sample_count),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            },
+        );
 
-        let pipeline_cull = create_pipeline(Some(wgpu::Face::Back), "uvs_material_pipeline_cull");
-        let pipeline_no_cull = create_pipeline(None, "uvs_material_pipeline_no_cull");
+        let pipeline_cull = PipelineCache::new({
+            let build = build.clone();
+            move |sc| build(Some(wgpu::Face::Back), "uvs_material_pipeline_cull", sc)
+        });
+        let pipeline_no_cull = PipelineCache::new({
+            let build = build.clone();
+            move |sc| build(None, "uvs_material_pipeline_no_cull", sc)
+        });
 
         // === Create shared dynamic buffer resources ===
 
@@ -377,7 +387,7 @@ impl Material3d for UvsMaterial {
         _instances: &mut InstancesBuffer3d,
         gpu_data: &mut dyn GpuData,
         render_pass: &mut wgpu::RenderPass<'_>,
-        _context: &RenderContext,
+        context: &RenderContext,
     ) {
         if !data.surface_rendering_active() {
             return;
@@ -420,11 +430,11 @@ impl Material3d for UvsMaterial {
 
         // Select pipeline based on backface culling setting
         let pipeline = if data.backface_culling_enabled() {
-            &self.pipeline_cull
+            self.pipeline_cull.get(context.sample_count)
         } else {
-            &self.pipeline_no_cull
+            self.pipeline_no_cull.get(context.sample_count)
         };
-        render_pass.set_pipeline(pipeline);
+        render_pass.set_pipeline(&pipeline);
         render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
         // Use dynamic offset for object uniforms!
         render_pass.set_bind_group(1, object_bind_group, &[object_offset]);
