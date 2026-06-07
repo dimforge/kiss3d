@@ -451,6 +451,7 @@ fn point_cube_face(dir: vec3<f32>) -> u32 {
 // `vec3(1.0)` means fully lit.
 fn compute_shadow(
     light_index: u32, world_pos: vec3<f32>, dpos_dx: vec3<f32>, dpos_dy: vec3<f32>,
+    receive_transmit: bool,
 ) -> vec3<f32> {
     if shadow.shadows_enabled < 0.5 {
         return vec3<f32>(1.0);
@@ -476,17 +477,19 @@ fn compute_shadow(
         s = sample_shadow_layer(ls.base_view, world_pos, dpos_dx, dpos_dy);
     }
 
-    // Opaque visibility scales the (colored) translucent transmittance.
-    return vec3<f32>(s.vis) * s.transmit;
+    // Opaque visibility scales the (colored) translucent transmittance — but only
+    // for receivers that should be tinted (opaque ones). A translucent receiver
+    // passes `receive_transmit = false` so it isn't tinted by the transmittance
+    // atlas it itself wrote.
+    let transmit = select(vec3<f32>(1.0), s.transmit, receive_transmit);
+    return vec3<f32>(s.vis) * transmit;
 }
 // === END SHADOW MAPPING block ===
 
-// Vertex input
-struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) tex_coord: vec2<f32>,
-    @location(2) normal: vec3<f32>,
-}
+// Vertex input. The struct body (and, for the skinned variant, the joint palette
+// binding) is injected by the Rust side so the skinned and non-skinned pipelines
+// can share the rest of this shader. See `build_object_shader_src`.
+//__VERTEX_INPUT__
 
 // Instance input
 struct InstanceInput {
@@ -618,39 +621,9 @@ fn calculate_spot_attenuation(
 }
 
 // === Vertex Shader ===
-
-@vertex
-fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
-    var out: VertexOutput;
-
-    // Build deformation matrix from instance data
-    let deformation = mat3x3<f32>(
-        instance.inst_def_0,
-        instance.inst_def_1,
-        instance.inst_def_2
-    );
-
-    // Transform position
-    let scaled_pos = object.scale * vertex.position;
-    let deformed_pos = deformation * scaled_pos;
-    let model_pos = object.transform * vec4<f32>(deformed_pos, 1.0);
-    let world_pos = vec4<f32>(instance.inst_tra, 0.0) + model_pos;
-
-    out.clip_position = frame.proj * frame.view * world_pos;
-    out.world_pos = world_pos.xyz;
-
-    // Transform normal to world space
-    out.world_normal = normalize(deformation * object.ntransform * vertex.normal);
-
-    // View-space position for lighting calculations
-    let view_pos = frame.view * world_pos;
-    out.view_pos = view_pos.xyz / view_pos.w;
-
-    out.tex_coord = vertex.tex_coord;
-    out.vert_color = instance.inst_color;
-
-    return out;
-}
+// The vertex entry point (`vs_main`) is injected here by the Rust side; the
+// skinned variant replaces the instance-transform path with a joint-palette skin.
+//__VS_MAIN__
 
 // === Fragment Shader ===
 
@@ -668,73 +641,84 @@ fn cotangent_frame(
     return mat3x3<f32>(t * invmax, b * invmax, n);
 }
 
-// Parallax-occlusion mapping: marches the tangent-space view ray against the
-// height field and returns the displaced texture coordinate. `ts_view` is the
-// view direction in tangent space; the height map is grayscale (brighter =
-// higher, so depth = 1 - height).
+// Parallax mapping: marches the tangent-space view ray against the height field
+// and returns the displaced texture coordinate, so depth behaves consistently
+// across the whole view-angle range.
+//
+// `ts_view` is the fragment->camera direction in tangent space. The height map is
+// grayscale; we treat `depth = 1 - height` (brighter = at the surface) as the
+// sampled depth. As the ray sinks deeper the sampled UV walks along
+// +ts_view.xy — toward the viewer's lateral direction — so raised relief leans
+// toward the camera (the sign is set for this engine's cotangent frame; the
+// opposite walk would invert perceived depth and fight the normal-map shading).
 fn parallax_uv(uv0: vec2<f32>, ts_view: vec3<f32>) -> vec2<f32> {
     let scale = object.parallax.y;
     if scale <= 0.0 {
         return uv0;
     }
     // Layer count: most layers at grazing angles (steepness → 0), one when
-    // looking head-on (no parallax needed). Clamped to the loop's hard cap.
-    let max_layers = clamp(object.parallax.z, 4.0, 64.0);
+    // looking head-on. Clamped to the loop's hard cap.
+    let max_layers = clamp(object.parallax.z, 1.0, 64.0);
     let steepness = abs(ts_view.z);
     let num_layers = clamp(mix(max_layers, 1.0, steepness), 1.0, 64.0);
     let layer_depth = 1.0 / num_layers;
-    // Offset limiting: the per-layer UV shift divides by the view steepness, but
-    // we floor it so near-silhouette (grazing) fragments can't amplify the offset
-    // into runaway texture "swimming" — the screen-space tangent frame is least
-    // reliable exactly there.
-    let p = ts_view.xy / max(steepness, 0.35) * scale;
-    let delta_uv = p / num_layers;
+    // delta_uv = depth_scale * layer_depth * Vt.xy / steepness.
+    // We divide by the raw steepness (no offset-limiting floor) so depth keeps
+    // growing toward grazing angles; the tiny epsilon only guards
+    // against a division by zero on fragments that are essentially edge-on.
+    var delta_uv = scale * layer_depth * ts_view.xy / max(steepness, 1e-4);
 
     var cur_layer_depth = 0.0;
     var cur_uv = uv0;
     var cur_depth = 1.0 - textureSampleLevel(t_height, s_height, cur_uv, 0.0).r;
 
-    // Linear (steep) search. Hard 64-iteration cap (WGSL needs a bounded loop);
-    // also stops at `num_layers` or once the ray crosses the height field.
+    // Steep parallax: march until the ray crosses the height field. Hard
+    // 64-iteration cap (WGSL needs a bounded loop); also stops at `num_layers`.
     let n = i32(num_layers);
     for (var i = 0; i < 64; i = i + 1) {
-        if i >= n || cur_layer_depth >= cur_depth {
+        if i > n || cur_depth <= cur_layer_depth {
             break;
         }
-        cur_uv -= delta_uv;
-        cur_depth = 1.0 - textureSampleLevel(t_height, s_height, cur_uv, 0.0).r;
         cur_layer_depth += layer_depth;
+        cur_uv += delta_uv;
+        cur_depth = 1.0 - textureSampleLevel(t_height, s_height, cur_uv, 0.0).r;
     }
 
     // Relief mapping (parallax.w >= 1): binary-search refinement around the
-    // crossing for a sharper, more accurate intersection.
+    // crossing for a sharper, more accurate intersection (relief mapping).
     if object.parallax.w > 0.5 {
-        var step = delta_uv * 0.5;
-        var ld_step = layer_depth * 0.5;
-        var uv = cur_uv;
-        var ld = cur_layer_depth;
-        for (var k = 0; k < 8; k = k + 1) {
-            let h = 1.0 - textureSampleLevel(t_height, s_height, uv, 0.0).r;
-            if ld < h {
-                uv -= step;
-                ld += ld_step;
-            } else {
-                uv += step;
-                ld -= ld_step;
+        // parallax.w carries the relief search-step count (max_steps).
+        let relief_steps = i32(object.parallax.w);
+        var d_uv = delta_uv * 0.5;
+        var d_depth = layer_depth * 0.5;
+        cur_uv -= d_uv;
+        cur_layer_depth -= d_depth;
+        // Hard 64-iteration cap (WGSL needs a statically bounded loop).
+        for (var k = 0; k < 64; k = k + 1) {
+            if k >= relief_steps {
+                break;
             }
-            step *= 0.5;
-            ld_step *= 0.5;
+            let td = 1.0 - textureSampleLevel(t_height, s_height, cur_uv, 0.0).r;
+            d_uv *= 0.5;
+            d_depth *= 0.5;
+            if td > cur_layer_depth {
+                cur_uv += d_uv;
+                cur_layer_depth += d_depth;
+            } else {
+                cur_uv -= d_uv;
+                cur_layer_depth -= d_depth;
+            }
         }
-        return uv;
+        return cur_uv;
     }
 
-    // Occlusion mapping: interpolate between the last two samples.
-    let prev_uv = cur_uv + delta_uv;
-    let after = cur_depth - cur_layer_depth;
-    let before =
+    // Parallax-occlusion mapping: interpolate between the last two samples.
+    let prev_uv = cur_uv - delta_uv;
+    let next_depth = cur_depth - cur_layer_depth;
+    let prev_depth =
         (1.0 - textureSampleLevel(t_height, s_height, prev_uv, 0.0).r) - cur_layer_depth + layer_depth;
-    let weight = after / (after - before);
-    return mix(cur_uv, prev_uv, clamp(weight, 0.0, 1.0));
+    let weight = next_depth / (next_depth - prev_depth);
+    return mix(cur_uv, prev_uv, weight);
 }
 
 // Shades the fragment, returning (linear HDR color, alpha). Shared by the opaque
@@ -769,6 +753,14 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     let base_color = in.vert_color * object.color;
     let albedo = (albedo_tex * base_color).rgb;
 
+    // A translucent surface (Blend/Premultiplied with alpha < 1) should NOT receive
+    // the colored transmittance term: it itself writes the transmittance atlas, so
+    // tinting its own shading by it would over-saturate it relative to its opaque
+    // appearance. The colored shadow still lands on opaque receivers. Opaque/Mask
+    // surfaces receive the full (tinted) shadow.
+    let amode = u32(object.alpha_mode + 0.5);
+    let receives_transmit = !((amode == 2u || amode == 3u) && base_color.a < 1.0);
+
     // Get PBR parameters - either from textures or uniforms
     var metallic = object.metallic;
     var roughness = object.roughness;
@@ -788,7 +780,12 @@ fn shade(in: VertexOutput) -> vec4<f32> {
 
     if object.has_normal_map > 0.5 {
         let normal_sample = textureSample(t_normal, s_normal, uv).rgb;
-        let tangent_normal = normal_sample * 2.0 - 1.0;
+        var tangent_normal = normal_sample * 2.0 - 1.0;
+        // Normal maps use the OpenGL convention (green = +Y pointing "up" in the
+        // image), but our texture V increases downward (V=0 at the top) and the
+        // cotangent frame's bitangent follows +V — so the green channel must be
+        // negated, otherwise all relief reads inverted (bumps look like dents).
+        tangent_normal.y = -tangent_normal.y;
         // UV-aligned cotangent frame (same basis parallax uses), so tangent-space
         // normals are oriented consistently with the texture coordinates.
         let tbn = cotangent_frame(N, dpos_dx, dpos_dy, duv_dx, duv_dy);
@@ -939,7 +936,7 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         let diffuse_wrap = max(NdotL_raw * (1.0 - wrap) + wrap, 0.0);
 
         // === SHADOW MAPPING: attenuate this light by its shadow-map visibility ===
-        let shadow_factor = compute_shadow(i, in.world_pos, dpos_dx, dpos_dy);
+        let shadow_factor = compute_shadow(i, in.world_pos, dpos_dx, dpos_dy, receives_transmit);
         // === END SHADOW MAPPING ===
 
         let radiance = light.color * light_intensity * attenuation * shadow_factor;

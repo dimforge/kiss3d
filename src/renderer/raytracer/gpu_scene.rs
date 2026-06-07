@@ -52,6 +52,10 @@ pub struct GpuScene {
     pub num_lights: u32,
     /// Number of emissive triangles actually present (the buffer may be padded).
     pub num_emitters: u32,
+    /// Whether any material is translucent (`base_color.a < 1`). When false the
+    /// kernel uses a cheap binary occlusion test for shadow rays; when true it
+    /// accumulates colored transmittance through translucent occluders.
+    pub has_translucent: bool,
     /// Content hash of the [`RtScene`] this was built from.
     pub hash: u64,
 
@@ -220,6 +224,7 @@ impl GpuScene {
             num_triangles: scene.mesh_triangles.len() as u32,
             num_lights: scene.lights.len() as u32,
             num_emitters: scene.emitters.len() as u32,
+            has_translucent: scene.materials.iter().any(|m| m.base_color[3] < 1.0),
             hash: scene.hash,
             #[cfg(feature = "hw_raytracer")]
             _blas: Vec::new(),
@@ -424,6 +429,7 @@ impl GpuScene {
             num_triangles: scene.mesh_triangles.len() as u32,
             num_lights: scene.lights.len() as u32,
             num_emitters: scene.emitters.len() as u32,
+            has_translucent: scene.materials.iter().any(|m| m.base_color[3] < 1.0),
             hash: scene.hash,
             _blas: blases,
             tlas: Some(tlas),

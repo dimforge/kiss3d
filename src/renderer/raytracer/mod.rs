@@ -146,6 +146,15 @@ impl RayTracer {
         Self::with_backend(Self::pick_backend())
     }
 
+    /// Creates a new path tracer that is enabled or not.
+    ///
+    /// If it is marked as disabled, it will use the raster pipeline instead of path tracing.
+    pub fn with_enabled(enabled: bool) -> RayTracer {
+        let mut result = Self::default();
+        result.enabled = enabled;
+        result
+    }
+
     /// Creates a path tracer using a specific intersection backend.
     fn with_backend(backend: RayBackend) -> RayTracer {
         // The accumulation buffer is bound as a single storage buffer, so it is
@@ -472,7 +481,16 @@ impl RayTracer {
             lens_radius: self.lens_radius,
             focus_distance: self.focus_distance,
             has_env: env_present as u32,
-            background: [background.r, background.g, background.b, 1.0],
+            // background.a is otherwise unused (only .rgb is read for the miss
+            // color); it carries the "scene has translucent casters" flag so the
+            // kernel's shadow rays accumulate colored transmittance only when
+            // needed, keeping fully-opaque scenes on the cheap binary-occlusion path.
+            background: [
+                background.r,
+                background.g,
+                background.b,
+                if gpu_scene.has_translucent { 1.0 } else { 0.0 },
+            ],
         };
         self.pipeline.write_uniforms(&uniforms);
 

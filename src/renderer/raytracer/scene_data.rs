@@ -330,6 +330,36 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
         let emissive = odata.emissive();
         let tint = odata.specular_tint();
 
+        // Whether this object is a skinned mesh whose palette is ready: if so its
+        // geometry is CPU-skinned into world space below.
+        let use_skin = odata.has_skin()
+            && mesh.has_skin_vertices()
+            && odata.skin().is_some_and(|s| !s.palette().is_empty());
+
+        // CPU morph targets: the path tracer has no GPU morph either, so blend the
+        // weighted position/normal deltas into the base mesh here (before any
+        // skinning), mirroring the deform vertex shader. `local_pos`/`local_nrm`
+        // then return the morphed value, or the base value when not morphed.
+        let morph_weights = odata.morph_weights();
+        let morphed: Option<(Vec<Vec3>, Option<Vec<Vec3>>)> =
+            if mesh.has_morph() && morph_weights.iter().any(|&w| w != 0.0) {
+                cpu_morph(&mesh, coords, normals, morph_weights)
+            } else {
+                None
+            };
+        let local_pos = |i: usize| -> Vec3 {
+            match &morphed {
+                Some((p, _)) => p[i],
+                None => coords[i],
+            }
+        };
+        let local_nrm = |i: usize| -> Vec3 {
+            match &morphed {
+                Some((_, Some(n))) => n[i],
+                _ => normals.and_then(|n| n.get(i)).copied().unwrap_or(Vec3::Y),
+            }
+        };
+
         // A non-instanced object still carries one default instance (identity
         // deformation, zero offset, white color); an object with `set_instances`
         // carries one entry per copy. The path tracer bakes a separate world-space
@@ -429,18 +459,56 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
             // Store the mesh once in LOCAL space; place copies via instances. Both
             // backends use this representation (compute builds a CPU two-level BVH;
             // the hardware backend builds one BLAS per mesh + a TLAS of instances).
+            // A skinned mesh is deformed per-frame by its joint palette. The path
+            // tracer has no GPU skinning, so we CPU-skin the vertices into WORLD
+            // space here and place the mesh with an identity instance transform.
+            // (The skinned rasterizer ignores the mesh node + instance transforms
+            // too, so a single world-space copy matches it.)
+            let skinned_verts: Option<Vec<(Vec3, Vec3)>> = if use_skin {
+                let skin = odata.skin().unwrap();
+                let palette = skin.palette();
+                let joints_lock = mesh.skin_joints().unwrap().read().unwrap();
+                let weights_lock = mesh.skin_weights().unwrap().read().unwrap();
+                match (joints_lock.data().as_ref(), weights_lock.data().as_ref()) {
+                    (Some(joints), Some(weights)) => Some(
+                        (0..coords.len())
+                            .map(|i| {
+                                let local_n = local_nrm(i);
+                                let m = skin_matrix(palette, joints[i], weights[i]);
+                                let wp = m.transform_point3(local_pos(i));
+                                let wn = Mat3::from_mat4(m) * local_n;
+                                let wn = if wn.length_squared() > 1.0e-12 {
+                                    wn.normalize()
+                                } else {
+                                    local_n
+                                };
+                                (wp, wn)
+                            })
+                            .collect(),
+                    ),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            // A successfully-skinned mesh is already in world space.
+            let skinned = skinned_verts.is_some();
+
             let mesh_id = out.mesh_ranges.len() as u32;
             let vert_start = out.mesh_vertices.len() as u32;
-            for (i, &local_pos) in coords.iter().enumerate() {
-                let local_n = normals.and_then(|n| n.get(i)).copied().unwrap_or(Vec3::Y);
+            for i in 0..coords.len() {
+                let (pos, normal) = match &skinned_verts {
+                    Some(sv) => sv[i],
+                    None => (local_pos(i), local_nrm(i)),
+                };
                 let uv = uvs
                     .and_then(|u| u.get(i))
                     .copied()
                     .unwrap_or(glamx::Vec2::ZERO);
                 out.mesh_vertices.push(RtVertex {
-                    position: [local_pos.x, local_pos.y, local_pos.z],
+                    position: [pos.x, pos.y, pos.z],
                     u: uv.x,
-                    normal: [local_n.x, local_n.y, local_n.z],
+                    normal: [normal.x, normal.y, normal.z],
                     v: uv.y,
                 });
             }
@@ -460,8 +528,15 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
                 tri_count: faces.len() as u32,
             });
 
-            for inst in 0..num_instances {
-                let m = instance_transform(inst);
+            // Skinned meshes are baked in world space → a single identity instance.
+            // Non-skinned meshes keep their per-instance world placements.
+            let instance_count = if skinned { 1 } else { num_instances };
+            for inst in 0..instance_count {
+                let m = if skinned {
+                    Mat4::IDENTITY
+                } else {
+                    instance_transform(inst)
+                };
                 let material_id = out.materials.len() as u32;
                 out.materials.push(instance_material(inst));
                 out.instances.push(RtInstance {
@@ -477,9 +552,17 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
                 // Bake this instance's emissive triangles into world-space emitters.
                 if emissive_obj {
                     for f in faces {
-                        let p0 = m.transform_point3(coords[f[0] as usize]);
-                        let p1 = m.transform_point3(coords[f[1] as usize]);
-                        let p2 = m.transform_point3(coords[f[2] as usize]);
+                        // Skinned vertices are already world-space; otherwise place
+                        // the local vertex by the instance transform.
+                        let world = |idx: u32| -> Vec3 {
+                            match &skinned_verts {
+                                Some(sv) => sv[idx as usize].0,
+                                None => m.transform_point3(local_pos(idx as usize)),
+                            }
+                        };
+                        let p0 = world(f[0]);
+                        let p1 = world(f[1]);
+                        let p2 = world(f[2]);
                         out.emitters.push(RtEmitter {
                             p0: p0.to_array(),
                             _pad0: 0.0,
@@ -497,6 +580,8 @@ pub fn gather(scene: &SceneNode3d, lights: &LightCollection) -> RtScene {
 
         hash_object(&mut hasher, pose, scale, odata, coords.len(), faces.len());
         hash_instances(&mut hasher, &instances);
+        hash_skin(&mut hasher, odata);
+        hash_morph(&mut hasher, odata);
     });
 
     // Lights also influence the rendered image; fold them into the hash so a
@@ -539,6 +624,8 @@ pub fn scene_hash(scene: &SceneNode3d, lights: &LightCollection) -> u64 {
         let odata = obj.data();
         hash_object(&mut hasher, pose, scale, odata, ncoords, nfaces);
         hash_instances(&mut hasher, &obj.instances().borrow());
+        hash_skin(&mut hasher, odata);
+        hash_morph(&mut hasher, odata);
     });
 
     for cl in &lights.lights {
@@ -553,6 +640,86 @@ pub fn scene_hash(scene: &SceneNode3d, lights: &LightCollection) -> u64 {
 /// colors) into the change hash, so adding/moving/recoloring instances rebuilds the
 /// GPU scene and resets accumulation. Must hash exactly the same bytes in [`gather`]
 /// and [`scene_hash`].
+/// The blended skinning matrix for one vertex: a weight-normalized combination of
+/// its (up to four) joint palette matrices. Out-of-range joint indices fall back to
+/// identity. Mirrors the skinned vertex shader so the path tracer and rasterizer
+/// agree.
+fn skin_matrix(palette: &[Mat4], joints: [u32; 4], weights: [f32; 4]) -> Mat4 {
+    let wsum = weights[0] + weights[1] + weights[2] + weights[3];
+    let inv = if wsum > 0.0 { 1.0 / wsum } else { 1.0 };
+    let get = |j: u32| palette.get(j as usize).copied().unwrap_or(Mat4::IDENTITY);
+    get(joints[0]) * (weights[0] * inv)
+        + get(joints[1]) * (weights[1] * inv)
+        + get(joints[2]) * (weights[2] * inv)
+        + get(joints[3]) * (weights[3] * inv)
+}
+
+/// Folds a skinned object's joint-matrix palette into the change hash, so an
+/// animated pose rebuilds the path-traced scene (and resets accumulation). Must
+/// hash the same bytes in [`gather`] and [`scene_hash`]. No-op for non-skinned
+/// objects.
+fn hash_skin(h: &mut Fnv, odata: &crate::scene::ObjectData3d) {
+    if let Some(skin) = odata.skin() {
+        for m in skin.palette() {
+            for c in m.to_cols_array() {
+                h.write_f32(c);
+            }
+        }
+    }
+}
+
+/// CPU-applies morph-target weights to the base mesh, returning blended local
+/// positions and — when the mesh carries normal deltas — blended normals. Mirrors
+/// the deform vertex shader so the path tracer matches the rasterizer. Returns
+/// `None` if the morph deltas aren't CPU-resident.
+fn cpu_morph(
+    mesh: &crate::resource::GpuMesh3d,
+    coords: &[Vec3],
+    normals: Option<&Vec<Vec3>>,
+    weights: &[f32],
+) -> Option<(Vec<Vec3>, Option<Vec<Vec3>>)> {
+    let nv = mesh.morph_vertex_count();
+    let nt = mesh.morph_target_count().min(weights.len());
+    let pos_lock = mesh.morph_positions()?.read().unwrap();
+    let mpos = pos_lock.data().as_ref()?;
+    let nrm_lock = mesh.morph_normals().map(|n| n.read().unwrap());
+    let mnrm = nrm_lock.as_ref().and_then(|g| g.data().as_ref());
+
+    let count = coords.len().min(nv);
+    let mut positions = coords.to_vec();
+    let mut out_normals = mnrm.is_some().then(|| match normals {
+        Some(n) => n.clone(),
+        None => vec![Vec3::Y; coords.len()],
+    });
+
+    for (t, &w) in weights.iter().take(nt).enumerate() {
+        if w == 0.0 {
+            continue;
+        }
+        let base = t * nv;
+        for v in 0..count {
+            let d = mpos[base + v];
+            positions[v] += w * Vec3::new(d[0], d[1], d[2]);
+        }
+        if let (Some(mn), Some(on)) = (mnrm, out_normals.as_mut()) {
+            for v in 0..count {
+                let d = mn[base + v];
+                on[v] += w * Vec3::new(d[0], d[1], d[2]);
+            }
+        }
+    }
+    Some((positions, out_normals))
+}
+
+/// Folds an object's current morph-target weights into the change hash, so a
+/// morphing pose rebuilds the path-traced scene (and resets accumulation). Must
+/// hash the same bytes in [`gather`] and [`scene_hash`]. No-op for non-morph objects.
+fn hash_morph(h: &mut Fnv, odata: &crate::scene::ObjectData3d) {
+    for &w in odata.morph_weights() {
+        h.write_f32(w);
+    }
+}
+
 fn hash_instances(h: &mut Fnv, instances: &InstancesBuffer3d) {
     h.write_u32(instances.len() as u32);
     if let Some(p) = instances.positions.data() {

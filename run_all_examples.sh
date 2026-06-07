@@ -32,6 +32,7 @@ EXAMPLES=(
     quad
     rectangle
     obj
+    gltf
     texturing
     texturing_mipmaps
     stereo

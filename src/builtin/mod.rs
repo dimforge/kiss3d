@@ -11,6 +11,7 @@ pub use self::object_material2d::ObjectMaterial2d;
 pub use self::shadow::{ShadowMapper, MAX_SHADOW_VIEWS};
 
 mod aov;
+pub mod deform;
 mod normals_material;
 mod object_material;
 mod shadow;

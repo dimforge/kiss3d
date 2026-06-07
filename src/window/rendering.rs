@@ -311,6 +311,9 @@ impl Window {
             // Phase 1: Prepare - collect uniforms in CPU memory and gather lights from scene
             if let Some(scene) = scene.as_deref_mut() {
                 scene.data_mut().prepare(pass, camera, &mut lights, w, h);
+                // Refresh skinned-mesh joint palettes now that world transforms
+                // are propagated, before any render pass consumes them.
+                scene.update_deformations();
             }
 
             // Phase 2: Flush - upload all batched uniforms to GPU
@@ -678,6 +681,9 @@ impl Window {
         // Render egui if enabled (uses its own command encoder and submits it)
         #[cfg(feature = "egui")]
         {
+            // Close the pass opened by any draw_ui/draw_inspector calls this
+            // frame so all their shapes are tessellated together.
+            self.finish_egui_pass();
             self.egui_context.renderer.render(
                 &frame_view,
                 &depth_view,
@@ -820,6 +826,9 @@ impl Window {
         lights.ambient_color = self.ambient_color;
         lights.fog = self.fog;
         scene.data_mut().prepare(0, camera, &mut lights, w, h);
+        // Refresh skinned-mesh joint palettes so the path tracer gathers the
+        // animated (CPU-skinned) geometry, not the bind pose.
+        scene.update_deformations();
 
         // Exposure and tonemap operator are shared with the rasterizer, so the
         // path tracer finishes the image with the window's `HdrSettings`.
@@ -866,6 +875,9 @@ impl Window {
         // The depth view is unused by egui, so the color view is passed twice.
         #[cfg(feature = "egui")]
         {
+            // Close the pass opened by any draw_ui/draw_inspector calls this
+            // frame so all their shapes are tessellated together.
+            self.finish_egui_pass();
             self.egui_context.renderer.render(
                 &frame_view,
                 &frame_view,

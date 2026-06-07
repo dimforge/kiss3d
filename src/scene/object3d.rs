@@ -2,19 +2,118 @@
 
 use crate::camera::Camera3d;
 use crate::color::Color;
+use crate::context::Context;
 use crate::light::LightCollection;
 use crate::resource::vertex_index::{VertexIndex, VERTEX_INDEX_FORMAT};
 use crate::resource::{
     AllocationType, BufferType, GPUVec, GpuData, GpuMesh3d, Material3d, RenderContext, RenderPhase,
     Texture, TextureManager,
 };
-use glamx::{Mat3, Pose3, Vec2, Vec3};
+use crate::scene::SceneNodeData3d;
+use glamx::{Mat3, Mat4, Pose3, Vec2, Vec3};
 use std::any::Any;
 use std::cell::RefCell;
 use std::path::Path;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+
+/// Skeletal skinning binding for a skinned mesh.
+///
+/// Holds **weak** references to the skeleton's joint nodes (so the skin never
+/// keeps the scene graph alive or forms a reference cycle), the per-joint inverse
+/// bind matrices from glTF, and a per-frame scratch `palette` of joint matrices.
+///
+/// The palette is recomputed each frame from the (already-propagated) joint world
+/// transforms as `palette[j] = joint_world[j] * inverse_bind[j]` and uploaded to a
+/// GPU storage buffer that the skinned vertex shader reads. Per the glTF spec the
+/// skinned mesh node's own transform is ignored, so the palette is expressed
+/// directly in world space.
+///
+/// GPU skinning requires a 5th bind group, which exceeds the WebGPU/WebGL2 cap of
+/// four, so the rasterizer's skinning is **native-only**; on the web a skinned mesh
+/// falls back to its bind pose. On native the skinned deformation is applied in
+/// every pass that draws the mesh: the color pass, the SSAO depth prepass, and both
+/// the opaque and translucent (transmittance) **shadow** passes, so animated
+/// characters cast correctly-posed (and correctly-tinted) shadows. The **path
+/// tracer** also renders the animated pose — it has no GPU skinning, so the geometry
+/// is CPU-skinned into world space when the scene is gathered (see
+/// `raytracer::scene_data`), which works on every platform.
+pub struct Skin3d {
+    /// Weak handles to the joint nodes, in glTF skin-joint order.
+    pub(crate) joints: Vec<Weak<RefCell<SceneNodeData3d>>>,
+    /// Inverse bind matrix per joint (same order as `joints`).
+    pub(crate) inverse_bind: Vec<Mat4>,
+    /// Joint matrix palette, recomputed every frame (same length as `joints`).
+    pub(crate) palette: Vec<Mat4>,
+    /// GPU storage buffer holding `palette`, uploaded once per frame by
+    /// [`upload`](Self::upload). Shared by the color, prepass, and shadow passes.
+    palette_buffer: Option<wgpu::Buffer>,
+    /// Capacity of `palette_buffer`, in `mat4x4`s.
+    palette_capacity: usize,
+}
+
+impl Skin3d {
+    /// Creates a skin from its joint node handles and inverse bind matrices
+    /// (which must have equal length). The palette starts at identity.
+    pub(crate) fn new(
+        joints: Vec<Weak<RefCell<SceneNodeData3d>>>,
+        inverse_bind: Vec<Mat4>,
+    ) -> Self {
+        let n = joints.len();
+        Skin3d {
+            joints,
+            inverse_bind,
+            palette: vec![Mat4::IDENTITY; n],
+            palette_buffer: None,
+            palette_capacity: 0,
+        }
+    }
+
+    /// The number of joints influencing this skin.
+    pub fn joint_count(&self) -> usize {
+        self.joints.len()
+    }
+
+    /// The current joint-matrix palette (world-space, column-major `Mat4`s). Used
+    /// by the path tracer to CPU-skin the gathered geometry.
+    pub(crate) fn palette(&self) -> &[Mat4] {
+        &self.palette
+    }
+
+    /// Uploads the current palette to the GPU storage buffer, (re)allocating it by
+    /// powers of two if it grew. Called each frame after the palette is recomputed,
+    /// before any render pass consumes it.
+    pub(crate) fn upload(&mut self) {
+        if self.palette.is_empty() {
+            return;
+        }
+        let ctxt = Context::get();
+        if self.palette_buffer.is_none() || self.palette.len() > self.palette_capacity {
+            let cap = self.palette.len().next_power_of_two().max(1);
+            self.palette_buffer = Some(ctxt.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("skin_palette_buffer"),
+                size: (cap * std::mem::size_of::<[[f32; 4]; 4]>()) as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+            self.palette_capacity = cap;
+        }
+        ctxt.write_buffer(
+            self.palette_buffer.as_ref().unwrap(),
+            0,
+            bytemuck::cast_slice(&self.palette),
+        );
+    }
+
+    /// The joint-palette GPU storage buffer, if it has been uploaded. Only consumed
+    /// by the native deform path; the web build uploads the palette but never reads
+    /// the buffer (skinned meshes fall back to the rest shape there).
+    #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+    pub(crate) fn palette_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.palette_buffer.as_ref()
+    }
+}
 
 /// The shading model used by the path tracer for an object's surface.
 ///
@@ -101,9 +200,10 @@ impl AlphaMode {
 pub enum ParallaxMethod {
     /// Parallax-occlusion mapping: linear search + interpolation. Cheaper.
     Occlusion,
-    /// Relief mapping: linear search + binary-search refinement. Sharper at the
-    /// cost of extra samples.
-    Relief,
+    /// Relief mapping: linear search + `max_steps` binary-search refinements.
+    /// Sharper than occlusion at the cost of extra samples; more steps give a
+    /// crisper crossing.
+    Relief { max_steps: u32 },
 }
 
 impl Default for ParallaxMethod {
@@ -113,10 +213,13 @@ impl Default for ParallaxMethod {
 }
 
 impl ParallaxMethod {
+    /// Encodes the method into the shader's `parallax.w` slot: `0` selects
+    /// occlusion, any positive value selects relief with that many binary-search
+    /// steps (clamped to the shader's hard loop cap of 64).
     pub(crate) fn code(self) -> f32 {
         match self {
             ParallaxMethod::Occlusion => 0.0,
-            ParallaxMethod::Relief => 1.0,
+            ParallaxMethod::Relief { max_steps } => max_steps.clamp(1, 64) as f32,
         }
     }
 }
@@ -194,6 +297,22 @@ pub struct ObjectData3d {
     parallax_layers: f32,
     /// Parallax search method (occlusion vs relief).
     parallax_method: ParallaxMethod,
+    /// Skeletal skinning binding, present only on skinned glTF meshes. When set,
+    /// the object is drawn with the GPU skinning (deform) pipeline.
+    skin: Option<Skin3d>,
+    /// Current morph-target weights (one per target), driven by animation or set
+    /// manually. Empty when the mesh has no morph targets. Matches the target count
+    /// of the object's [`GpuMesh3d`].
+    morph_weights: Vec<f32>,
+    /// Per-object GPU deform resources (control uniform + cached deform bind group),
+    /// lazily built when the object is skinned or morphed. `None` on the web, where
+    /// the deform path is unavailable (see [`crate::builtin::deform`]).
+    deform: Option<crate::builtin::deform::DeformGpu>,
+    /// Cached albedo-texture bind group for the shadow transmittance pass (so a
+    /// translucent caster's shadow is tinted by its texture). Lazily built;
+    /// rebuilt when `texture` changes (`cached_shadow_tex_ptr`).
+    shadow_tex_bind_group: Option<wgpu::BindGroup>,
+    cached_shadow_tex_ptr: usize,
 }
 
 impl ObjectData3d {
@@ -307,6 +426,142 @@ impl ObjectData3d {
     #[inline]
     pub fn user_data(&self) -> &dyn Any {
         &*self.user_data
+    }
+
+    /// Whether this object is a skinned mesh (driven by a [`Skin3d`]).
+    #[inline]
+    pub fn has_skin(&self) -> bool {
+        self.skin.is_some()
+    }
+
+    /// The skeletal skinning binding, if this is a skinned mesh.
+    #[inline]
+    pub fn skin(&self) -> Option<&Skin3d> {
+        self.skin.as_ref()
+    }
+
+    /// Mutable access to the skinning binding (used to refresh the palette).
+    #[inline]
+    pub(crate) fn skin_mut(&mut self) -> Option<&mut Skin3d> {
+        self.skin.as_mut()
+    }
+
+    /// Attaches a skeletal skinning binding, marking this object as skinned.
+    #[inline]
+    pub(crate) fn set_skin(&mut self, skin: Skin3d) {
+        self.skin = Some(skin);
+    }
+
+    /// The current morph-target weights (one per target), or an empty slice when the
+    /// mesh has no morph targets.
+    #[inline]
+    pub fn morph_weights(&self) -> &[f32] {
+        &self.morph_weights
+    }
+
+    /// Sets the morph-target weights (one per target). Typically driven by an
+    /// [`AnimationPlayer`](crate::scene::AnimationPlayer), but can be set manually to
+    /// pose blend shapes. Takes effect on the next frame's deform update.
+    #[inline]
+    pub fn set_morph_weights(&mut self, weights: &[f32]) {
+        self.morph_weights.clear();
+        self.morph_weights.extend_from_slice(weights);
+    }
+
+    /// The number of morph targets this object expects (the length of its weight
+    /// vector). `0` when the mesh is not morphable.
+    #[inline]
+    pub fn morph_target_count(&self) -> usize {
+        self.morph_weights.len()
+    }
+
+    /// Whether this object is deformable (skinned and/or morphed) and therefore drawn
+    /// with the deform pipeline.
+    #[inline]
+    pub(crate) fn is_deformable(&self) -> bool {
+        self.skin.is_some() || !self.morph_weights.is_empty()
+    }
+
+    /// The per-frame deform bind group (group 4 color / group 2 shadow), or `None`
+    /// when the object isn't deformable or the deform path is unavailable (web).
+    #[inline]
+    pub(crate) fn deform_bind_group(&self) -> Option<&wgpu::BindGroup> {
+        self.deform.as_ref().and_then(|d| d.bind_group())
+    }
+
+    /// Refreshes this object's GPU deform state for the current frame: writes the
+    /// control uniform (skin flag + current morph weights) and (re)builds the deform
+    /// bind group over the palette + skin/morph storage buffers. Native-only; a no-op
+    /// when the object isn't deformable. Called once per frame from
+    /// [`SceneNode3d::update_deformations`](crate::scene::SceneNode3d::update_deformations)
+    /// after the joint palette has been uploaded.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn update_deform(&mut self, mesh: &GpuMesh3d) {
+        use crate::builtin::deform::{DeformControl, DeformGpu};
+
+        // Skinning applies only once the palette has been uploaded this frame.
+        let has_skin = mesh.has_skin_vertices()
+            && self.skin.as_ref().and_then(|s| s.palette_buffer()).is_some();
+        let has_morph = mesh.has_morph() && !self.morph_weights.is_empty();
+        if !has_skin && !has_morph {
+            return;
+        }
+
+        // `ensure_*_on_gpu` take `&self` (interior RwLock mutability), so the skin and
+        // morph buffer borrows can be held simultaneously to build one bind group.
+        let (joints, weights) = match has_skin {
+            true => mesh.ensure_skin_on_gpu().map_or((None, None), |(j, w)| (Some(j), Some(w))),
+            false => (None, None),
+        };
+        let (morph_pos, morph_nrm) = match has_morph {
+            true => mesh
+                .ensure_morph_on_gpu()
+                .map_or((None, None), |(p, n)| (Some(p), n)),
+            false => (None, None),
+        };
+        let palette = if has_skin {
+            self.skin.as_ref().and_then(|s| s.palette_buffer())
+        } else {
+            None
+        };
+
+        let mut ctrl = DeformControl::default();
+        ctrl.set_weights(if has_morph { &self.morph_weights } else { &[] });
+        ctrl.num_vertices = mesh.morph_vertex_count() as u32;
+        ctrl.has_skin = has_skin as u32;
+        ctrl.has_morph_normals = (has_morph && mesh.has_morph_normals()) as u32;
+
+        let deform = self.deform.get_or_insert_with(DeformGpu::new);
+        deform.update(&ctrl, palette, joints, weights, morph_pos, morph_nrm);
+    }
+
+    /// Returns (lazily building) the albedo-texture bind group for the shadow
+    /// transmittance pass, for the given group layout. Rebuilt only when the
+    /// object's texture changes.
+    pub(crate) fn shadow_tex_bind_group(
+        &mut self,
+        layout: &wgpu::BindGroupLayout,
+    ) -> &wgpu::BindGroup {
+        let ptr = Arc::as_ptr(&self.texture) as usize;
+        if self.shadow_tex_bind_group.is_none() || self.cached_shadow_tex_ptr != ptr {
+            let ctxt = Context::get();
+            self.shadow_tex_bind_group = Some(ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("shadow_tex_bind_group"),
+                layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&self.texture.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.texture.sampler),
+                    },
+                ],
+            }));
+            self.cached_shadow_tex_ptr = ptr;
+        }
+        self.shadow_tex_bind_group.as_ref().unwrap()
     }
 
     /// Returns the metallic factor of this object.
@@ -712,9 +967,14 @@ impl Object3d {
             ao_map: None,
             emissive_map: None,
             height_map: None,
-            parallax_scale: 0.05,
+            parallax_scale: 0.1,
             parallax_layers: 16.0,
             parallax_method: ParallaxMethod::Occlusion,
+            skin: None,
+            morph_weights: Vec::new(),
+            deform: None,
+            shadow_tex_bind_group: None,
+            cached_shadow_tex_ptr: 0,
         };
         let instances = Rc::new(RefCell::new(InstancesBuffer3d::default()));
 
@@ -797,13 +1057,24 @@ impl Object3d {
 
     /// Draws this object's surface geometry into the shadow depth pass.
     ///
-    /// The per-object model bind group (group 1) must already be bound by the
-    /// caller via the supplied dynamic `model_offset`. Only the position and
-    /// instance streams are bound; no material state is touched.
+    /// Sets `base_pipeline` (or, for a deformable caster when `deform_pipeline` is
+    /// supplied, the deformed depth pipeline plus the object's deform bind group at
+    /// group 2 — joint palette + skin streams + morph deltas) and binds the
+    /// per-object model group (group 1) via `model_offset`. Group 0 (view) is bound
+    /// once by the caller and persists across the pipeline switch (compatible
+    /// layout). No material state is touched.
+    /// `transmittance_tex` is `Some(layout)` only for the colored-transmittance
+    /// pass; then this also binds the object's albedo texture (so the shadow tint
+    /// follows the texture) and the UV stream, at the group/slot the transmittance
+    /// pipeline expects (texture group 2 + UV slot 3 plain; group 3 + slot 3
+    /// deformed). The depth pass passes `None` and binds neither.
     #[doc(hidden)]
     pub fn render_depth_only(
         &mut self,
         render_pass: &mut wgpu::RenderPass<'_>,
+        base_pipeline: &wgpu::RenderPipeline,
+        deform_pipeline: Option<&wgpu::RenderPipeline>,
+        transmittance_tex: Option<&wgpu::BindGroupLayout>,
         model_bind_group: &wgpu::BindGroup,
         model_offset: u32,
     ) {
@@ -811,7 +1082,7 @@ impl Object3d {
             return;
         }
 
-        let mesh = self.mesh.borrow_mut();
+        let mesh = self.mesh.borrow();
         let mut instances = self.instances.borrow_mut();
 
         let num_instances = instances.len();
@@ -841,7 +1112,40 @@ impl Object3d {
             None => return,
         };
 
-        render_pass.set_bind_group(1, model_bind_group, &[model_offset]);
+        // Use the deformed depth pipeline only when it exists (native) and the
+        // object's deform bind group was built this frame (skinned and/or morphed);
+        // otherwise the base pipeline draws the rest shape.
+        let use_deform = deform_pipeline.is_some() && self.data.deform_bind_group().is_some();
+
+        // The transmittance pass also samples the albedo texture (UVs needed).
+        let uvs_guard;
+        let uvs_buf: Option<&wgpu::Buffer> = if transmittance_tex.is_some() {
+            mesh.uvs().write().unwrap().load_to_gpu();
+            uvs_guard = mesh.uvs().read().unwrap();
+            uvs_guard.buffer()
+        } else {
+            None
+        };
+
+        if use_deform {
+            render_pass.set_pipeline(deform_pipeline.unwrap());
+            render_pass.set_bind_group(1, model_bind_group, &[model_offset]);
+            // Group 2: the object's deform bind group (built in update_deformations).
+            render_pass.set_bind_group(2, self.data.deform_bind_group().unwrap(), &[]);
+        } else {
+            render_pass.set_pipeline(base_pipeline);
+            render_pass.set_bind_group(1, model_bind_group, &[model_offset]);
+        }
+
+        // Albedo texture for the transmittance pass (group 3 deformed / group 2 not).
+        if let (Some(tex_layout), Some(uvs)) = (transmittance_tex, uvs_buf) {
+            let tex_group = if use_deform { 3 } else { 2 };
+            let tex_bg = self.data.shadow_tex_bind_group(tex_layout);
+            render_pass.set_bind_group(tex_group, tex_bg, &[]);
+            // UV stream at slot 3 (the deformed layout has no joints/weights buffers).
+            render_pass.set_vertex_buffer(3, uvs.slice(..));
+        }
+
         render_pass.set_vertex_buffer(0, coords_buf.slice(..));
         render_pass.set_vertex_buffer(1, inst_positions_buf.slice(..));
         render_pass.set_vertex_buffer(2, inst_deformations_buf.slice(..));
@@ -859,6 +1163,18 @@ impl Object3d {
     #[inline]
     pub fn data_mut(&mut self) -> &mut ObjectData3d {
         &mut self.data
+    }
+
+    /// Whether this object is a skinned mesh.
+    #[inline]
+    pub fn has_skin(&self) -> bool {
+        self.data.has_skin()
+    }
+
+    /// Attaches a skeletal skinning binding (used by the glTF loader).
+    #[inline]
+    pub(crate) fn set_skin(&mut self, skin: Skin3d) {
+        self.data.set_skin(skin);
     }
 
     /// Gets the instances of this object.
@@ -1478,11 +1794,12 @@ impl Object3d {
         self.data.parallax_scale = scale.max(0.0);
     }
 
-    /// Sets the maximum number of parallax search layers (clamped to `[4, 64]`).
-    /// More layers give sharper relief at steep angles at a higher cost.
+    /// Sets the maximum number of parallax search layers (clamped to `[1, 64]`).
+    /// More layers give sharper relief at steep angles at a higher cost; a low
+    /// count (1–2) gives a chunky, thick-sliced look.
     #[inline]
     pub fn set_parallax_layers(&mut self, layers: f32) {
-        self.data.parallax_layers = layers.clamp(4.0, 64.0);
+        self.data.parallax_layers = layers.clamp(1.0, 64.0);
     }
 
     /// Sets the parallax search method (occlusion vs relief).

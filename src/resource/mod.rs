@@ -12,7 +12,7 @@ pub use crate::resource::material::{
 pub use crate::resource::material_manager2d::MaterialManager2d;
 pub use crate::resource::material_manager3d::MaterialManager3d;
 pub use crate::resource::mesh2d::GpuMesh2d;
-pub use crate::resource::mesh3d::GpuMesh3d;
+pub use crate::resource::mesh3d::{GpuMesh3d, MorphTargets, SkinVertexData};
 pub use crate::resource::mesh_manager2d::MeshManager2d;
 pub use crate::resource::mesh_manager3d::MeshManager3d;
 pub use crate::resource::pipeline_cache::{multisample_state, PipelineCache};

@@ -7,7 +7,8 @@
 //! gives the flat faces real depth that shifts as the cube turns.
 //!
 //! The egui panel exposes controls for depth scale, max
-//! layer count, and the occlusion-vs-relief mapping method).
+//! layer count, the occlusion-vs-relief mapping method, and the relief search
+//! step count).
 //!
 //! Textures are from Bevy (MIT/Apache-2.0) — see
 //! `examples/media/parallax/CREDITS.md`.
@@ -38,6 +39,11 @@ use std::sync::Arc;
 /// treats it as depth (white = deepest) whereas kiss3d's height map uses white =
 /// at the surface. `flip_green` flips the normal map's Y, since the source's normal
 /// maps are OpenGL (+Y) while kiss3d's tangent frame expects the opposite.
+///
+/// Textures use `ClampToEdge`: parallax can push the displaced UV past the [0,1]
+/// tile at grazing angles, and clamping extends the edge color
+/// instead of wrapping the whole pattern back in, which would look like an
+/// infinitely repeating "portal" on the relief walls.
 #[cfg(feature = "egui")]
 fn load(path: &str, srgb: bool, invert: bool, flip_green: bool) -> Arc<Texture> {
     let mut img = image::open(Path::new(path))
@@ -60,7 +66,14 @@ fn load(path: &str, srgb: bool, invert: bool, flip_green: bool) -> Arc<Texture> 
     } else {
         wgpu::TextureFormat::Rgba8Unorm
     };
-    Texture::new(img.width(), img.height(), img.as_raw(), format, wgpu::AddressMode::Repeat, srgb)
+    Texture::new(
+        img.width(),
+        img.height(),
+        img.as_raw(),
+        format,
+        wgpu::AddressMode::ClampToEdge,
+        true,
+    )
 }
 
 #[cfg(feature = "egui")]
@@ -116,13 +129,19 @@ async fn main() {
     }
 
     // UI state for the parallax controls.
-    let mut depth_scale = 0.09f32;
+    let mut depth_scale = 0.1f32;
     let mut layers = 32.0f32;
-    let mut method = ParallaxMethod::Relief;
+    let mut use_relief = true;
+    let mut relief_steps = 8u32;
 
     let spin = Quat::from_axis_angle(Vec3::new(1.0, 1.0, 0.0).normalize(), 0.006);
     let spin_back = Quat::from_axis_angle(Vec3::Y, -0.002);
     while window.render_3d(&mut scene, &mut camera).await {
+        let method = if use_relief {
+            ParallaxMethod::Relief { max_steps: relief_steps }
+        } else {
+            ParallaxMethod::Occlusion
+        };
         for b in bricks.iter_mut() {
             b.set_parallax_scale(depth_scale);
             b.set_parallax_layers(layers);
@@ -138,11 +157,15 @@ async fn main() {
                 .default_width(280.0)
                 .show(ctx, |ui| {
                     ui.add(egui::Slider::new(&mut depth_scale, 0.0..=0.3).text("depth scale"));
-                    ui.add(egui::Slider::new(&mut layers, 4.0..=64.0).text("max layers"));
+                    ui.add(egui::Slider::new(&mut layers, 1.0..=64.0).text("max layers"));
                     ui.separator();
                     ui.label("Mapping method:");
-                    ui.radio_value(&mut method, ParallaxMethod::Occlusion, "Parallax occlusion");
-                    ui.radio_value(&mut method, ParallaxMethod::Relief, "Relief (binary search)");
+                    ui.radio_value(&mut use_relief, false, "Parallax occlusion");
+                    ui.radio_value(&mut use_relief, true, "Relief (binary search)");
+                    ui.add_enabled(
+                        use_relief,
+                        egui::Slider::new(&mut relief_steps, 1..=32).text("relief steps"),
+                    );
                 });
         });
     }

@@ -314,6 +314,49 @@ fn tri_positions(e: RtEmitter) -> mat3x3<f32> {
 
 // Direct lighting from one randomly chosen analytic light, returning radiance
 // already weighted by the BSDF and MIS against the BSDF-sampling strategy.
+// A surface counts as opaque for shadowing at/above this alpha.
+const ALPHA_OPAQUE: f32 = 0.999;
+
+// Colored shadow-ray visibility from `ro` toward a light `max_dist` away.
+//
+// In a fully-opaque scene (`frame.background.a < 0.5`, a flag the renderer sets
+// when no material is translucent) this is the cheap binary occlusion test —
+// identical to the old behavior, no extra cost. When translucent casters exist it
+// walks the occluders front-to-back and accumulates the colored transmittance
+// `T = 1 - a*(1 - albedo)` of each translucent (alpha < 1) surface — matching the
+// rasterizer's transmittance shadow, tinted by the occluder's base color × albedo
+// texture — and fully blocks (returns 0) on the first opaque hit.
+fn shadow_visibility(ro: vec3<f32>, rd: vec3<f32>, max_dist: f32) -> vec3<f32> {
+    if (frame.background.a < 0.5) {
+        return select(vec3<f32>(1.0), vec3<f32>(0.0), trace_any(ro, rd, max_dist));
+    }
+
+    var transmittance = vec3<f32>(1.0);
+    var origin = ro;
+    var remaining = max_dist;
+    // Bounded walk through stacked translucent occluders.
+    for (var i = 0u; i < 8u; i = i + 1u) {
+        let hit = trace_closest(origin, rd, remaining);
+        if (!hit.valid) {
+            break; // reached the light unobstructed
+        }
+        let mat = materials[hit.material_id];
+        if (mat.base_color.a >= ALPHA_OPAQUE) {
+            return vec3<f32>(0.0); // opaque occluder fully blocks
+        }
+        let s = resolve_surface(mat, hit.uv);
+        let a = mat.base_color.a;
+        transmittance = transmittance * (vec3<f32>(1.0) - a * (vec3<f32>(1.0) - s.albedo));
+        let step = hit.t + EPS;
+        origin = origin + rd * step;
+        remaining = remaining - step;
+        if (remaining <= EPS || all(transmittance < vec3<f32>(0.0025))) {
+            break;
+        }
+    }
+    return transmittance;
+}
+
 fn sample_lights(
     s: Surface, p: vec3<f32>, n: vec3<f32>, wo: vec3<f32>, rng: ptr<function, u32>,
 ) -> vec3<f32> {
@@ -324,13 +367,15 @@ fn sample_lights(
         let li = min(u32(rand(rng) * f32(frame.num_lights)), frame.num_lights - 1u);
         let light = lights[li];
         let ls = sample_analytic_light(light, p, rng);
-        if (ls.valid && dot(n, ls.wi) > 0.0 &&
-            !trace_any(p + n * EPS, ls.wi, ls.dist - 2.0 * EPS)) {
-            var bpdf: f32;
-            let f = brdf_eval(s, n, wo, ls.wi, &bpdf);
-            // Delta lights: no MIS (pdf is infinite). Multiply by N to undo the
-            // 1-of-N uniform light pick.
-            result += f * ls.radiance * f32(frame.num_lights);
+        if (ls.valid && dot(n, ls.wi) > 0.0) {
+            let vis = shadow_visibility(p + n * EPS, ls.wi, ls.dist - 2.0 * EPS);
+            if (any(vis > vec3<f32>(0.0))) {
+                var bpdf: f32;
+                let f = brdf_eval(s, n, wo, ls.wi, &bpdf);
+                // Delta lights: no MIS (pdf is infinite). Multiply by N to undo the
+                // 1-of-N uniform light pick. `vis` tints/dims through translucent occluders.
+                result += f * ls.radiance * vis * f32(frame.num_lights);
+            }
         }
     }
 
@@ -359,16 +404,18 @@ fn sample_lights(
         if (dot(ln, -wi) < 0.0) { ln = -ln; }
         let cos_l = dot(ln, -wi);
 
-        if (dot(n, wi) > 0.0 && cos_l > 1e-4 && area > 1e-8 &&
-            !trace_any(p + n * EPS, wi, dist - 2.0 * EPS)) {
-            // Area pdf -> solid-angle pdf, averaged over the emitter count.
-            let pdf_area = 1.0 / (area * f32(frame.num_emitters));
-            let pdf_sa = pdf_area * dist2 / cos_l;
-            var bpdf: f32;
-            let f = brdf_eval(s, n, wo, wi, &bpdf);
-            let le = e.emission;
-            let w = power_heuristic(pdf_sa, bpdf);
-            result += f * le * w / max(pdf_sa, 1e-6);
+        if (dot(n, wi) > 0.0 && cos_l > 1e-4 && area > 1e-8) {
+            let vis = shadow_visibility(p + n * EPS, wi, dist - 2.0 * EPS);
+            if (any(vis > vec3<f32>(0.0))) {
+                // Area pdf -> solid-angle pdf, averaged over the emitter count.
+                let pdf_area = 1.0 / (area * f32(frame.num_emitters));
+                let pdf_sa = pdf_area * dist2 / cos_l;
+                var bpdf: f32;
+                let f = brdf_eval(s, n, wo, wi, &bpdf);
+                let le = e.emission;
+                let w = power_heuristic(pdf_sa, bpdf);
+                result += f * le * w * vis / max(pdf_sa, 1e-6);
+            }
         }
     }
 

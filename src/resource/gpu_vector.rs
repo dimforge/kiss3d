@@ -208,6 +208,8 @@ pub enum BufferType {
     Array,
     /// An index buffer (bindable as index data).
     ElementArray,
+    /// A read-only storage buffer (bindable in a bind group, indexed in shaders).
+    Storage,
 }
 
 impl BufferType {
@@ -217,6 +219,7 @@ impl BufferType {
         match self {
             BufferType::Array => wgpu::BufferUsages::VERTEX,
             BufferType::ElementArray => wgpu::BufferUsages::INDEX,
+            BufferType::Storage => wgpu::BufferUsages::STORAGE,
         }
     }
 }

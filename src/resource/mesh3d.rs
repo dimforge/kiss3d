@@ -23,6 +23,106 @@ pub struct GpuMesh3d {
     normals: Arc<RwLock<GPUVec<Vec3>>>,
     uvs: Arc<RwLock<GPUVec<Vec2>>>,
     edges: Option<Arc<RwLock<GPUVec<[VertexIndex; 2]>>>>,
+    /// Optional per-vertex skinning attributes (glTF `JOINTS_0`/`WEIGHTS_0`),
+    /// present only on skinned meshes. Drives GPU vertex skinning.
+    skin_vertices: Option<SkinVertexData>,
+    /// Optional morph-target deltas (glTF primitive targets), present only on
+    /// meshes with blend shapes. Drives the GPU morph path.
+    morph: Option<MorphTargets>,
+}
+
+/// Per-vertex skinning attributes for a skinned mesh: four joint indices and four
+/// blend weights per vertex. `JOINTS_0` (originally `u8`/`u16` in glTF) is widened
+/// to `u32` at load time so a single vertex format works for every mesh; weights
+/// are normalized in the vertex shader.
+///
+/// These are uploaded as read-only **storage** buffers (not vertex attributes) and
+/// indexed by `@builtin(vertex_index)` in the deform vertex shader, so the deformed
+/// pipeline reuses the plain vertex layout and a morph-only mesh never needs dummy
+/// joint/weight vertex buffers. See [`crate::builtin::object_material`].
+#[derive(Clone)]
+pub struct SkinVertexData {
+    joints: Arc<RwLock<GPUVec<[u32; 4]>>>,
+    weights: Arc<RwLock<GPUVec<[f32; 4]>>>,
+}
+
+impl SkinVertexData {
+    /// Builds skinning storage buffers from per-vertex joint indices and weights.
+    /// Both slices must have one entry per mesh vertex (same length as `coords`).
+    pub fn new(joints: Vec<[u32; 4]>, weights: Vec<[f32; 4]>) -> Self {
+        SkinVertexData {
+            joints: Arc::new(RwLock::new(GPUVec::new(
+                joints,
+                BufferType::Storage,
+                AllocationType::StaticDraw,
+            ))),
+            weights: Arc::new(RwLock::new(GPUVec::new(
+                weights,
+                BufferType::Storage,
+                AllocationType::StaticDraw,
+            ))),
+        }
+    }
+}
+
+/// Per-primitive morph-target data: position (and optional normal) deltas for each
+/// target, stored flat as `[target * num_vertices + vertex]`.
+///
+/// Uploaded as read-only **storage** buffers and indexed by
+/// `@builtin(vertex_index)` in the deform vertex shader, which adds
+/// `Σ weightᵢ · deltaᵢ` to the base position/normal before skinning. Deltas are
+/// stored as `[f32; 4]` (xyz used, w padding) to match WGSL `array<vec4<f32>>`
+/// alignment. Drives the GPU morph path; see [`crate::builtin::object_material`].
+#[derive(Clone)]
+pub struct MorphTargets {
+    num_targets: usize,
+    num_vertices: usize,
+    positions: Arc<RwLock<GPUVec<[f32; 4]>>>,
+    normals: Option<Arc<RwLock<GPUVec<[f32; 4]>>>>,
+}
+
+impl MorphTargets {
+    /// Builds morph-target storage buffers. `positions` (and `normals`, if present)
+    /// must each hold `num_targets * num_vertices` deltas in `[target, vertex]`
+    /// row-major order.
+    pub fn new(
+        num_targets: usize,
+        num_vertices: usize,
+        positions: Vec<[f32; 4]>,
+        normals: Option<Vec<[f32; 4]>>,
+    ) -> Self {
+        MorphTargets {
+            num_targets,
+            num_vertices,
+            positions: Arc::new(RwLock::new(GPUVec::new(
+                positions,
+                BufferType::Storage,
+                AllocationType::StaticDraw,
+            ))),
+            normals: normals.map(|n| {
+                Arc::new(RwLock::new(GPUVec::new(
+                    n,
+                    BufferType::Storage,
+                    AllocationType::StaticDraw,
+                )))
+            }),
+        }
+    }
+
+    /// The number of morph targets.
+    pub fn num_targets(&self) -> usize {
+        self.num_targets
+    }
+
+    /// The number of vertices each target deforms.
+    pub fn num_vertices(&self) -> usize {
+        self.num_vertices
+    }
+
+    /// Whether per-target normal deltas are present.
+    pub fn has_normals(&self) -> bool {
+        self.normals.is_some()
+    }
 }
 
 impl GpuMesh3d {
@@ -168,6 +268,118 @@ impl GpuMesh3d {
             normals,
             uvs,
             edges: None,
+            skin_vertices: None,
+            morph: None,
+        }
+    }
+
+    /// Attaches per-vertex skinning data (joint indices + weights) to this mesh,
+    /// marking it as a skinned mesh. Used by the glTF loader.
+    pub fn set_skin_vertices(&mut self, skin: SkinVertexData) {
+        self.skin_vertices = Some(skin);
+    }
+
+    /// Whether this mesh carries per-vertex skinning attributes.
+    pub fn has_skin_vertices(&self) -> bool {
+        self.skin_vertices.is_some()
+    }
+
+    /// Attaches morph-target deltas to this mesh, marking it as morphable. Used by
+    /// the glTF loader.
+    pub fn set_morph_targets(&mut self, morph: MorphTargets) {
+        self.morph = Some(morph);
+    }
+
+    /// Whether this mesh carries morph-target deltas.
+    pub fn has_morph(&self) -> bool {
+        self.morph.is_some()
+    }
+
+    /// The number of morph targets, or `0` if this mesh has none.
+    pub fn morph_target_count(&self) -> usize {
+        self.morph.as_ref().map(|m| m.num_targets).unwrap_or(0)
+    }
+
+    /// The number of vertices the morph deltas span (matches `coords` length).
+    pub fn morph_vertex_count(&self) -> usize {
+        self.morph.as_ref().map(|m| m.num_vertices).unwrap_or(0)
+    }
+
+    /// Whether this mesh carries per-target morph normal deltas.
+    pub fn has_morph_normals(&self) -> bool {
+        self.morph.as_ref().map(|m| m.has_normals()).unwrap_or(false)
+    }
+
+    /// The morph-target position-delta buffer (`[target * num_vertices + vertex]`),
+    /// if this mesh is morphable. Used by the path tracer to CPU-morph geometry.
+    pub fn morph_positions(&self) -> Option<&Arc<RwLock<GPUVec<[f32; 4]>>>> {
+        self.morph.as_ref().map(|m| &m.positions)
+    }
+
+    /// The morph-target normal-delta buffer, if present.
+    pub fn morph_normals(&self) -> Option<&Arc<RwLock<GPUVec<[f32; 4]>>>> {
+        self.morph.as_ref().and_then(|m| m.normals.as_ref())
+    }
+
+    /// The per-vertex joint-index buffer, if this is a skinned mesh.
+    pub fn skin_joints(&self) -> Option<&Arc<RwLock<GPUVec<[u32; 4]>>>> {
+        self.skin_vertices.as_ref().map(|s| &s.joints)
+    }
+
+    /// The per-vertex joint-weight buffer, if this is a skinned mesh.
+    pub fn skin_weights(&self) -> Option<&Arc<RwLock<GPUVec<[f32; 4]>>>> {
+        self.skin_vertices.as_ref().map(|s| &s.weights)
+    }
+
+    /// Ensures the skinning vertex buffers (joints, weights) are uploaded to the
+    /// GPU and returns `(joints, weights)` buffer references, or `None` when this
+    /// mesh has no skinning data.
+    pub fn ensure_skin_on_gpu(&self) -> Option<(&wgpu::Buffer, &wgpu::Buffer)> {
+        let skin = self.skin_vertices.as_ref()?;
+        skin.joints.write().unwrap().load_to_gpu();
+        skin.weights.write().unwrap().load_to_gpu();
+
+        let joints = skin.joints.read().unwrap();
+        let weights = skin.weights.read().unwrap();
+        if joints.buffer().is_none() || weights.buffer().is_none() {
+            return None;
+        }
+
+        // SAFETY: same pattern as `ensure_on_gpu` — the buffers live in
+        // `Arc<RwLock<>>` so they outlive this borrow; we hold read locks.
+        unsafe {
+            let joints_ptr = joints.buffer().unwrap() as *const wgpu::Buffer;
+            let weights_ptr = weights.buffer().unwrap() as *const wgpu::Buffer;
+            Some((&*joints_ptr, &*weights_ptr))
+        }
+    }
+
+    /// Ensures the morph-target storage buffers are uploaded to the GPU and returns
+    /// `(positions, optional_normals)` buffer references, or `None` when this mesh
+    /// has no morph targets (or the upload failed).
+    pub fn ensure_morph_on_gpu(&self) -> Option<(&wgpu::Buffer, Option<&wgpu::Buffer>)> {
+        let morph = self.morph.as_ref()?;
+        morph.positions.write().unwrap().load_to_gpu();
+        if let Some(n) = &morph.normals {
+            n.write().unwrap().load_to_gpu();
+        }
+
+        let positions = morph.positions.read().unwrap();
+        positions.buffer()?;
+
+        // SAFETY: same pattern as `ensure_skin_on_gpu` — the buffers live in
+        // `Arc<RwLock<>>` so they outlive this borrow; we hold read locks.
+        unsafe {
+            let pos_ptr = positions.buffer().unwrap() as *const wgpu::Buffer;
+            let nrm_ptr = match &morph.normals {
+                Some(n) => n
+                    .read()
+                    .unwrap()
+                    .buffer()
+                    .map(|b| &*(b as *const wgpu::Buffer)),
+                None => None,
+            };
+            Some((&*pos_ptr, nrm_ptr))
         }
     }
 

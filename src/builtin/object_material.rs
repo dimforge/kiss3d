@@ -435,6 +435,26 @@ pub struct ObjectMaterial {
     default_shadow_bind_group: wgpu::BindGroup,
     /// Keeps the dummy atlas/sampler/buffer alive for `default_shadow_bind_group`.
     _default_shadow_resources: DefaultShadowResources,
+
+    // === GPU vertex deformation: skinning + morph targets (native only) ===
+    /// Deformed pipeline variants. `None` on web (and any adapter without a 5th bind
+    /// group), where skinned/morphed meshes fall back to the plain pipelines (base
+    /// rest shape). The per-object deform bind group (group 4) is owned by the object
+    /// (see [`crate::builtin::deform`]); these are only the pipelines.
+    deform: Option<DeformResources>,
+}
+
+/// Deformed pipeline variants. Mirror the plain opaque/OIT/prepass pipelines but
+/// bind the deform group (group 4: joint palette + skin joints/weights + morph
+/// deltas + control uniform) and use the deformed vertex entry. The vertex *layout*
+/// is identical to the plain one — all deform data is read from storage by vertex
+/// index, not vertex attributes.
+struct DeformResources {
+    pipeline_cull: PipelineCache,
+    pipeline_no_cull: PipelineCache,
+    oit_pipeline_cull: PipelineCache,
+    oit_pipeline_no_cull: PipelineCache,
+    prepass_pipeline: PipelineCache,
 }
 
 /// Owns the GPU resources backing [`ObjectMaterial`]'s neutral shadow bind group.
@@ -446,6 +466,155 @@ struct DefaultShadowResources {
     _transmittance_atlas: wgpu::Texture,
     _transmittance_view: wgpu::TextureView,
     _transmittance_sampler: wgpu::Sampler,
+}
+
+// Non-skinned vertex input: injected into `default.wgsl` at `//__VERTEX_INPUT__`.
+// Must reproduce the original struct exactly so the non-skinned shader is
+// byte-identical to before this split.
+const PLAIN_VERTEX_INPUT: &str = "struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) tex_coord: vec2<f32>,
+    @location(2) normal: vec3<f32>,
+}";
+
+// Deformed vertex input: identical vertex attributes to the plain variant (skin
+// joints/weights and morph deltas are read from the group-4 storage buffers by
+// vertex index, not as vertex attributes), plus the deform bind group at group 4.
+const DEFORM_VERTEX_INPUT: &str = "struct VertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) tex_coord: vec2<f32>,
+    @location(2) normal: vec3<f32>,
+}
+struct DeformControl {
+    num_targets: u32,
+    num_vertices: u32,
+    has_skin: u32,
+    has_morph_normals: u32,
+    weights: array<vec4<f32>, 16>,
+}
+@group(4) @binding(0) var<storage, read> joint_palette: array<mat4x4<f32>>;
+@group(4) @binding(1) var<storage, read> skin_joints: array<vec4<u32>>;
+@group(4) @binding(2) var<storage, read> skin_weights: array<vec4<f32>>;
+@group(4) @binding(3) var<storage, read> morph_pos: array<vec4<f32>>;
+@group(4) @binding(4) var<storage, read> morph_nrm: array<vec4<f32>>;
+@group(4) @binding(5) var<uniform> deform: DeformControl;";
+
+// Non-skinned vertex entry, injected at `//__VS_MAIN__`. Byte-identical to the
+// original `vs_main`.
+const PLAIN_VS_MAIN: &str = "@vertex
+fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
+    var out: VertexOutput;
+
+    // Build deformation matrix from instance data
+    let deformation = mat3x3<f32>(
+        instance.inst_def_0,
+        instance.inst_def_1,
+        instance.inst_def_2
+    );
+
+    // Transform position
+    let scaled_pos = object.scale * vertex.position;
+    let deformed_pos = deformation * scaled_pos;
+    let model_pos = object.transform * vec4<f32>(deformed_pos, 1.0);
+    let world_pos = vec4<f32>(instance.inst_tra, 0.0) + model_pos;
+
+    out.clip_position = frame.proj * frame.view * world_pos;
+    out.world_pos = world_pos.xyz;
+
+    // Transform normal to world space
+    out.world_normal = normalize(deformation * object.ntransform * vertex.normal);
+
+    // View-space position for lighting calculations
+    let view_pos = frame.view * world_pos;
+    out.view_pos = view_pos.xyz / view_pos.w;
+
+    out.tex_coord = vertex.tex_coord;
+    out.vert_color = instance.inst_color;
+
+    return out;
+}";
+
+// Deformed vertex entry. First applies morph targets (Σ weightᵢ·Δ, read from the
+// group-4 storage buffers by vertex index), then — when the mesh is skinned — the
+// joint-palette blend (ignoring the mesh node's own transform, per the glTF spec),
+// or otherwise the ordinary instance/object-transform path. One control uniform
+// gates both so skin-only, morph-only, and skin+morph meshes share this entry.
+const DEFORM_VS_MAIN: &str = "@vertex
+fn vs_main(vertex: VertexInput, instance: InstanceInput, @builtin(vertex_index) vid: u32) -> VertexOutput {
+    var out: VertexOutput;
+
+    // Morph: accumulate weighted position (and optional normal) deltas.
+    var pos = vertex.position;
+    var nrm = vertex.normal;
+    if (deform.num_targets > 0u) {
+        for (var t = 0u; t < deform.num_targets; t = t + 1u) {
+            let wgt = deform.weights[t >> 2u][t & 3u];
+            if (wgt != 0.0) {
+                let idx = t * deform.num_vertices + vid;
+                pos = pos + wgt * morph_pos[idx].xyz;
+                if (deform.has_morph_normals != 0u) {
+                    nrm = nrm + wgt * morph_nrm[idx].xyz;
+                }
+            }
+        }
+    }
+
+    if (deform.has_skin != 0u) {
+        // Skin: blend the joint matrices by their (renormalized) weights.
+        var w = skin_weights[vid];
+        let j = skin_joints[vid];
+        let wsum = w.x + w.y + w.z + w.w;
+        if (wsum > 0.0) { w = w / wsum; }
+        let skin =
+            w.x * joint_palette[j.x] +
+            w.y * joint_palette[j.y] +
+            w.z * joint_palette[j.z] +
+            w.w * joint_palette[j.w];
+
+        let world_pos = skin * vec4<f32>(pos, 1.0);
+        out.clip_position = frame.proj * frame.view * world_pos;
+        out.world_pos = world_pos.xyz;
+        let skin3 = mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz);
+        out.world_normal = normalize(skin3 * nrm);
+        let view_pos = frame.view * world_pos;
+        out.view_pos = view_pos.xyz / view_pos.w;
+    } else {
+        // Morph-only (or rigid): the usual instance/object-transform path.
+        let deformation = mat3x3<f32>(
+            instance.inst_def_0,
+            instance.inst_def_1,
+            instance.inst_def_2
+        );
+        let scaled_pos = object.scale * pos;
+        let deformed_pos = deformation * scaled_pos;
+        let model_pos = object.transform * vec4<f32>(deformed_pos, 1.0);
+        let world_pos = vec4<f32>(instance.inst_tra, 0.0) + model_pos;
+
+        out.clip_position = frame.proj * frame.view * world_pos;
+        out.world_pos = world_pos.xyz;
+        out.world_normal = normalize(deformation * object.ntransform * nrm);
+        let view_pos = frame.view * world_pos;
+        out.view_pos = view_pos.xyz / view_pos.w;
+    }
+
+    out.tex_coord = vertex.tex_coord;
+    out.vert_color = instance.inst_color;
+
+    return out;
+}";
+
+/// Assembles the object shader source, injecting either the plain or the deformed
+/// (skinning + morph) vertex input + vertex entry into `default.wgsl`. The whole
+/// fragment stage (and everything else) is shared between the two variants.
+fn build_object_shader_src(deformed: bool) -> String {
+    let (vertex_input, vs_main) = if deformed {
+        (DEFORM_VERTEX_INPUT, DEFORM_VS_MAIN)
+    } else {
+        (PLAIN_VERTEX_INPUT, PLAIN_VS_MAIN)
+    };
+    include_str!("default.wgsl")
+        .replace("//__VERTEX_INPUT__", vertex_input)
+        .replace("//__VS_MAIN__", vs_main)
 }
 
 /// The vertex buffer layouts shared by the opaque and OIT surface pipelines.
@@ -752,30 +921,45 @@ impl ObjectMaterial {
             immediate_size: 0,
         });
 
-        // Load shader
-        let shader =
-            ctxt.create_shader_module(Some("object_material_shader"), include_str!("default.wgsl"));
+        // Load shader (non-skinned variant). The skinned variant, built below,
+        // shares the whole fragment stage and differs only in its vertex input +
+        // entry point. `build_object_shader_src(false)` reproduces the original
+        // `default.wgsl` byte-for-byte.
+        let shader = ctxt.create_shader_module(
+            Some("object_material_shader"),
+            &build_object_shader_src(false),
+        );
 
-        // Shared opaque-surface pipeline builder, parameterized by cull mode and MSAA
-        // sample count. Wrapped in `Rc` so the cull and no-cull `PipelineCache`s can
-        // share it; each builds its pipeline lazily on first use for a given sample
-        // count (the scene is rasterized into the optionally-multisampled HDR film).
-        let build_opaque = {
-            let pipeline_layout = pipeline_layout.clone();
-            let shader = shader.clone();
-            std::rc::Rc::new(move |cull_mode: Option<wgpu::Face>, label: &'static str, sample_count: u32| {
+        // Shared opaque-surface pipeline builder, parameterized by the pipeline
+        // layout, shader module, and whether the skinned vertex layout (joints +
+        // weights at slots 6/7) is used — so the plain and skinned pipelines reuse
+        // one descriptor. Each `PipelineCache` builds lazily per MSAA sample count
+        // (the scene is rasterized into the optionally-multisampled HDR film).
+        let build_opaque = std::rc::Rc::new(
+            |layout: &wgpu::PipelineLayout,
+             shader: &wgpu::ShaderModule,
+             skinned: bool,
+             cull_mode: Option<wgpu::Face>,
+             label: &'static str,
+             sample_count: u32| {
                 let ctxt = Context::get();
+                // The deformed pipelines share the plain vertex layout: skin
+                // joints/weights and morph deltas come from group-4 storage buffers,
+                // not vertex attributes. `skinned` only selects the shader + layout.
+                let _ = skinned;
+                let plain_layouts = surface_vertex_buffer_layouts();
+                let buffers: &[wgpu::VertexBufferLayout] = &plain_layouts;
                 ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
-                    layout: Some(&pipeline_layout),
+                    layout: Some(layout),
                     vertex: wgpu::VertexState {
-                        module: &shader,
+                        module: shader,
                         entry_point: Some("vs_main"),
-                        buffers: &surface_vertex_buffer_layouts(),
+                        buffers,
                         compilation_options: Default::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
-                        module: &shader,
+                        module: shader,
                         entry_point: Some("fs_main"),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
@@ -804,16 +988,20 @@ impl ObjectMaterial {
                     multiview_mask: None,
                     cache: None,
                 })
-            })
-        };
+            },
+        );
 
         let pipeline_cull = PipelineCache::new({
             let build = build_opaque.clone();
-            move |sc| build(Some(wgpu::Face::Back), "object_material_pipeline_cull", sc)
+            let l = pipeline_layout.clone();
+            let s = shader.clone();
+            move |sc| build(&l, &s, false, Some(wgpu::Face::Back), "object_material_pipeline_cull", sc)
         });
         let pipeline_no_cull = PipelineCache::new({
             let build = build_opaque.clone();
-            move |sc| build(None, "object_material_pipeline_no_cull", sc)
+            let l = pipeline_layout.clone();
+            let s = shader.clone();
+            move |sc| build(&l, &s, false, None, "object_material_pipeline_no_cull", sc)
         });
 
         // Weighted-blended OIT pipelines: same vertex stage and bind groups, but the
@@ -822,22 +1010,31 @@ impl ObjectMaterial {
         // and depth-tests against the opaque depth without writing it. Built lazily per
         // sample count; the OIT geometry targets are multisampled to match the (MSAA)
         // opaque depth buffer, then resolved before compositing.
-        let build_oit = {
-            let pipeline_layout = pipeline_layout.clone();
-            let shader = shader.clone();
-            std::rc::Rc::new(move |cull_mode: Option<wgpu::Face>, label: &'static str, sample_count: u32| {
+        let build_oit = std::rc::Rc::new(
+            |layout: &wgpu::PipelineLayout,
+             shader: &wgpu::ShaderModule,
+             skinned: bool,
+             cull_mode: Option<wgpu::Face>,
+             label: &'static str,
+             sample_count: u32| {
                 let ctxt = Context::get();
+                // The deformed pipelines share the plain vertex layout: skin
+                // joints/weights and morph deltas come from group-4 storage buffers,
+                // not vertex attributes. `skinned` only selects the shader + layout.
+                let _ = skinned;
+                let plain_layouts = surface_vertex_buffer_layouts();
+                let buffers: &[wgpu::VertexBufferLayout] = &plain_layouts;
                 ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
-                    layout: Some(&pipeline_layout),
+                    layout: Some(layout),
                     vertex: wgpu::VertexState {
-                        module: &shader,
+                        module: shader,
                         entry_point: Some("vs_main"),
-                        buffers: &surface_vertex_buffer_layouts(),
+                        buffers,
                         compilation_options: Default::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
-                        module: &shader,
+                        module: shader,
                         entry_point: Some("fs_oit"),
                         targets: &[
                             // accum: additive (One, One).
@@ -895,37 +1092,50 @@ impl ObjectMaterial {
                     multiview_mask: None,
                     cache: None,
                 })
-            })
-        };
+            },
+        );
         let oit_pipeline_cull = PipelineCache::new({
             let build = build_oit.clone();
-            move |sc| build(Some(wgpu::Face::Back), "object_material_oit_pipeline_cull", sc)
+            let l = pipeline_layout.clone();
+            let s = shader.clone();
+            move |sc| {
+                build(&l, &s, false, Some(wgpu::Face::Back), "object_material_oit_pipeline_cull", sc)
+            }
         });
         let oit_pipeline_no_cull = PipelineCache::new({
             let build = build_oit.clone();
-            move |sc| build(None, "object_material_oit_pipeline_no_cull", sc)
+            let l = pipeline_layout.clone();
+            let s = shader.clone();
+            move |sc| build(&l, &s, false, None, "object_material_oit_pipeline_no_cull", sc)
         });
 
         // Depth + view-position prepass pipeline: reuses the surface vertex stage
         // and the full pipeline layout (so the per-object bind calls are
         // unchanged), with a minimal fragment writing view-space position into a
         // single Rgba16Float target. Single-sampled (SSAO runs at 1x).
-        let prepass_pipeline = PipelineCache::new({
-            let pipeline_layout = pipeline_layout.clone();
-            let shader = shader.clone();
-            move |sample_count| {
+        let build_prepass = std::rc::Rc::new(
+            |layout: &wgpu::PipelineLayout,
+             shader: &wgpu::ShaderModule,
+             skinned: bool,
+             sample_count: u32| {
                 let ctxt = Context::get();
+                // The deformed pipelines share the plain vertex layout: skin
+                // joints/weights and morph deltas come from group-4 storage buffers,
+                // not vertex attributes. `skinned` only selects the shader + layout.
+                let _ = skinned;
+                let plain_layouts = surface_vertex_buffer_layouts();
+                let buffers: &[wgpu::VertexBufferLayout] = &plain_layouts;
                 ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("object_material_prepass_pipeline"),
-                    layout: Some(&pipeline_layout),
+                    layout: Some(layout),
                     vertex: wgpu::VertexState {
-                        module: &shader,
+                        module: shader,
                         entry_point: Some("vs_main"),
-                        buffers: &surface_vertex_buffer_layouts(),
+                        buffers,
                         compilation_options: Default::default(),
                     },
                     fragment: Some(wgpu::FragmentState {
-                        module: &shader,
+                        module: shader,
                         entry_point: Some("fs_prepass"),
                         targets: &[Some(wgpu::ColorTargetState {
                             format: wgpu::TextureFormat::Rgba16Float,
@@ -954,8 +1164,83 @@ impl ObjectMaterial {
                     multiview_mask: None,
                     cache: None,
                 })
-            }
+            },
+        );
+        let prepass_pipeline = PipelineCache::new({
+            let build = build_prepass.clone();
+            let l = pipeline_layout.clone();
+            let s = shader.clone();
+            move |sc| build(&l, &s, false, sc)
         });
+
+        // Deformed pipeline variants (native only). The deform bind group is a 5th
+        // bind group, which exceeds WebGPU/WebGL2's 4-group cap, so on web (or any
+        // adapter without a free group) skinned/morphed objects fall back to the
+        // plain pipeline and render in their base rest shape. Built lazily per sample
+        // count like the plain pipelines, sharing the same builder closures. The
+        // deform bind-group layout is the shared one from `builtin::deform`, so the
+        // per-object bind group also works in the shadow pipelines.
+        #[cfg(not(target_arch = "wasm32"))]
+        let deform = {
+            let deform_bind_group_layout = crate::builtin::deform::deform_bind_group_layout();
+            let deform_pipeline_layout =
+                ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("object_material_deform_pipeline_layout"),
+                    bind_group_layouts: &[
+                        Some(&frame_bind_group_layout),
+                        Some(&object_bind_group_layout),
+                        Some(&texture_bind_group_layout),
+                        Some(&shadow_bind_group_layout),
+                        Some(&deform_bind_group_layout),
+                    ],
+                    immediate_size: 0,
+                });
+            let deform_shader = ctxt.create_shader_module(
+                Some("object_material_deform_shader"),
+                &build_object_shader_src(true),
+            );
+
+            let pipeline_cull = PipelineCache::new({
+                let build = build_opaque.clone();
+                let l = deform_pipeline_layout.clone();
+                let s = deform_shader.clone();
+                move |sc| build(&l, &s, true, Some(wgpu::Face::Back), "object_material_deform_cull", sc)
+            });
+            let pipeline_no_cull = PipelineCache::new({
+                let build = build_opaque.clone();
+                let l = deform_pipeline_layout.clone();
+                let s = deform_shader.clone();
+                move |sc| build(&l, &s, true, None, "object_material_deform_no_cull", sc)
+            });
+            let oit_pipeline_cull = PipelineCache::new({
+                let build = build_oit.clone();
+                let l = deform_pipeline_layout.clone();
+                let s = deform_shader.clone();
+                move |sc| build(&l, &s, true, Some(wgpu::Face::Back), "object_material_deform_oit_cull", sc)
+            });
+            let oit_pipeline_no_cull = PipelineCache::new({
+                let build = build_oit.clone();
+                let l = deform_pipeline_layout.clone();
+                let s = deform_shader.clone();
+                move |sc| build(&l, &s, true, None, "object_material_deform_oit_no_cull", sc)
+            });
+            let prepass_pipeline = PipelineCache::new({
+                let build = build_prepass.clone();
+                let l = deform_pipeline_layout.clone();
+                let s = deform_shader.clone();
+                move |sc| build(&l, &s, true, sc)
+            });
+
+            Some(DeformResources {
+                pipeline_cull,
+                pipeline_no_cull,
+                oit_pipeline_cull,
+                oit_pipeline_no_cull,
+                prepass_pipeline,
+            })
+        };
+        #[cfg(target_arch = "wasm32")]
+        let deform: Option<DeformResources> = None;
 
         // Create wireframe shader and pipelines for lines/points
         // Note: _wireframe_shader, _wireframe_pipeline_layout, and _wireframe_vertex_buffer_layouts
@@ -1620,6 +1905,7 @@ impl ObjectMaterial {
             points_view_bind_group,
             default_shadow_bind_group,
             _default_shadow_resources: default_shadow_resources,
+            deform,
         }
     }
 
@@ -2298,20 +2584,39 @@ impl Material3d for ObjectMaterial {
 
         // Render surface (filled triangles)
         if render_surface {
+            let cull = data.backface_culling_enabled();
+
+            // A skinned/morphed object uses the deform pipeline only when the deform
+            // pipelines exist (native) and the object's deform bind group was built
+            // this frame (in `SceneNode3d::update_deformations`); otherwise it renders
+            // through the plain path (base rest shape).
+            let use_deform = self.deform.is_some() && data.deform_bind_group().is_some();
+
             let texture_bind_group = gpu_data.texture_bind_group.as_ref().unwrap();
             let object_bind_group = self.object_bind_group.as_ref().unwrap();
 
-            // Select pipeline: OIT (transparent phase) vs. opaque, and cull vs.
-            // no-cull per the object's backface-culling setting.
-            let cull = data.backface_culling_enabled();
-            let pipeline = match (context.phase, cull) {
-                (crate::resource::RenderPhase::Prepass, _) => &self.prepass_pipeline,
-                (crate::resource::RenderPhase::Transparent, true) => &self.oit_pipeline_cull,
-                (crate::resource::RenderPhase::Transparent, false) => &self.oit_pipeline_no_cull,
-                (crate::resource::RenderPhase::Opaque, true) => &self.pipeline_cull,
-                (crate::resource::RenderPhase::Opaque, false) => &self.pipeline_no_cull,
-            }
-            .get(context.sample_count);
+            // Select pipeline: deformed vs. plain, OIT (transparent phase) vs. opaque,
+            // and cull vs. no-cull per the object's backface-culling setting.
+            let pipeline = if use_deform {
+                let dr = self.deform.as_ref().unwrap();
+                match (context.phase, cull) {
+                    (crate::resource::RenderPhase::Prepass, _) => &dr.prepass_pipeline,
+                    (crate::resource::RenderPhase::Transparent, true) => &dr.oit_pipeline_cull,
+                    (crate::resource::RenderPhase::Transparent, false) => &dr.oit_pipeline_no_cull,
+                    (crate::resource::RenderPhase::Opaque, true) => &dr.pipeline_cull,
+                    (crate::resource::RenderPhase::Opaque, false) => &dr.pipeline_no_cull,
+                }
+                .get(context.sample_count)
+            } else {
+                match (context.phase, cull) {
+                    (crate::resource::RenderPhase::Prepass, _) => &self.prepass_pipeline,
+                    (crate::resource::RenderPhase::Transparent, true) => &self.oit_pipeline_cull,
+                    (crate::resource::RenderPhase::Transparent, false) => &self.oit_pipeline_no_cull,
+                    (crate::resource::RenderPhase::Opaque, true) => &self.pipeline_cull,
+                    (crate::resource::RenderPhase::Opaque, false) => &self.pipeline_no_cull,
+                }
+                .get(context.sample_count)
+            };
             render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
             // Use dynamic offset for object uniforms!
@@ -2325,8 +2630,14 @@ impl Material3d for ObjectMaterial {
                 .as_ref()
                 .unwrap_or(&self.default_shadow_bind_group);
             render_pass.set_bind_group(3, shadow_bind_group, &[]);
+            // Group 4: per-object deform data (joint palette + skin streams + morph
+            // deltas + control uniform), deform pipeline only.
+            if use_deform {
+                render_pass.set_bind_group(4, data.deform_bind_group().unwrap(), &[]);
+            }
 
-            // Set vertex buffers for mesh data
+            // Set vertex buffers for mesh data. The deform pipeline uses the same
+            // layout — deform data is read from group-4 storage buffers by index.
             render_pass.set_vertex_buffer(0, coords_buf.slice(..));
             render_pass.set_vertex_buffer(1, uvs_buf.slice(..));
             render_pass.set_vertex_buffer(2, normals_buf.slice(..));

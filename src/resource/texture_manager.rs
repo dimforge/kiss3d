@@ -414,6 +414,42 @@ impl TextureManager {
         )
     }
 
+    /// Registers a texture from a [`DynamicImage`], choosing the color space and
+    /// using glTF-style `Repeat` wrapping.
+    ///
+    /// Color/emissive textures are authored in sRGB (`srgb = true`); data textures
+    /// — normal, metallic-roughness, occlusion — are linear (`srgb = false`). This
+    /// is what the glTF loader needs, since [`add_image`](Self::add_image) always
+    /// assumes sRGB. If a texture with the same name exists it is returned as-is.
+    pub fn add_image_with_color_space(
+        &mut self,
+        image: DynamicImage,
+        name: &str,
+        srgb: bool,
+    ) -> Arc<Texture> {
+        let generate_mipmaps = self.generate_mipmaps;
+        self.textures
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                let (width, height) = image.dimensions();
+                let rgba_image = image.to_rgba8();
+                let format = if srgb {
+                    wgpu::TextureFormat::Rgba8UnormSrgb
+                } else {
+                    wgpu::TextureFormat::Rgba8Unorm
+                };
+                Texture::new(
+                    width,
+                    height,
+                    rgba_image.as_raw(),
+                    format,
+                    wgpu::AddressMode::Repeat,
+                    generate_mipmaps,
+                )
+            })
+            .clone()
+    }
+
     /// Loads a texture from a DynamicImage.
     fn load_texture_from_image(image: DynamicImage, generate_mipmaps: bool) -> Arc<Texture> {
         let (width, height) = image.dimensions();

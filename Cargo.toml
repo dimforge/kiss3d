@@ -43,6 +43,7 @@ bitflags     = "2"
 bytemuck     = { version = "1", features = ["derive"] }
 egui         = { version = "0.34", optional = true, default-features = true }
 egui-wgpu    = { version = "0.34", optional = true }
+gltf         = { version = "1.4", features = ["import", "utils", "names"] }
 image        = { version = "0.25", default-features = false, features = ["default-formats"] }
 log          = "0.4"
 web-time     = "1"

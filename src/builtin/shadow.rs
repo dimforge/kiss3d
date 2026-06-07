@@ -43,6 +43,70 @@ pub const MAX_SHADOW_VIEWS: usize = 16;
 /// Maximum number of cascades a directional light may use (cascaded shadow maps).
 pub const MAX_CASCADES: u32 = 4;
 
+/// Rasterizer depth bias for the shadow depth pass. A modest slope-scaled bias
+/// combats acne on surfaces grazing the light; the fragment shader adds a small
+/// constant compare bias plus receiver-plane depth bias. (Contacts stay attached
+/// because the per-light near/far planes are fit to the casters — see
+/// [`light_near_far`] — keeping the depth precision high.)
+fn shadow_depth_bias() -> wgpu::DepthBiasState {
+    wgpu::DepthBiasState {
+        constant: 1,
+        slope_scale: 1.75,
+        clamp: 0.0,
+    }
+}
+
+/// Tight perspective near/far planes for a point or spot light, fit to the
+/// shadow-caster world AABB so the limited depth range isn't wasted on empty space
+/// between the light's tiny default near plane and a far plane at its full
+/// attenuation radius (which collapses all geometry to ~1.0 in NDC and destroys the
+/// depth precision contact shadows need). Returns `(near, far)` with a little
+/// headroom so casters at the bounds aren't clipped.
+fn light_near_far(light_pos: Vec3, aabb_min: Vec3, aabb_max: Vec3) -> (f32, f32) {
+    // Nearest point on the AABB to the light (the light may be inside it).
+    let nearest = light_pos.clamp(aabb_min, aabb_max);
+    let near_d = (nearest - light_pos).length();
+    // Farthest AABB corner.
+    let mut far_d: f32 = 0.0;
+    for &cx in &[aabb_min.x, aabb_max.x] {
+        for &cy in &[aabb_min.y, aabb_max.y] {
+            for &cz in &[aabb_min.z, aabb_max.z] {
+                far_d = far_d.max((Vec3::new(cx, cy, cz) - light_pos).length());
+            }
+        }
+    }
+    let near = (near_d * 0.9).max(0.02);
+    let far = (far_d * 1.1).max(near + 0.1);
+    (near, far)
+}
+
+/// Picks the point/spot shadow near/far planes: tight bounds from the caster AABB
+/// when available (far never exceeds the light's attenuation `radius`, since
+/// geometry beyond it is unlit), else the old wide default.
+fn fit_near_far(
+    caster_aabb: Option<(Vec3, Vec3)>,
+    light_pos: Vec3,
+    radius: f32,
+) -> (f32, f32) {
+    match caster_aabb {
+        Some((min, max)) => {
+            let (near, far) = light_near_far(light_pos, min, max);
+            (near, far.min(radius))
+        }
+        None => (0.05, radius),
+    }
+}
+
+/// Factor to scale a *radial* near plane down to the axial near at the CORNER of a
+/// square perspective frustum of full angle `fov`. A point on the frustum's corner
+/// ray sits at `1/sqrt(1 + 2·tan²(fov/2))` of its radial distance along the view
+/// axis; without this, the radial (AABB-fit) near plane clips off-axis occluders
+/// and drops part of their shadow. For a 90° cube face this is `1/√3 ≈ 0.577`.
+fn near_corner_scale(fov: f32) -> f32 {
+    let t = (fov * 0.5).tan();
+    1.0 / (1.0 + 2.0 * t * t).sqrt()
+}
+
 /// Per-light shadow metadata consumed by `default.wgsl`.
 ///
 /// `view_proj` matrices for every view are stored separately in a flat array;
@@ -191,6 +255,9 @@ pub struct ShadowMapper {
     transmittance_sampler: wgpu::Sampler,
     /// Pipeline that rasterizes translucent casters into the transmittance atlas.
     transmittance_pipeline: wgpu::RenderPipeline,
+    /// Layout for the per-object albedo-texture bind group sampled by the
+    /// transmittance pass (so colored shadows follow the occluder's texture).
+    transmittance_tex_bgl: wgpu::BindGroupLayout,
     /// Frame-level shadow uniform buffer (matrices + metadata).
     uniform_buffer: wgpu::Buffer,
     /// Bind group layout for group 4 of the lighting pipeline.
@@ -199,6 +266,13 @@ pub struct ShadowMapper {
     bind_group: wgpu::BindGroup,
     /// Depth-only pipeline used by the pre-pass.
     depth_pipeline: wgpu::RenderPipeline,
+    /// Deformed depth pipeline (GPU skinning + morph). `None` on web (and any adapter
+    /// without a free bind group), where deformable casters fall back to the rest
+    /// shape.
+    deform_depth_pipeline: Option<wgpu::RenderPipeline>,
+    /// Deformed colored-transmittance pipeline (translucent deformable casters).
+    /// `None` on web, where they fall back to the rest shape.
+    deform_transmittance_pipeline: Option<wgpu::RenderPipeline>,
     /// Layout for the per-view bind group (group 0 of the depth pipeline).
     view_bind_group_layout: wgpu::BindGroupLayout,
     /// Dynamic per-view uniform buffer (one entry per scheduled view).
@@ -311,13 +385,67 @@ impl ShadowMapper {
                 }],
             });
 
+        // Albedo-texture bind group layout for the transmittance pass.
+        let transmittance_tex_bgl =
+            ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("shadow_transmittance_tex_bgl"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+
         let depth_pipeline =
             Self::create_depth_pipeline(&ctxt, &view_bind_group_layout, &model_bind_group_layout);
         let transmittance_pipeline = Self::create_transmittance_pipeline(
             &ctxt,
             &view_bind_group_layout,
             &model_bind_group_layout,
+            &transmittance_tex_bgl,
         );
+
+        // Deformed depth/transmittance pipelines (native only): the deform data needs
+        // a 3rd bind group; we gate it on native so web stays uniformly in the rest
+        // shape (the color pass has no deformed pipeline there either). The deform
+        // bind-group layout is the shared one from `builtin::deform`, so each object's
+        // deform bind group works in both the color and shadow passes.
+        #[cfg(not(target_arch = "wasm32"))]
+        let (deform_depth_pipeline, deform_transmittance_pipeline) = {
+            let deform_layout = crate::builtin::deform::deform_bind_group_layout();
+            let depth = Self::create_depth_pipeline_deform(
+                &ctxt,
+                &view_bind_group_layout,
+                &model_bind_group_layout,
+                &deform_layout,
+            );
+            let transmittance = Self::create_transmittance_pipeline_deform(
+                &ctxt,
+                &view_bind_group_layout,
+                &model_bind_group_layout,
+                &deform_layout,
+                &transmittance_tex_bgl,
+            );
+            (Some(depth), Some(transmittance))
+        };
+        #[cfg(target_arch = "wasm32")]
+        let (deform_depth_pipeline, deform_transmittance_pipeline): (
+            Option<wgpu::RenderPipeline>,
+            Option<wgpu::RenderPipeline>,
+        ) = (None, None);
 
         let view_capacity = MAX_SHADOW_VIEWS as u64;
         let view_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
@@ -382,10 +510,13 @@ impl ShadowMapper {
             transmittance_array_view,
             transmittance_sampler,
             transmittance_pipeline,
+            transmittance_tex_bgl,
             uniform_buffer,
             bind_group_layout,
             bind_group,
             depth_pipeline,
+            deform_depth_pipeline,
+            deform_transmittance_pipeline,
             view_bind_group_layout,
             view_uniform_buffer,
             view_capacity,
@@ -612,14 +743,7 @@ impl ShadowMapper {
                 depth_write_enabled: Some(true),
                 depth_compare: Some(wgpu::CompareFunction::Less),
                 stencil: wgpu::StencilState::default(),
-                // Slope-scaled depth bias combats acne on surfaces grazing the
-                // light. Kept modest so contacts stay attached (the shader applies
-                // a small additional constant bias when comparing).
-                bias: wgpu::DepthBiasState {
-                    constant: 1,
-                    slope_scale: 1.75,
-                    clamp: 0.0,
-                },
+                bias: shadow_depth_bias(),
             }),
             multisample: wgpu::MultisampleState {
                 count: 1,
@@ -631,29 +755,35 @@ impl ShadowMapper {
         })
     }
 
-    /// Builds the pipeline that rasterizes translucent casters into the colored
-    /// transmittance atlas: same geometry transform as the depth pass, but with a
-    /// fragment stage writing `1 - a*(1-rgb)`, multiplicative blending, and a
-    /// read-only depth test against the opaque depth atlas (so only occluders in
-    /// front of the nearest opaque surface tint the light).
-    fn create_transmittance_pipeline(
+    /// Builds the deformed depth pipeline: same as [`create_depth_pipeline`] but with
+    /// a 3rd bind group (the shared deform group: joint palette + skin streams + morph
+    /// deltas + control), deforming the mesh by skinning and/or morph targets so
+    /// animated/morphed casters cast correctly-posed shadows. The vertex layout is
+    /// identical to the non-deformed pass — deform data is read from the storage
+    /// buffers by vertex index, not vertex attributes.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_depth_pipeline_deform(
         ctxt: &Context,
         view_bind_group_layout: &wgpu::BindGroupLayout,
         model_bind_group_layout: &wgpu::BindGroupLayout,
+        deform_bind_group_layout: &wgpu::BindGroupLayout,
     ) -> wgpu::RenderPipeline {
         let shader = ctxt.create_shader_module(
-            Some("shadow_transmittance_shader"),
-            include_str!("shadow_transmittance.wgsl"),
+            Some("shadow_depth_deform_shader"),
+            include_str!("shadow_depth_skinned.wgsl"),
         );
 
         let layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("shadow_transmittance_pipeline_layout"),
-            bind_group_layouts: &[Some(view_bind_group_layout), Some(model_bind_group_layout)],
+            label: Some("shadow_depth_deform_pipeline_layout"),
+            bind_group_layouts: &[
+                Some(view_bind_group_layout),
+                Some(model_bind_group_layout),
+                Some(deform_bind_group_layout),
+            ],
             immediate_size: 0,
         });
 
-        // Same vertex streams as the depth pass: position (0), instance
-        // translation (1), instance deformation columns (2..4).
+        // Same buffers 0..2 as the non-deformed pass (position + instance streams).
         let vertex_buffer_layouts = [
             wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
@@ -693,6 +823,260 @@ impl ShadowMapper {
                         format: wgpu::VertexFormat::Float32x3,
                     },
                 ],
+            },
+        ];
+
+        ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow_depth_deform_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &vertex_buffer_layouts,
+                compilation_options: Default::default(),
+            },
+            fragment: None,
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: shadow_depth_bias(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
+    /// Deformed variant of [`create_transmittance_pipeline`]: GPU skinning + morph
+    /// (the shared deform group at group 2) plus the same transmittance fragment
+    /// stage, so translucent deformable casters tint shadows in their animated/morphed
+    /// pose. The vertex layout matches the non-deformed pass plus UVs; deform data is
+    /// read from storage by vertex index.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn create_transmittance_pipeline_deform(
+        ctxt: &Context,
+        view_bind_group_layout: &wgpu::BindGroupLayout,
+        model_bind_group_layout: &wgpu::BindGroupLayout,
+        deform_bind_group_layout: &wgpu::BindGroupLayout,
+        tex_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
+        let shader = ctxt.create_shader_module(
+            Some("shadow_transmittance_deform_shader"),
+            include_str!("shadow_transmittance_skinned.wgsl"),
+        );
+
+        let layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow_transmittance_deform_pipeline_layout"),
+            bind_group_layouts: &[
+                Some(view_bind_group_layout),
+                Some(model_bind_group_layout),
+                Some(deform_bind_group_layout),
+                Some(tex_bind_group_layout),
+            ],
+            immediate_size: 0,
+        });
+
+        // Same buffers 0..2 as the non-deformed pass plus UVs (buffer 3, location 5)
+        // for the albedo texture lookup.
+        let vertex_buffer_layouts = [
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                }],
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                }],
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 2,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 12,
+                        shader_location: 3,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 24,
+                        shader_location: 4,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                ],
+            },
+            // Buffer 3: UVs (for the albedo texture lookup).
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 5,
+                    format: wgpu::VertexFormat::Float32x2,
+                }],
+            },
+        ];
+
+        let mult_blend = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Dst,
+            dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        };
+
+        ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow_transmittance_skinned_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &vertex_buffer_layouts,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TRANSMITTANCE_FORMAT,
+                    blend: Some(wgpu::BlendState {
+                        color: mult_blend,
+                        alpha: mult_blend,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
+    /// Builds the pipeline that rasterizes translucent casters into the colored
+    /// transmittance atlas: same geometry transform as the depth pass, but with a
+    /// fragment stage writing `1 - a*(1-rgb)`, multiplicative blending, and a
+    /// read-only depth test against the opaque depth atlas (so only occluders in
+    /// front of the nearest opaque surface tint the light).
+    fn create_transmittance_pipeline(
+        ctxt: &Context,
+        view_bind_group_layout: &wgpu::BindGroupLayout,
+        model_bind_group_layout: &wgpu::BindGroupLayout,
+        tex_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
+        let shader = ctxt.create_shader_module(
+            Some("shadow_transmittance_shader"),
+            include_str!("shadow_transmittance.wgsl"),
+        );
+
+        let layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow_transmittance_pipeline_layout"),
+            bind_group_layouts: &[
+                Some(view_bind_group_layout),
+                Some(model_bind_group_layout),
+                Some(tex_bind_group_layout),
+            ],
+            immediate_size: 0,
+        });
+
+        // Same vertex streams as the depth pass: position (0), instance
+        // translation (1), instance deformation columns (2..4), plus UVs (slot 3,
+        // location 7) for the albedo texture lookup.
+        let vertex_buffer_layouts = [
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                }],
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                }],
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 2,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 12,
+                        shader_location: 3,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 24,
+                        shader_location: 4,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                ],
+            },
+            // Buffer 3: UVs.
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 7,
+                    format: wgpu::VertexFormat::Float32x2,
+                }],
             },
         ];
 
@@ -904,6 +1288,24 @@ impl ShadowMapper {
         let mut views: Vec<ShadowView> = Vec::new();
         let mut next_layer = 0u32;
 
+        // World AABB of every shadow caster (skinned meshes included), used to fit
+        // tight near/far planes for point and spot lights so the depth range isn't
+        // wasted between a tiny near plane and a far plane at the full attenuation
+        // radius — which is what makes contact shadows attach. Only point/spot
+        // lights use it, so skip the (per-frame, all-caster) scan otherwise.
+        let needs_aabb = lights.lights.iter().take(MAX_LIGHTS).any(|l| {
+            l.casts_shadows
+                && matches!(
+                    l.light_type,
+                    LightType::Point { .. } | LightType::Spot { .. }
+                )
+        });
+        let caster_aabb = if needs_aabb {
+            scene.data().shadow_casters_world_aabb()
+        } else {
+            None
+        };
+
         for (i, light) in lights.lights.iter().take(MAX_LIGHTS).enumerate() {
             if !light.casts_shadows {
                 continue;
@@ -952,15 +1354,20 @@ impl ShadowMapper {
                     ..
                 } => {
                     light_type = 2;
-                    far_plane = attenuation_radius.max(1.0);
+                    let radius = attenuation_radius.max(1.0);
+                    let (near, far) = fit_near_far(caster_aabb, light.world_position, radius);
+                    far_plane = far;
                     let dir = light.world_direction.normalize_or(Vec3::NEG_Z);
                     let fov = (outer_cone_angle * 2.0).clamp(0.1, std::f32::consts::PI - 0.05);
+                    // Shrink the radial near plane to the (square) frustum's corner so
+                    // off-axis occluders aren't clipped (see the point-light case).
+                    let near = near * near_corner_scale(fov);
                     let vp = perspective_view_proj(
                         light.world_position,
                         light.world_position + dir,
                         fov,
-                        0.05,
-                        far_plane,
+                        near,
+                        far,
                     );
                     uniforms.view_proj[base_view as usize] = vp.to_cols_array_2d();
                     views.push(ShadowView {
@@ -970,9 +1377,17 @@ impl ShadowMapper {
                 }
                 LightType::Point { attenuation_radius } => {
                     light_type = 0;
-                    far_plane = attenuation_radius.max(1.0);
+                    let radius = attenuation_radius.max(1.0);
+                    let (near, far) = fit_near_far(caster_aabb, light.world_position, radius);
+                    far_plane = far;
+                    // Each cube face is a 90° frustum. The AABB-fit near plane is a
+                    // RADIAL distance, but an occluder near a face corner lies at only
+                    // ~1/√3 of that distance along the face axis, so the radial near
+                    // plane would clip the off-axis part of a caster (dropping half its
+                    // shadow). Shrink it to the corner's axial near.
+                    let near = near * near_corner_scale(std::f32::consts::FRAC_PI_2);
                     // Six perspective views unrolling a cube map: +X,-X,+Y,-Y,+Z,-Z.
-                    let faces = cube_face_view_projs(light.world_position, 0.05, far_plane);
+                    let faces = cube_face_view_projs(light.world_position, near, far);
                     for (face_idx, vp) in faces.iter().enumerate() {
                         let layer = base_view + face_idx as u32;
                         uniforms.view_proj[layer as usize] = vp.to_cols_array_2d();
@@ -1080,10 +1495,17 @@ impl ShadowMapper {
                 pass.set_pipeline(&self.depth_pipeline);
                 pass.set_bind_group(0, &self.view_bind_group, &[offset]);
 
+                // Deformable casters (native only) use the deformed depth pipeline so
+                // their shadow tracks the animated/morphed pose.
+                let deform = self.deform_depth_pipeline.as_ref();
+
                 // Re-traverse in collection order, binding each object's slot.
                 let mut object_index = 0u32;
                 scene.data_mut().render_shadow_casters(
                     &mut pass,
+                    &self.depth_pipeline,
+                    deform,
+                    None, // depth pass: no albedo texture / UVs
                     &self.model_bind_group,
                     SHADOW_VIEW_STRIDE as u32,
                     &mut object_index,
@@ -1128,9 +1550,16 @@ impl ShadowMapper {
                 pass.set_pipeline(&self.transmittance_pipeline);
                 pass.set_bind_group(0, &self.view_bind_group, &[offset]);
 
+                // Deformable translucent casters (native) use the deformed
+                // transmittance pipeline so their tinted shadow tracks the pose.
+                let deform = self.deform_transmittance_pipeline.as_ref();
+
                 let mut object_index = 0u32;
                 scene.data_mut().render_shadow_casters(
                     &mut pass,
+                    &self.transmittance_pipeline,
+                    deform,
+                    Some(&self.transmittance_tex_bgl), // tints the shadow by the albedo texture
                     &self.model_bind_group,
                     SHADOW_VIEW_STRIDE as u32,
                     &mut object_index,

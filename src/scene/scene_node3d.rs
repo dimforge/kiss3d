@@ -7,8 +7,8 @@ use crate::resource::vertex_index::VertexIndex;
 use crate::resource::{
     GpuMesh3d, Material3d, MaterialManager3d, MeshManager3d, RenderContext, Texture, TextureManager,
 };
-use crate::scene::{AlphaMode, Bsdf, InstanceData3d, Object3d};
-use glamx::{Mat3, Pose3, Quat, Vec2, Vec3};
+use crate::scene::{AlphaMode, AnimationPlayer, Bsdf, InstanceData3d, Object3d};
+use glamx::{Mat3, Mat4, Pose3, Quat, Vec2, Vec3};
 use std::cell::{Ref, RefCell, RefMut};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -35,6 +35,18 @@ pub struct SceneNodeData3d {
 #[derive(Clone)]
 pub struct SceneNode3d {
     data: Rc<RefCell<SceneNodeData3d>>,
+}
+
+/// A loaded glTF / GLB model: the scene subtree plus its animations.
+///
+/// Produced by [`SceneNode3d::add_gltf`]. The `root` has already been added to
+/// the scene graph; drive `player` each frame with
+/// [`AnimationPlayer::update`](crate::scene::AnimationPlayer::update).
+pub struct GltfModel {
+    /// Root node of the loaded model's subtree.
+    pub root: SceneNode3d,
+    /// Player owning every animation clip found in the file.
+    pub player: AnimationPlayer,
 }
 
 impl SceneNodeData3d {
@@ -289,6 +301,41 @@ impl SceneNodeData3d {
         if let Some(ref o) = self.object {
             if o.casts_shadows() {
                 let mesh = o.mesh().borrow();
+                // A skinned mesh is deformed in world space by its joint palette
+                // (its node + instance transforms are ignored), so bound the actual
+                // CPU-skinned world vertices instead of the bind-pose mesh.
+                if let (true, Some(skin)) = (mesh.has_skin_vertices(), o.data().skin()) {
+                    let coords_lock = mesh.coords().read().unwrap();
+                    if let (Some(coords), Some(jl), Some(wl)) = (
+                        coords_lock.data().as_ref(),
+                        mesh.skin_joints(),
+                        mesh.skin_weights(),
+                    ) {
+                        let jlk = jl.read().unwrap();
+                        let wlk = wl.read().unwrap();
+                        let palette = skin.palette();
+                        let jmat = |j: u32| palette.get(j as usize).copied().unwrap_or(Mat4::IDENTITY);
+                        if let (Some(js), Some(ws)) = (jlk.data().as_ref(), wlk.data().as_ref()) {
+                            for (idx, &local) in coords.iter().enumerate() {
+                                let j = js[idx];
+                                let w = ws[idx];
+                                let s = w[0] + w[1] + w[2] + w[3];
+                                let inv = if s > 0.0 { 1.0 / s } else { 1.0 };
+                                let m = jmat(j[0]) * (w[0] * inv)
+                                    + jmat(j[1]) * (w[1] * inv)
+                                    + jmat(j[2]) * (w[2] * inv)
+                                    + jmat(j[3]) * (w[3] * inv);
+                                let world = m.transform_point3(local);
+                                *min = min.min(world);
+                                *max = max.max(world);
+                            }
+                        }
+                    }
+                    for c in self.children.iter() {
+                        c.data().accumulate_caster_aabb(min, max);
+                    }
+                    return;
+                }
                 let coords_lock = mesh.coords().read().unwrap();
                 if let Some(coords) = coords_lock.data().as_ref() {
                     // Local AABB of the mesh after the node's own scale. We expand it
@@ -368,6 +415,9 @@ impl SceneNodeData3d {
     pub fn render_shadow_casters(
         &mut self,
         render_pass: &mut wgpu::RenderPass<'_>,
+        base_pipeline: &wgpu::RenderPipeline,
+        deform_pipeline: Option<&wgpu::RenderPipeline>,
+        transmittance_tex: Option<&wgpu::BindGroupLayout>,
         model_bind_group: &wgpu::BindGroup,
         model_stride: u32,
         object_index: &mut u32,
@@ -383,7 +433,14 @@ impl SceneNodeData3d {
                 let transparent = o.data().color().a < alpha_threshold;
                 if transparent == only_transparent {
                     let offset = *object_index * model_stride;
-                    o.render_depth_only(render_pass, model_bind_group, offset);
+                    o.render_depth_only(
+                        render_pass,
+                        base_pipeline,
+                        deform_pipeline,
+                        transmittance_tex,
+                        model_bind_group,
+                        offset,
+                    );
                 }
                 // Increment for every caster so slots stay aligned across both passes.
                 *object_index += 1;
@@ -394,6 +451,9 @@ impl SceneNodeData3d {
             let mut bc = c.data_mut();
             bc.render_shadow_casters(
                 render_pass,
+                base_pipeline,
+                deform_pipeline,
+                transmittance_tex,
                 model_bind_group,
                 model_stride,
                 object_index,
@@ -1135,6 +1195,141 @@ impl SceneNode3d {
         });
 
         result.unwrap()
+    }
+
+    /// Loads a glTF / GLB file and adds it as a child of this node.
+    ///
+    /// Returns a [`GltfModel`] bundling the loaded subtree's `root` (already added
+    /// here) and an [`AnimationPlayer`] holding every animation in the file. The
+    /// player is stopped initially; call `model.player.play(name)` to start one
+    /// and `model.player.update(dt)` each frame before rendering.
+    ///
+    /// # Panics
+    /// Panics if the file cannot be read or parsed.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use kiss3d::scene::SceneNode3d;
+    /// # use std::path::Path;
+    /// # use glamx::Vec3;
+    /// # let mut scene = SceneNode3d::empty();
+    /// let mut model = scene.add_gltf(Path::new("character.glb"), Vec3::ONE);
+    /// model.player.play("Walk");
+    /// ```
+    pub fn add_gltf(&mut self, path: &Path, scale: Vec3) -> GltfModel {
+        let mut model =
+            crate::loader::gltf::load(path).expect("Failed to load the glTF/GLB file.");
+        model.root.set_local_scale(scale.x, scale.y, scale.z);
+        self.add_child(model.root.clone());
+        model
+    }
+
+    /// Returns a weak handle to this node's shared data. Used by the glTF loader
+    /// to let a [`crate::scene::Skin3d`] reference its skeleton's joint nodes
+    /// without keeping them (or the scene graph) alive.
+    pub(crate) fn downgrade(&self) -> Weak<RefCell<SceneNodeData3d>> {
+        Rc::downgrade(&self.data)
+    }
+
+    /// Refreshes the joint-matrix palette of every skinned object in this subtree.
+    ///
+    /// Call once per frame **after** world transforms are propagated (i.e. after
+    /// [`prepare`](SceneNodeData3d::prepare)) and **before** rendering. The window
+    /// render loop does this automatically.
+    ///
+    /// This is deliberately *not* part of the render/prepare depth-first walks: a
+    /// skinned mesh's joints may be ancestors of the mesh node, which those walks
+    /// hold mutably borrowed. Instead it first collects the skinned nodes, then
+    /// reads each joint's (already-final) world matrix under an independent short
+    /// borrow, so no node is ever borrowed twice at once.
+    pub fn update_deformations(&self) {
+        let mut nodes = Vec::new();
+        self.collect_deformable(&mut nodes);
+        for node in nodes {
+            // 1. Skinned nodes: recompute and upload the joint-matrix palette.
+            //    Snapshot the joint handles under a short shared borrow.
+            let joints: Option<Vec<Weak<RefCell<SceneNodeData3d>>>> = {
+                let data = node.data.borrow();
+                data.object
+                    .as_ref()
+                    .and_then(|o| o.data().skin())
+                    .map(|skin| skin.joints.clone())
+            };
+            if let Some(joints) = joints {
+                // Read each joint's world matrix (each an independent short borrow).
+                let joint_world: Vec<Mat4> = joints
+                    .iter()
+                    .map(|w| match w.upgrade() {
+                        Some(rc) => node_global_matrix(&rc),
+                        None => Mat4::IDENTITY,
+                    })
+                    .collect();
+                // Write the palette back under a short exclusive borrow.
+                let mut data = node.data.borrow_mut();
+                if let Some(skin) = data.object.as_mut().and_then(|o| o.data_mut().skin_mut()) {
+                    let n = skin.palette.len().min(joint_world.len());
+                    for j in 0..n {
+                        skin.palette[j] = joint_world[j] * skin.inverse_bind[j];
+                    }
+                    // Upload once here so the color, prepass, and shadow passes all
+                    // read the same fresh palette buffer this frame.
+                    skin.upload();
+                }
+            }
+
+            // 2. Refresh the per-object deform GPU state (skin flag + morph weights +
+            //    deform bind group) now that the palette is current. Native-only:
+            //    the deform pipelines (and their 5th bind group) don't exist on web.
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let mut data = node.data.borrow_mut();
+                if let Some(obj) = data.object.as_mut() {
+                    let mesh_rc = obj.mesh().clone();
+                    let mesh = mesh_rc.borrow();
+                    obj.data_mut().update_deform(&mesh);
+                }
+            }
+        }
+    }
+
+    /// Collects every node in this subtree whose object is deformable (skinned and/or
+    /// morphed) and therefore needs a per-frame deform refresh.
+    fn collect_deformable(&self, out: &mut Vec<SceneNode3d>) {
+        let children = {
+            let data = self.data.borrow();
+            if data
+                .object
+                .as_ref()
+                .is_some_and(|o| o.data().is_deformable())
+            {
+                out.push(self.clone());
+            }
+            data.children.clone()
+        };
+        for c in &children {
+            c.collect_deformable(out);
+        }
+    }
+
+    /// Sets the morph-target weights on this node's object and every descendant
+    /// object whose target count matches `weights.len()`.
+    ///
+    /// glTF attaches each mesh primitive as a child object node and shares one weight
+    /// vector across them, so an animation channel targeting the mesh node fans the
+    /// weights out to all its primitives here.
+    pub fn set_morph_weights(&self, weights: &[f32]) {
+        let children = {
+            let mut data = self.data.borrow_mut();
+            if let Some(obj) = data.object.as_mut() {
+                if obj.data().morph_target_count() == weights.len() && !weights.is_empty() {
+                    obj.data_mut().set_morph_weights(weights);
+                }
+            }
+            data.children.clone()
+        };
+        for c in &children {
+            c.set_morph_weights(weights);
+        }
     }
 
     /// Applies a closure to each object contained by this node and its descendants.
@@ -2696,5 +2891,30 @@ impl SceneNode3d {
     pub fn set_instances(&mut self, instances: &[InstanceData3d]) -> Self {
         self.data_mut().get_object_mut().set_instances(instances);
         self.clone()
+    }
+}
+
+/// The proper world matrix of a node, composing full per-node TRS (`T · R · S`)
+/// matrices from the root down to the node.
+///
+/// This is **not** the same as `from_scale_rotation_translation(world_scale,
+/// world_rotation, world_translation)`: kiss3d propagates pose (rotation +
+/// translation) and scale separately and applies scale at the leaf, which is only
+/// equivalent to a full matrix composition when there is no scaling above the
+/// node. Skeletal skinning needs the true global matrix (matching how glTF authors
+/// the inverse-bind matrices), where an ancestor scale — e.g. the user's model
+/// scale on the glTF root — sits at the outermost of the chain and therefore also
+/// scales the (centimeter-scale) bone offsets. Composing per-node matrices up the
+/// parent chain gives exactly that.
+fn node_global_matrix(node: &Rc<RefCell<SceneNodeData3d>>) -> Mat4 {
+    let data = node.borrow();
+    let local = Mat4::from_scale_rotation_translation(
+        data.local_scale,
+        data.local_transform.rotation,
+        data.local_transform.translation,
+    );
+    match data.parent.as_ref().and_then(|p| p.upgrade()) {
+        Some(parent) => node_global_matrix(&parent) * local,
+        None => local,
     }
 }
