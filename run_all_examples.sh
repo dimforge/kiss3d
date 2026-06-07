@@ -38,6 +38,13 @@ EXAMPLES=(
     post_processing
     hdr_bloom
     tonemapping
+    color_grading
+    antialiasing
+    material_pbr
+    fog
+    camera_modes
+    skybox
+    parallax
     shadows
     transparency
     aov

@@ -95,6 +95,32 @@ impl AlphaMode {
     }
 }
 
+/// How parallax mapping marches the height field.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub enum ParallaxMethod {
+    /// Parallax-occlusion mapping: linear search + interpolation. Cheaper.
+    Occlusion,
+    /// Relief mapping: linear search + binary-search refinement. Sharper at the
+    /// cost of extra samples.
+    Relief,
+}
+
+impl Default for ParallaxMethod {
+    fn default() -> Self {
+        ParallaxMethod::Occlusion
+    }
+}
+
+impl ParallaxMethod {
+    pub(crate) fn code(self) -> f32 {
+        match self {
+            ParallaxMethod::Occlusion => 0.0,
+            ParallaxMethod::Relief => 1.0,
+        }
+    }
+}
+
 /// Monotonic counter handing out a unique default segmentation id to each new
 /// object. Starts at 1 so that 0 stays reserved for "background" (empty pixels)
 /// in the segmentation auxiliary render output.
@@ -125,6 +151,9 @@ pub struct ObjectData3d {
     /// Auto-assigned to a process-unique value on creation; user-overridable.
     segmentation_id: u32,
     user_data: Box<dyn Any + 'static>,
+    /// Render-layer bitmask. The object is drawn by a camera only when this
+    /// shares a bit with the camera's mask. Defaults to layer 0 (`1`).
+    render_layers: u32,
     // PBR material properties
     metallic: f32,
     roughness: f32,
@@ -157,6 +186,14 @@ pub struct ObjectData3d {
     metallic_roughness_map: Option<Arc<Texture>>,
     ao_map: Option<Arc<Texture>>,
     emissive_map: Option<Arc<Texture>>,
+    /// Height/displacement map for parallax mapping (grayscale; brighter = higher).
+    height_map: Option<Arc<Texture>>,
+    /// Parallax displacement scale (surface depth in UV units). `0` disables it.
+    parallax_scale: f32,
+    /// Maximum number of parallax search layers (more = sharper, costlier).
+    parallax_layers: f32,
+    /// Parallax search method (occlusion vs relief).
+    parallax_method: ParallaxMethod,
 }
 
 impl ObjectData3d {
@@ -305,6 +342,12 @@ impl ObjectData3d {
         self.alpha_mode
     }
 
+    /// Returns this object's render-layer bitmask.
+    #[inline]
+    pub fn render_layers(&self) -> u32 {
+        self.render_layers
+    }
+
     /// Returns the path-tracer BSDF model for this object.
     #[inline]
     pub fn bsdf(&self) -> Bsdf {
@@ -407,6 +450,30 @@ impl ObjectData3d {
     #[inline]
     pub fn emissive_map(&self) -> Option<&Arc<Texture>> {
         self.emissive_map.as_ref()
+    }
+
+    /// Returns a reference to this object's height/displacement map (parallax).
+    #[inline]
+    pub fn height_map(&self) -> Option<&Arc<Texture>> {
+        self.height_map.as_ref()
+    }
+
+    /// Returns the parallax displacement scale (`0` disables parallax mapping).
+    #[inline]
+    pub fn parallax_scale(&self) -> f32 {
+        self.parallax_scale
+    }
+
+    /// Returns the maximum number of parallax search layers.
+    #[inline]
+    pub fn parallax_layers(&self) -> f32 {
+        self.parallax_layers
+    }
+
+    /// Returns the parallax search method.
+    #[inline]
+    pub fn parallax_method(&self) -> ParallaxMethod {
+        self.parallax_method
     }
 }
 
@@ -621,6 +688,8 @@ impl Object3d {
             segmentation_id: next_segmentation_id(),
             material,
             user_data: Box::new(user_data),
+            render_layers: 1, // layer 0
+
             // PBR defaults (backward compatible with Blinn-Phong appearance)
             metallic: 0.0,
             roughness: 0.5,
@@ -642,6 +711,10 @@ impl Object3d {
             metallic_roughness_map: None,
             ao_map: None,
             emissive_map: None,
+            height_map: None,
+            parallax_scale: 0.05,
+            parallax_layers: 16.0,
+            parallax_method: ParallaxMethod::Occlusion,
         };
         let instances = Rc::new(RefCell::new(InstancesBuffer3d::default()));
 
@@ -695,6 +768,10 @@ impl Object3d {
         if context.phase == RenderPhase::Transparent
             && !self.data.material.borrow().renders_in_transparent_phase()
         {
+            return;
+        }
+        // Render-layer filtering: skip objects the camera's layer mask excludes.
+        if self.data.render_layers & context.render_layers == 0 {
             return;
         }
         self.data.material.borrow_mut().render(
@@ -1163,6 +1240,24 @@ impl Object3d {
         self.data.emissive = color;
     }
 
+    /// Sets this object's render-layer bitmask.
+    ///
+    /// A camera renders this object only when its layer mask (see
+    /// [`Camera3d::render_layers`](crate::camera::Camera3d::render_layers))
+    /// shares at least one bit with `layers`. Objects start on layer 0 (mask
+    /// `1`). Use this to show different objects to different cameras, e.g. an
+    /// overlay/editor layer.
+    #[inline]
+    pub fn set_render_layers(&mut self, layers: u32) {
+        self.data.render_layers = layers;
+    }
+
+    /// Returns this object's render-layer bitmask.
+    #[inline]
+    pub fn render_layers(&self) -> u32 {
+        self.data.render_layers
+    }
+
     /// Sets how this object's alpha is interpreted (see [`AlphaMode`]).
     ///
     /// - [`AlphaMode::Opaque`] ignores alpha (always opaque).
@@ -1351,5 +1446,48 @@ impl Object3d {
     #[inline]
     pub fn clear_emissive_map(&mut self) {
         self.data.emissive_map = None;
+    }
+
+    /// Sets the height/displacement map used for parallax mapping from a file.
+    ///
+    /// The map is grayscale (brighter = higher). Parallax shifts the texture
+    /// coordinates per fragment along the view direction to fake surface depth.
+    #[inline]
+    pub fn set_height_map_from_file(&mut self, path: &Path, name: &str) {
+        let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
+        self.set_height_map(texture);
+    }
+
+    /// Sets the height/displacement map used for parallax mapping.
+    #[inline]
+    pub fn set_height_map(&mut self, texture: Arc<Texture>) {
+        self.data.height_map = Some(texture);
+    }
+
+    /// Clears the height map (disables parallax mapping for this object).
+    #[inline]
+    pub fn clear_height_map(&mut self) {
+        self.data.height_map = None;
+    }
+
+    /// Sets the parallax displacement scale (surface depth in UV units). `0`
+    /// disables parallax even when a height map is set; typical values are small
+    /// (e.g. `0.03`–`0.1`).
+    #[inline]
+    pub fn set_parallax_scale(&mut self, scale: f32) {
+        self.data.parallax_scale = scale.max(0.0);
+    }
+
+    /// Sets the maximum number of parallax search layers (clamped to `[4, 64]`).
+    /// More layers give sharper relief at steep angles at a higher cost.
+    #[inline]
+    pub fn set_parallax_layers(&mut self, layers: f32) {
+        self.data.parallax_layers = layers.clamp(4.0, 64.0);
+    }
+
+    /// Sets the parallax search method (occlusion vs relief).
+    #[inline]
+    pub fn set_parallax_method(&mut self, method: ParallaxMethod) {
+        self.data.parallax_method = method;
     }
 }

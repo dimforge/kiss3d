@@ -91,12 +91,15 @@ async fn main() {
     let mut exposure = 1.0f32;
     let mut bloom = false;
     let mut pathtrace = false;
+    let mut auto_exposure = false;
 
     loop {
         // Exposure and tonemap live on the window's HDR settings and drive both
         // the rasterizer and the path tracer.
         window.set_tonemap(tonemap);
         window.set_exposure(exposure);
+        // Auto-exposure (rasterizer only) overrides the manual exposure when on.
+        window.hdr_settings_mut().auto_exposure = auto_exposure && !pathtrace;
 
         let still_open = if pathtrace {
             window
@@ -128,7 +131,14 @@ async fn main() {
                     );
                     ui.radio_value(&mut tonemap, Tonemap::TonyMcMapface, "Tony McMapface (LUT)");
                     ui.separator();
-                    ui.add(egui::Slider::new(&mut exposure, 0.1..=4.0).text("Exposure"));
+                    ui.add_enabled(
+                        !pathtrace,
+                        egui::Checkbox::new(&mut auto_exposure, "Auto-exposure (rasterizer only)"),
+                    );
+                    ui.add_enabled(
+                        !(auto_exposure && !pathtrace),
+                        egui::Slider::new(&mut exposure, 0.1..=4.0).text("Exposure"),
+                    );
                     ui.add_enabled(
                         !pathtrace,
                         egui::Checkbox::new(&mut bloom, "Bloom (rasterizer only)"),

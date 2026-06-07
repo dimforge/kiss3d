@@ -7,7 +7,7 @@ use crate::resource::vertex_index::VertexIndex;
 use crate::resource::{
     GpuMesh3d, Material3d, MaterialManager3d, MeshManager3d, RenderContext, Texture, TextureManager,
 };
-use crate::scene::{Bsdf, InstanceData3d, Object3d};
+use crate::scene::{AlphaMode, Bsdf, InstanceData3d, Object3d};
 use glamx::{Mat3, Pose3, Quat, Vec2, Vec3};
 use std::cell::{Ref, RefCell, RefMut};
 use std::path::{Path, PathBuf};
@@ -1882,6 +1882,47 @@ impl SceneNode3d {
         self.clone()
     }
 
+    // === Extended PBR surface properties (rasterizer + path tracer) ===
+
+    /// Sets the dielectric specular reflectance in `[0, 1]` (`F0 = 0.16·r²`).
+    /// See [`Object3d::set_reflectance`](crate::scene::Object3d::set_reflectance).
+    #[inline]
+    pub fn set_reflectance(&mut self, reflectance: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_reflectance(reflectance));
+        self.clone()
+    }
+
+    /// Sets the clearcoat layer strength and roughness, both in `[0, 1]`.
+    /// See [`Object3d::set_clearcoat`](crate::scene::Object3d::set_clearcoat).
+    #[inline]
+    pub fn set_clearcoat(&mut self, strength: f32, roughness: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_clearcoat(strength, roughness));
+        self.clone()
+    }
+
+    /// Sets the specular anisotropy strength (`[-1, 1]`) and rotation (radians).
+    /// See [`Object3d::set_anisotropy`](crate::scene::Object3d::set_anisotropy).
+    #[inline]
+    pub fn set_anisotropy(&mut self, strength: f32, rotation: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_anisotropy(strength, rotation));
+        self.clone()
+    }
+
+    /// Sets how this node's object interprets alpha (see [`AlphaMode`]).
+    #[inline]
+    pub fn set_alpha_mode(&mut self, alpha_mode: AlphaMode) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_alpha_mode(alpha_mode));
+        self.clone()
+    }
+
+    /// Sets this node's object render-layer bitmask (see
+    /// [`Object3d::set_render_layers`](crate::scene::Object3d::set_render_layers)).
+    #[inline]
+    pub fn set_render_layers(&mut self, layers: u32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_render_layers(layers));
+        self.clone()
+    }
+
     // === PBR Texture Maps ===
 
     /// Sets the normal map for this node's object only.
@@ -2125,6 +2166,48 @@ impl SceneNode3d {
     #[inline]
     pub fn clear_emissive_map_recursive(&mut self) -> Self {
         self.apply_to_objects_mut_recursive(&mut |o| o.clear_emissive_map());
+        self.clone()
+    }
+
+    /// Sets the parallax height/displacement map from a file (this node only).
+    #[inline]
+    pub fn set_height_map_from_file(&mut self, path: &Path, name: &str) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_height_map_from_file(path, name));
+        self.clone()
+    }
+
+    /// Sets the parallax height/displacement map (this node only).
+    #[inline]
+    pub fn set_height_map(&mut self, texture: Arc<Texture>) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_height_map(texture.clone()));
+        self.clone()
+    }
+
+    /// Clears the parallax height map (this node only).
+    #[inline]
+    pub fn clear_height_map(&mut self) -> Self {
+        self.apply_to_object_mut(&mut |o| o.clear_height_map());
+        self.clone()
+    }
+
+    /// Sets the parallax displacement scale (this node only); `0` disables it.
+    #[inline]
+    pub fn set_parallax_scale(&mut self, scale: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_parallax_scale(scale));
+        self.clone()
+    }
+
+    /// Sets the max parallax search layer count (this node only).
+    #[inline]
+    pub fn set_parallax_layers(&mut self, layers: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_parallax_layers(layers));
+        self.clone()
+    }
+
+    /// Sets the parallax search method (this node only).
+    #[inline]
+    pub fn set_parallax_method(&mut self, method: crate::scene::ParallaxMethod) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_parallax_method(method));
         self.clone()
     }
 

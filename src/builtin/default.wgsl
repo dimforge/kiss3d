@@ -34,6 +34,10 @@ struct FrameUniforms {
     fog_color: vec4<f32>,
     // (mode, param_a, param_b, height_falloff): mode 0 off / 1 linear / 2 exp / 3 exp2.
     fog_params: vec4<f32>,
+    // Camera world position (xyz) for image-based lighting.
+    camera_pos: vec4<f32>,
+    // (has_ibl, max_lod, intensity, env_rotation_radians).
+    ibl_params: vec4<f32>,
 }
 
 // Blends `color` toward the fog color by an amount derived from the fragment's
@@ -68,6 +72,50 @@ fn apply_fog(color: vec3<f32>, view_dist: f32, world_y: f32) -> vec3<f32> {
 @group(0) @binding(0)
 var<uniform> frame: FrameUniforms;
 
+// Image-based lighting environment (mip-chained equirectangular). Sampled for
+// ambient diffuse (coarsest mip) and specular reflections (mip by roughness).
+@group(0) @binding(1)
+var ibl_env: texture_2d<f32>;
+@group(0) @binding(2)
+var ibl_samp: sampler;
+// Screen-space ambient occlusion (full-res, sampled by framebuffer texel).
+@group(0) @binding(3)
+var ibl_ssao: texture_2d<f32>;
+
+// Rotates a direction about Y by the environment rotation (matches the skybox).
+fn ibl_rotate(rd: vec3<f32>) -> vec3<f32> {
+    let rot = frame.ibl_params.w;
+    let c = cos(rot);
+    let s = sin(rot);
+    return vec3<f32>(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
+}
+
+// Equirectangular direction -> UV (matches the path tracer / skybox).
+fn ibl_dir_to_uv(d: vec3<f32>) -> vec2<f32> {
+    return vec2<f32>(atan2(d.z, d.x) / (2.0 * PI) + 0.5, acos(clamp(d.y, -1.0, 1.0)) / PI);
+}
+
+// Samples the environment in `dir` at the given mip LOD.
+fn ibl_sample(dir: vec3<f32>, lod: f32) -> vec3<f32> {
+    return textureSampleLevel(ibl_env, ibl_samp, ibl_dir_to_uv(ibl_rotate(dir)), lod).rgb;
+}
+
+// Karis' analytic environment BRDF approximation (avoids a precomputed LUT).
+fn env_brdf_approx(f0: vec3<f32>, roughness: f32, nov: f32) -> vec3<f32> {
+    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
+    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
+    let r = roughness * c0 + c1;
+    let a004 = min(r.x * r.x, exp2(-9.28 * nov)) * r.x + r.y;
+    let ab = vec2<f32>(-1.04, 1.04) * a004 + vec2<f32>(r.z, r.w);
+    return f0 * ab.x + vec3<f32>(ab.y);
+}
+
+// Roughness-aware Fresnel for the IBL ambient term.
+fn fresnel_schlick_roughness(cos_theta: f32, f0: vec3<f32>, roughness: f32) -> vec3<f32> {
+    let fr = max(vec3<f32>(1.0 - roughness), f0);
+    return f0 + (fr - f0) * pow(clamp(1.0 - cos_theta, 0.0, 1.0), 5.0);
+}
+
 // Bind group 1: Object uniforms (transform, scale, color, PBR properties)
 struct ObjectUniforms {
     transform: mat4x4<f32>,
@@ -92,6 +140,8 @@ struct ObjectUniforms {
     alpha_mode: f32,
     alpha_cutoff: f32,
     specular_tint: vec4<f32>,
+    // (has_height_map, parallax_scale, unused, unused).
+    parallax: vec4<f32>,
 }
 
 @group(1) @binding(0)
@@ -120,6 +170,10 @@ var s_ao: sampler;
 var t_emissive: texture_2d<f32>;
 @group(2) @binding(9)
 var s_emissive: sampler;
+@group(2) @binding(10)
+var t_height: texture_2d<f32>;
+@group(2) @binding(11)
+var s_height: sampler;
 
 // === SHADOW MAPPING (group 3) — localized block for easy merging ===
 // Maximum number of atlas views (must match builtin/shadow.rs MAX_SHADOW_VIEWS).
@@ -600,6 +654,89 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 
 // === Fragment Shader ===
 
+// Builds a world-space tangent frame (TBN) from screen-space derivatives of the
+// world position and texture coordinates (Mikkelsen's cotangent frame), so no
+// per-vertex tangents are needed. Columns are (T, B, N).
+fn cotangent_frame(
+    n: vec3<f32>, dp_dx: vec3<f32>, dp_dy: vec3<f32>, duv_dx: vec2<f32>, duv_dy: vec2<f32>,
+) -> mat3x3<f32> {
+    let dp2perp = cross(dp_dy, n);
+    let dp1perp = cross(n, dp_dx);
+    let t = dp2perp * duv_dx.x + dp1perp * duv_dy.x;
+    let b = dp2perp * duv_dx.y + dp1perp * duv_dy.y;
+    let invmax = inverseSqrt(max(dot(t, t), dot(b, b)));
+    return mat3x3<f32>(t * invmax, b * invmax, n);
+}
+
+// Parallax-occlusion mapping: marches the tangent-space view ray against the
+// height field and returns the displaced texture coordinate. `ts_view` is the
+// view direction in tangent space; the height map is grayscale (brighter =
+// higher, so depth = 1 - height).
+fn parallax_uv(uv0: vec2<f32>, ts_view: vec3<f32>) -> vec2<f32> {
+    let scale = object.parallax.y;
+    if scale <= 0.0 {
+        return uv0;
+    }
+    // Layer count: most layers at grazing angles (steepness → 0), one when
+    // looking head-on (no parallax needed). Clamped to the loop's hard cap.
+    let max_layers = clamp(object.parallax.z, 4.0, 64.0);
+    let steepness = abs(ts_view.z);
+    let num_layers = clamp(mix(max_layers, 1.0, steepness), 1.0, 64.0);
+    let layer_depth = 1.0 / num_layers;
+    // Offset limiting: the per-layer UV shift divides by the view steepness, but
+    // we floor it so near-silhouette (grazing) fragments can't amplify the offset
+    // into runaway texture "swimming" — the screen-space tangent frame is least
+    // reliable exactly there.
+    let p = ts_view.xy / max(steepness, 0.35) * scale;
+    let delta_uv = p / num_layers;
+
+    var cur_layer_depth = 0.0;
+    var cur_uv = uv0;
+    var cur_depth = 1.0 - textureSampleLevel(t_height, s_height, cur_uv, 0.0).r;
+
+    // Linear (steep) search. Hard 64-iteration cap (WGSL needs a bounded loop);
+    // also stops at `num_layers` or once the ray crosses the height field.
+    let n = i32(num_layers);
+    for (var i = 0; i < 64; i = i + 1) {
+        if i >= n || cur_layer_depth >= cur_depth {
+            break;
+        }
+        cur_uv -= delta_uv;
+        cur_depth = 1.0 - textureSampleLevel(t_height, s_height, cur_uv, 0.0).r;
+        cur_layer_depth += layer_depth;
+    }
+
+    // Relief mapping (parallax.w >= 1): binary-search refinement around the
+    // crossing for a sharper, more accurate intersection.
+    if object.parallax.w > 0.5 {
+        var step = delta_uv * 0.5;
+        var ld_step = layer_depth * 0.5;
+        var uv = cur_uv;
+        var ld = cur_layer_depth;
+        for (var k = 0; k < 8; k = k + 1) {
+            let h = 1.0 - textureSampleLevel(t_height, s_height, uv, 0.0).r;
+            if ld < h {
+                uv -= step;
+                ld += ld_step;
+            } else {
+                uv += step;
+                ld -= ld_step;
+            }
+            step *= 0.5;
+            ld_step *= 0.5;
+        }
+        return uv;
+    }
+
+    // Occlusion mapping: interpolate between the last two samples.
+    let prev_uv = cur_uv + delta_uv;
+    let after = cur_depth - cur_layer_depth;
+    let before =
+        (1.0 - textureSampleLevel(t_height, s_height, prev_uv, 0.0).r) - cur_layer_depth + layer_depth;
+    let weight = after / (after - before);
+    return mix(cur_uv, prev_uv, clamp(weight, 0.0, 1.0));
+}
+
 // Shades the fragment, returning (linear HDR color, alpha). Shared by the opaque
 // pass (`fs_main`) and the weighted-blended OIT pass (`fs_oit`).
 fn shade(in: VertexOutput) -> vec4<f32> {
@@ -608,9 +745,27 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     // projects these per light to derive the receiver-plane depth bias.
     let dpos_dx = dpdx(in.world_pos);
     let dpos_dy = dpdy(in.world_pos);
+    // UV derivatives (taken in uniform control flow) for the parallax tangent frame.
+    let duv_dx = dpdx(in.tex_coord);
+    let duv_dy = dpdy(in.tex_coord);
+
+    // Parallax-occlusion mapping: offset the texture coordinate along the
+    // tangent-space view direction so a height map fakes surface relief. All
+    // subsequent maps are sampled at the displaced `uv`.
+    var uv = in.tex_coord;
+    if object.parallax.x > 0.5 {
+        let n_geo = normalize(in.world_normal);
+        let tbn = cotangent_frame(n_geo, dpos_dx, dpos_dy, duv_dx, duv_dy);
+        // World-space view direction (inverse of the view rotation applied to the
+        // view-space view vector).
+        let view_rot = mat3x3<f32>(frame.view[0].xyz, frame.view[1].xyz, frame.view[2].xyz);
+        let world_v = transpose(view_rot) * normalize(-in.view_pos);
+        let ts_view = vec3<f32>(dot(tbn[0], world_v), dot(tbn[1], world_v), dot(tbn[2], world_v));
+        uv = parallax_uv(in.tex_coord, ts_view);
+    }
 
     // Sample albedo texture and combine with vertex/object color
-    let albedo_tex = textureSample(t_diffuse, s_diffuse, in.tex_coord);
+    let albedo_tex = textureSample(t_diffuse, s_diffuse, uv);
     let base_color = in.vert_color * object.color;
     let albedo = (albedo_tex * base_color).rgb;
 
@@ -619,7 +774,7 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     var roughness = object.roughness;
 
     if object.has_metallic_roughness_map > 0.5 {
-        let mr = textureSample(t_metallic_roughness, s_metallic_roughness, in.tex_coord);
+        let mr = textureSample(t_metallic_roughness, s_metallic_roughness, uv);
         // glTF convention: B = metallic, G = roughness
         metallic = mr.b;
         roughness = mr.g;
@@ -632,21 +787,12 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     var N = normalize(in.world_normal);
 
     if object.has_normal_map > 0.5 {
-        let normal_sample = textureSample(t_normal, s_normal, in.tex_coord).rgb;
+        let normal_sample = textureSample(t_normal, s_normal, uv).rgb;
         let tangent_normal = normal_sample * 2.0 - 1.0;
-
-        // Generate tangent space (simple method based on normal)
-        var tangent: vec3<f32>;
-        let c1 = cross(N, vec3<f32>(0.0, 0.0, 1.0));
-        let c2 = cross(N, vec3<f32>(0.0, 1.0, 0.0));
-        if length(c1) > length(c2) {
-            tangent = normalize(c1);
-        } else {
-            tangent = normalize(c2);
-        }
-        let bitangent = normalize(cross(N, tangent));
-        let TBN = mat3x3<f32>(tangent, bitangent, N);
-        N = normalize(TBN * tangent_normal);
+        // UV-aligned cotangent frame (same basis parallax uses), so tangent-space
+        // normals are oriented consistently with the texture coordinates.
+        let tbn = cotangent_frame(N, dpos_dx, dpos_dy, duv_dx, duv_dy);
+        N = normalize(tbn * tangent_normal);
     }
 
     // Transform normal to view space for lighting
@@ -657,16 +803,21 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     );
     let N_view = normalize(view_mat3 * N);
 
-    // Sample ambient occlusion
+    // Sample ambient occlusion (texture map × screen-space SSAO).
     var ao = 1.0;
     if object.has_ao_map > 0.5 {
-        ao = textureSample(t_ao, s_ao, in.tex_coord).r;
+        ao = textureSample(t_ao, s_ao, uv).r;
+    }
+    // Screen-space AO (gated by camera_pos.w), sampled by framebuffer texel.
+    if frame.camera_pos.w > 0.5 {
+        let px = vec2<i32>(in.clip_position.xy);
+        ao = ao * textureLoad(ibl_ssao, px, 0).r;
     }
 
     // Sample emissive
     var emissive = object.emissive.rgb;
     if object.has_emissive_map > 0.5 {
-        let emissive_sample = textureSample(t_emissive, s_emissive, in.tex_coord).rgb;
+        let emissive_sample = textureSample(t_emissive, s_emissive, uv).rgb;
         emissive = emissive * emissive_sample;
     }
 
@@ -682,14 +833,12 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     let dielectric_f0 = 0.16 * object.reflectance * object.reflectance * object.specular_tint.rgb;
     let F0 = mix(dielectric_f0, albedo, metallic);
 
-    // Anisotropy basis: a tangent/bitangent in view space, rotated about the
-    // normal by `anisotropy_rotation`.
+    // Anisotropy basis: a UV-aligned tangent (from the cotangent frame, so it is
+    // continuous and free of the pole singularity an arbitrary up-cross basis
+    // has), brought into view space and rotated about the normal.
     let aniso = object.anisotropy;
-    var aniso_t = cross(vec3<f32>(0.0, 1.0, 0.0), N_view);
-    if dot(aniso_t, aniso_t) < 1e-6 {
-        aniso_t = cross(vec3<f32>(1.0, 0.0, 0.0), N_view);
-    }
-    aniso_t = normalize(aniso_t);
+    let aniso_tbn_w = cotangent_frame(normalize(in.world_normal), dpos_dx, dpos_dy, duv_dx, duv_dy);
+    var aniso_t = normalize(view_mat3 * aniso_tbn_w[0]);
     let ar = object.anisotropy_rotation;
     aniso_t = normalize(aniso_t * cos(ar) + cross(N_view, aniso_t) * sin(ar));
     let aniso_b = cross(N_view, aniso_t);
@@ -808,8 +957,26 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         Lo += (diffuse_contrib + transmit_contrib + specular_contrib) * radiance;
     }
 
-    // Ambient lighting using configurable intensity + color from frame uniforms
-    let ambient = frame.ambient_color.rgb * frame.ambient_intensity * albedo * ao;
+    // Ambient lighting: image-based when an environment is set, else the flat
+    // colored ambient term.
+    var ambient: vec3<f32>;
+    if frame.ibl_params.x > 0.5 {
+        let world_v = normalize(frame.camera_pos.xyz - in.world_pos);
+        let nov = max(dot(N, world_v), 1e-4);
+        let r_dir = reflect(-world_v, N);
+        let intensity = frame.ibl_params.z;
+        let max_lod = frame.ibl_params.y;
+        // Diffuse irradiance ≈ the coarsest mip in the normal direction;
+        // specular ≈ the environment at the reflection direction, mip by roughness.
+        let irradiance = ibl_sample(N, max_lod) * intensity;
+        let prefiltered = ibl_sample(r_dir, roughness * max_lod) * intensity;
+        let f = fresnel_schlick_roughness(nov, F0, roughness);
+        let kd = (vec3<f32>(1.0) - f) * (1.0 - metallic);
+        let spec_env = prefiltered * env_brdf_approx(F0, roughness, nov);
+        ambient = (kd * irradiance * albedo + spec_env) * ao;
+    } else {
+        ambient = frame.ambient_color.rgb * frame.ambient_intensity * albedo * ao;
+    }
 
     // Final color
     var color = ambient + Lo + emissive;
@@ -818,6 +985,13 @@ fn shade(in: VertexOutput) -> vec4<f32> {
     color = apply_fog(color, length(in.view_pos), in.world_pos.y);
 
     return vec4<f32>(color, albedo_tex.a * base_color.a);
+}
+
+// Depth/view-position prepass: writes the view-space position (xyz) so the SSAO
+// pass can reconstruct geometry. Depth is written by the pipeline.
+@fragment
+fn fs_prepass(in: VertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.view_pos, 1.0);
 }
 
 // Opaque pass: write the shaded color straight into the HDR film. Handles the

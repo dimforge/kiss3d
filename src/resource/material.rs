@@ -16,6 +16,9 @@ use std::any::Any;
 /// matching surfaces (and to pick the opaque vs. OIT pipeline).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 pub enum RenderPhase {
+    /// Depth + view-position prepass (single target), rendered before the opaque
+    /// pass to drive screen-space effects such as SSAO.
+    Prepass,
     /// Opaque surfaces (alpha == 1), plus wireframe/point overlays.
     #[default]
     Opaque,
@@ -38,12 +41,33 @@ pub struct RenderContext {
     pub viewport_width: u32,
     /// The viewport height in pixels.
     pub viewport_height: u32,
+    /// Render-layer mask of the camera being rendered. An object is drawn only
+    /// when its own layer mask shares a bit with this one. `u32::MAX` (the
+    /// default) renders every layer.
+    pub render_layers: u32,
     /// Shadow bind group (group 4) supplied by the window's shadow mapper.
     ///
     /// When `None`, materials fall back to their own neutral "no shadows" bind
     /// group so rendering stays correct when shadows are disabled. Cloning a
     /// `wgpu::BindGroup` is cheap (it is a reference-counted handle).
     pub shadow_bind_group: Option<wgpu::BindGroup>,
+}
+
+/// The environment-lighting (IBL) resources a window supplies to materials each
+/// frame: a mip-chained equirectangular environment map plus its orientation and
+/// intensity. Materials that support image-based lighting consume this in
+/// [`Material3d::set_environment_lighting`].
+pub struct EnvLight<'a> {
+    /// View over the mip-chained equirectangular environment.
+    pub view: &'a wgpu::TextureView,
+    /// Sampler for the environment (trilinear).
+    pub sampler: &'a wgpu::Sampler,
+    /// Number of mip levels (max sampleable LOD is `mip_count - 1`).
+    pub mip_count: u32,
+    /// Luminance multiplier.
+    pub intensity: f32,
+    /// Y-axis rotation in radians (matches the skybox).
+    pub rotation: f32,
 }
 
 /// Per-object GPU data for a material.
@@ -121,6 +145,18 @@ pub trait Material3d {
     fn renders_in_transparent_phase(&self) -> bool {
         false
     }
+
+    /// Supplies (or clears) the image-based-lighting environment for this frame.
+    ///
+    /// Called once per frame by the window with the active skybox environment, or
+    /// `None` when no skybox/IBL is set. Materials that don't support IBL ignore
+    /// it (the default no-op).
+    fn set_environment_lighting(&mut self, _env: Option<EnvLight<'_>>) {}
+
+    /// Supplies (or clears) the screen-space ambient-occlusion texture for this
+    /// frame. The material samples it per pixel to darken ambient lighting.
+    /// `None` disables it. Default no-op.
+    fn set_ssao(&mut self, _ao: Option<&wgpu::TextureView>) {}
 
     /// Renders an object using this material (phase 3).
     ///

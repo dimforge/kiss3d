@@ -243,8 +243,61 @@ impl Window {
             // Render pass is dropped here, ending the clear pass
         }
 
+        // Skybox: drawn full-screen into the HDR film right after the clear, so the
+        // opaque pass overwrites it wherever geometry is visible. Uses the primary
+        // (pass 0) inverse view-projection; since the sky is at infinity this is
+        // also correct for stereo (both eyes share the view rotation). No-op when
+        // no skybox environment is set.
+        if self.skybox.is_set() {
+            self.skybox.render(
+                &mut encoder,
+                &color_view,
+                sample_count,
+                camera.inverse_transformation(),
+            );
+        }
+
         // Signal start of new frame to all materials (for dynamic buffer clearing)
         MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
+
+        // Supply the skybox environment to the default material for image-based
+        // lighting (or clear it when no skybox is set).
+        {
+            let default_mat = MaterialManager3d::get_global_manager(|mm| mm.get_default());
+            let mut mat = default_mat.borrow_mut();
+            if let Some(env) = self.skybox.ibl_env() {
+                mat.set_environment_lighting(Some(crate::resource::EnvLight {
+                    view: &env.view,
+                    sampler: &env.sampler,
+                    mip_count: env.mip_count,
+                    intensity: self.skybox.intensity(),
+                    rotation: self.skybox.rotation(),
+                }));
+            } else {
+                mat.set_environment_lighting(None);
+            }
+        }
+
+        // SSAO: ensure resources exist/sized, then bind the (persistent) AO
+        // texture + set the enable flag on the material BEFORE prepare() — the
+        // flag is baked into the frame uniform there. The AO contents are
+        // computed below (after prepare propagates transforms) into that same
+        // texture, before the opaque pass samples it.
+        if self.ssao_enabled {
+            let ssao = self
+                .ssao
+                .get_or_insert_with(|| crate::renderer::Ssao::new(w, h));
+            ssao.resize(w, h);
+        }
+        {
+            let default_mat = MaterialManager3d::get_global_manager(|mm| mm.get_default());
+            let mut mat = default_mat.borrow_mut();
+            if self.ssao_enabled {
+                mat.set_ssao(Some(self.ssao.as_ref().unwrap().ao_view()));
+            } else {
+                mat.set_ssao(None);
+            }
+        }
 
         // Create a light collection for this frame
         let mut lights = LightCollection::with_ambient(self.ambient_intensity);
@@ -272,6 +325,57 @@ impl Window {
                     .render(scene, &*camera, &lights, &mut encoder, &mut self.gpu_timer);
             }
 
+            // Phase 2.6: SSAO prepass + compute (first pass only). Render the
+            // scene's view-space positions into the SSAO prepass target, then run
+            // the SSAO + blur passes into the AO texture the opaque pass samples.
+            if self.ssao_enabled && pass == 0 {
+                if let Some(scene) = scene.as_deref_mut() {
+                    let ssao = self.ssao.as_ref().unwrap();
+                    let prepass_ctx = RenderContext {
+                        surface_format: crate::post_processing::HDR_FORMAT,
+                        sample_count: 1,
+                        viewport_width: w,
+                        viewport_height: h,
+                        render_layers: camera.render_layers(),
+                        shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                        phase: RenderPhase::Prepass,
+                    };
+                    {
+                        let mut pp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("ssao_prepass"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: ssao.viewpos_view(),
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    // a = 0 marks background (no geometry).
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            })],
+                            depth_stencil_attachment: Some(
+                                wgpu::RenderPassDepthStencilAttachment {
+                                    view: ssao.depth_view(),
+                                    depth_ops: Some(wgpu::Operations {
+                                        load: wgpu::LoadOp::Clear(1.0),
+                                        store: wgpu::StoreOp::Store,
+                                    }),
+                                    stencil_ops: None,
+                                },
+                            ),
+                            timestamp_writes: None,
+                            occlusion_query_set: None,
+                            multiview_mask: None,
+                        });
+                        scene
+                            .data_mut()
+                            .render(0, camera, &lights, &mut pp, &prepass_ctx);
+                    }
+                    let (_, proj) = camera.view_transform_pair(0);
+                    ssao.compute(&mut encoder, proj);
+                }
+            }
+
             // Phase 3: Render - issue draw calls using a SINGLE render pass.
             // The scene is rasterized into the HDR film, so the render context
             // advertises the HDR format.
@@ -281,6 +385,7 @@ impl Window {
                     sample_count,
                     viewport_width: w,
                     viewport_height: h,
+                    render_layers: camera.render_layers(),
                     shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
                     phase: RenderPhase::Opaque,
                 };
@@ -372,6 +477,7 @@ impl Window {
                 sample_count,
                 viewport_width: w,
                 viewport_height: h,
+                render_layers: camera.render_layers(),
                 shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
                 phase: RenderPhase::Transparent,
             };

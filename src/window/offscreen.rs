@@ -211,6 +211,17 @@ impl OffscreenSurface {
         self.window.snap_segmentation_colored(scene, camera)
     }
 
+    /// Borrows the underlying [`Window`], for settings not forwarded directly
+    /// (fog, skybox, HDR/color-grading, shadows, …).
+    pub fn window(&self) -> &Window {
+        &self.window
+    }
+
+    /// Mutably borrows the underlying [`Window`].
+    pub fn window_mut(&mut self) -> &mut Window {
+        &mut self.window
+    }
+
     /// Resizes the off-screen surface. The next render uses the new size.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.window.canvas_mut().resize(width, height);

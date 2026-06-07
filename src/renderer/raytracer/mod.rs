@@ -18,7 +18,7 @@
 mod accumulation;
 mod bvh;
 mod denoise;
-mod environment;
+pub(crate) mod environment;
 mod gpu_scene;
 mod pipeline;
 pub mod scene_data;

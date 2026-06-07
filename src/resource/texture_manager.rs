@@ -306,6 +306,21 @@ impl Texture {
         )
     }
 
+    /// Creates a default height map (1x1, mid-gray). Only used as a placeholder
+    /// when no height map is set; parallax is gated by a flag, so its value is
+    /// irrelevant.
+    pub fn new_default_height_map() -> Arc<Texture> {
+        let pixel: [u8; 4] = [128, 128, 128, 255];
+        Self::new(
+            1,
+            1,
+            &pixel,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::AddressMode::Repeat,
+            false,
+        )
+    }
+
     /// Creates a default emissive map (1x1, black = no emission).
     pub fn new_default_emissive_map() -> Arc<Texture> {
         let emissive_pixel: [u8; 4] = [0, 0, 0, 255];

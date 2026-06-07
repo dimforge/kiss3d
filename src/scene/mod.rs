@@ -5,7 +5,7 @@ pub use self::object2d::{
     LINES_WIDTH_USE_OBJECT_2D, POINTS_COLOR_USE_OBJECT_2D, POINTS_SIZE_USE_OBJECT_2D,
 };
 pub use self::object3d::{
-    AlphaMode, Bsdf, InstanceData3d, InstancesBuffer3d, Object3d, ObjectData3d,
+    AlphaMode, Bsdf, InstanceData3d, InstancesBuffer3d, Object3d, ObjectData3d, ParallaxMethod,
     LINES_COLOR_USE_OBJECT, LINES_WIDTH_USE_OBJECT, POINTS_COLOR_USE_OBJECT, POINTS_SIZE_USE_OBJECT,
 };
 pub use self::scene_node2d::{SceneNode2d, SceneNodeData2d};

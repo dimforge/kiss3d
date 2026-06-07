@@ -60,6 +60,10 @@ struct FrameUniforms {
     fog_color: [f32; 4],
     // Fog params: (mode, param_a, param_b, height_falloff). See `Fog::params`.
     fog_params: [f32; 4],
+    // Camera world position (xyz) + unused, for image-based lighting.
+    camera_pos: [f32; 4],
+    // IBL params: (has_ibl, max_lod, intensity, env_rotation_radians).
+    ibl_params: [f32; 4],
 }
 
 /// Object-level uniforms (transform, scale, color, PBR properties).
@@ -90,6 +94,8 @@ struct ObjectUniforms {
     alpha_mode: f32,
     alpha_cutoff: f32,
     specular_tint: [f32; 4],
+    // (has_height_map, parallax_scale, unused, unused).
+    parallax: [f32; 4],
 }
 
 /// View uniforms for wireframe rendering (includes viewport).
@@ -171,6 +177,7 @@ pub struct ObjectMaterialGpuData {
     cached_metallic_roughness_map_ptr: usize,
     cached_ao_map_ptr: usize,
     cached_emissive_map_ptr: usize,
+    cached_height_map_ptr: usize,
     // Wireframe rendering data (model uniforms are per-object)
     wireframe_model_uniform_buffer: wgpu::Buffer,
     wireframe_edge_buffer: wgpu::Buffer,
@@ -243,6 +250,7 @@ impl ObjectMaterialGpuData {
             cached_metallic_roughness_map_ptr: 0,
             cached_ao_map_ptr: 0,
             cached_emissive_map_ptr: 0,
+            cached_height_map_ptr: 0,
             // Wireframe rendering
             wireframe_model_uniform_buffer,
             wireframe_edge_buffer,
@@ -351,6 +359,8 @@ pub struct ObjectMaterial {
     oit_pipeline_cull: PipelineCache,
     /// Weighted-blended OIT pipeline (no culling).
     oit_pipeline_no_cull: PipelineCache,
+    /// Depth + view-position prepass pipeline (single target), for SSAO.
+    prepass_pipeline: PipelineCache,
     object_bind_group_layout: wgpu::BindGroupLayout,
     /// Combined material-texture bind group layout (albedo + PBR maps, group 2).
     texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -359,6 +369,7 @@ pub struct ObjectMaterial {
     default_metallic_roughness_map: std::sync::Arc<crate::resource::Texture>,
     default_ao_map: std::sync::Arc<crate::resource::Texture>,
     default_emissive_map: std::sync::Arc<crate::resource::Texture>,
+    default_height_map: std::sync::Arc<crate::resource::Texture>,
     // Wireframe rendering resources
     wireframe_pipeline: PipelineCache,
     wireframe_model_bind_group_layout: wgpu::BindGroupLayout,
@@ -369,8 +380,33 @@ pub struct ObjectMaterial {
     // === Dynamic uniform buffer system ===
     /// Shared frame uniform buffer (view, projection, light)
     frame_uniform_buffer: wgpu::Buffer,
-    /// Shared bind group for frame uniforms
+    /// Shared bind group for frame uniforms (+ the IBL environment at bindings 1/2)
     frame_bind_group: wgpu::BindGroup,
+    /// Frame bind group layout, kept so the group can be rebuilt when the IBL
+    /// environment or SSAO texture changes.
+    frame_bind_group_layout: wgpu::BindGroupLayout,
+    // === Per-view textures in group 0: IBL env (1/2) + SSAO (3). ===
+    /// 1x1 black fallback env bound when no IBL environment is set.
+    _ibl_fallback_texture: wgpu::Texture,
+    ibl_fallback_view: wgpu::TextureView,
+    ibl_fallback_sampler: wgpu::Sampler,
+    /// 1x1 white fallback AO (no occlusion) bound when SSAO is off.
+    _ao_fallback_texture: wgpu::Texture,
+    ao_fallback_view: wgpu::TextureView,
+    /// Currently-bound views (clones; default to the fallbacks).
+    cur_ibl_view: wgpu::TextureView,
+    cur_ibl_sampler: wgpu::Sampler,
+    cur_ao_view: wgpu::TextureView,
+    /// Identities of the bound views (`0` = fallback) to avoid per-frame rebuilds.
+    ibl_bound_ptr: usize,
+    ao_bound_ptr: usize,
+    /// Current IBL parameters, written into the frame uniform each frame.
+    ibl_has: Cell<bool>,
+    ibl_max_lod: Cell<f32>,
+    ibl_intensity: Cell<f32>,
+    ibl_rotation: Cell<f32>,
+    /// Whether SSAO is active this frame (gates the AO sample in the shader).
+    ssao_has: Cell<bool>,
     /// Dynamic buffer for object uniforms
     object_uniform_buffer: DynamicUniformBuffer<ObjectUniforms>,
     /// Bind group for object uniforms (recreated when buffer grows)
@@ -520,17 +556,127 @@ impl ObjectMaterial {
         let frame_bind_group_layout =
             ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("object_material_frame_bind_group_layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
                     },
-                    count: None,
-                }],
+                    // Image-based-lighting environment map (+ sampler).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    // Screen-space ambient occlusion (sampled by texel via textureLoad).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                ],
             });
+
+        // 1x1 black fallback environment, bound when no IBL is active.
+        let ibl_fallback_texture = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("object_material_ibl_fallback"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        ctxt.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &ibl_fallback_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[0u8; 8], // one Rgba16Float texel = 8 bytes, all zero
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(8),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let ibl_fallback_view =
+            ibl_fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let ibl_fallback_sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("object_material_ibl_fallback_sampler"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // 1x1 white fallback AO (= no occlusion), bound when SSAO is off.
+        let ao_fallback_texture = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("object_material_ao_fallback"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        ctxt.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &ao_fallback_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &0x3c00u16.to_le_bytes(), // f16 1.0
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(2),
+                rows_per_image: Some(1),
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+        let ao_fallback_view =
+            ao_fallback_texture.create_view(&wgpu::TextureViewDescriptor::default());
 
         // Object bind group uses dynamic offset for batched uniforms
         let object_bind_group_layout =
@@ -553,7 +699,7 @@ impl ObjectMaterial {
         // Albedo and the PBR maps share one group so the pipeline uses only 4 bind
         // groups total, within WebGPU's `maxBindGroups` limit of 4. Bindings:
         // 0/1 albedo, 2/3 normal, 4/5 metallic-roughness, 6/7 ao, 8/9 emissive.
-        let texture_entries: Vec<wgpu::BindGroupLayoutEntry> = (0..5u32)
+        let texture_entries: Vec<wgpu::BindGroupLayoutEntry> = (0..6u32)
             .flat_map(|i| {
                 [
                     wgpu::BindGroupLayoutEntry {
@@ -587,6 +733,7 @@ impl ObjectMaterial {
             crate::resource::Texture::new_default_metallic_roughness_map();
         let default_ao_map = crate::resource::Texture::new_default_ao_map();
         let default_emissive_map = crate::resource::Texture::new_default_emissive_map();
+        let default_height_map = crate::resource::Texture::new_default_height_map();
 
         // Shadow bind group layout (group 3). Structurally identical to the one the
         // window's `ShadowMapper` builds, so its bind group is compatible here.
@@ -757,6 +904,57 @@ impl ObjectMaterial {
         let oit_pipeline_no_cull = PipelineCache::new({
             let build = build_oit.clone();
             move |sc| build(None, "object_material_oit_pipeline_no_cull", sc)
+        });
+
+        // Depth + view-position prepass pipeline: reuses the surface vertex stage
+        // and the full pipeline layout (so the per-object bind calls are
+        // unchanged), with a minimal fragment writing view-space position into a
+        // single Rgba16Float target. Single-sampled (SSAO runs at 1x).
+        let prepass_pipeline = PipelineCache::new({
+            let pipeline_layout = pipeline_layout.clone();
+            let shader = shader.clone();
+            move |sample_count| {
+                let ctxt = Context::get();
+                ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("object_material_prepass_pipeline"),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &surface_vertex_buffer_layouts(),
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_prepass"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: Some(wgpu::Face::Back),
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: Context::depth_format(),
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: multisample_state(sample_count),
+                    multiview_mask: None,
+                    cache: None,
+                })
+            }
         });
 
         // Create wireframe shader and pipelines for lines/points
@@ -1197,10 +1395,24 @@ impl ObjectMaterial {
         let frame_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shared_frame_bind_group"),
             layout: &frame_bind_group_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame_uniform_buffer.as_entire_binding(),
-            }],
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: frame_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&ibl_fallback_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&ibl_fallback_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&ao_fallback_view),
+                },
+            ],
         });
 
         // Dynamic buffer for object uniforms
@@ -1367,18 +1579,36 @@ impl ObjectMaterial {
             pipeline_no_cull,
             oit_pipeline_cull,
             oit_pipeline_no_cull,
+            prepass_pipeline,
             object_bind_group_layout,
             texture_bind_group_layout,
             default_normal_map,
             default_metallic_roughness_map,
             default_ao_map,
             default_emissive_map,
+            default_height_map,
             wireframe_pipeline,
             wireframe_model_bind_group_layout,
             points_pipeline,
             points_model_bind_group_layout,
             frame_uniform_buffer,
             frame_bind_group,
+            frame_bind_group_layout,
+            cur_ibl_view: ibl_fallback_view.clone(),
+            cur_ibl_sampler: ibl_fallback_sampler.clone(),
+            cur_ao_view: ao_fallback_view.clone(),
+            _ibl_fallback_texture: ibl_fallback_texture,
+            ibl_fallback_view,
+            ibl_fallback_sampler,
+            _ao_fallback_texture: ao_fallback_texture,
+            ao_fallback_view,
+            ibl_bound_ptr: 0,
+            ao_bound_ptr: 0,
+            ibl_has: Cell::new(false),
+            ibl_max_lod: Cell::new(0.0),
+            ibl_intensity: Cell::new(1.0),
+            ibl_rotation: Cell::new(0.0),
+            ssao_has: Cell::new(false),
             object_uniform_buffer,
             object_bind_group: Some(object_bind_group),
             object_bind_group_capacity,
@@ -1395,6 +1625,34 @@ impl ObjectMaterial {
 
     /// Builds the combined material-texture bind group (group 2): albedo at
     /// bindings 0/1 followed by the four PBR maps at 2/3, 4/5, 6/7, 8/9.
+    /// Rebuilds the shared frame bind group (group 0) from the current per-view
+    /// resources: the frame uniform, the IBL environment, and the SSAO texture.
+    fn rebuild_frame_bind_group(&mut self) {
+        let ctxt = Context::get();
+        self.frame_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("shared_frame_bind_group"),
+            layout: &self.frame_bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.frame_uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.cur_ibl_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.cur_ibl_sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.cur_ao_view),
+                },
+            ],
+        });
+    }
+
     fn create_texture_bind_group(
         &self,
         albedo: &Texture,
@@ -1402,6 +1660,7 @@ impl ObjectMaterial {
         metallic_roughness_map: &Texture,
         ao_map: &Texture,
         emissive_map: &Texture,
+        height_map: &Texture,
     ) -> wgpu::BindGroup {
         let ctxt = Context::get();
         let textures = [
@@ -1410,6 +1669,7 @@ impl ObjectMaterial {
             metallic_roughness_map,
             ao_map,
             emissive_map,
+            height_map,
         ];
         let entries: Vec<wgpu::BindGroupEntry> = textures
             .iter()
@@ -1622,6 +1882,17 @@ impl Material3d for ObjectMaterial {
                     lights.fog.color.a,
                 ],
                 fog_params: lights.fog.params(),
+                camera_pos: {
+                    let e = camera.eye();
+                    // w = SSAO-enabled flag (gates the AO sample in the shader).
+                    [e.x, e.y, e.z, if self.ssao_has.get() { 1.0 } else { 0.0 }]
+                },
+                ibl_params: [
+                    if self.ibl_has.get() { 1.0 } else { 0.0 },
+                    self.ibl_max_lod.get(),
+                    self.ibl_intensity.get(),
+                    self.ibl_rotation.get(),
+                ],
             };
 
             ctxt.write_buffer(
@@ -1728,6 +1999,12 @@ impl Material3d for ObjectMaterial {
                 let t = data.specular_tint();
                 [t.r, t.g, t.b, t.a]
             },
+            parallax: [
+                if data.height_map().is_some() { 1.0 } else { 0.0 },
+                data.parallax_scale(),
+                data.parallax_layers(),
+                data.parallax_method().code(),
+            ],
         };
 
         // Push to dynamic buffer and store offset in gpu_data
@@ -1807,6 +2084,56 @@ impl Material3d for ObjectMaterial {
         true
     }
 
+    fn set_environment_lighting(&mut self, env: Option<crate::resource::EnvLight<'_>>) {
+        match env {
+            Some(e) => {
+                self.ibl_has.set(true);
+                self.ibl_max_lod.set((e.mip_count.max(1) - 1) as f32);
+                self.ibl_intensity.set(e.intensity);
+                self.ibl_rotation.set(e.rotation);
+                let ptr = e.view as *const wgpu::TextureView as usize;
+                if self.ibl_bound_ptr != ptr {
+                    self.cur_ibl_view = e.view.clone();
+                    self.cur_ibl_sampler = e.sampler.clone();
+                    self.ibl_bound_ptr = ptr;
+                    self.rebuild_frame_bind_group();
+                }
+            }
+            None => {
+                self.ibl_has.set(false);
+                // Rebind the fallback if a real env was bound (it may be dropped).
+                if self.ibl_bound_ptr != 0 {
+                    self.cur_ibl_view = self.ibl_fallback_view.clone();
+                    self.cur_ibl_sampler = self.ibl_fallback_sampler.clone();
+                    self.ibl_bound_ptr = 0;
+                    self.rebuild_frame_bind_group();
+                }
+            }
+        }
+    }
+
+    fn set_ssao(&mut self, ao: Option<&wgpu::TextureView>) {
+        match ao {
+            Some(view) => {
+                self.ssao_has.set(true);
+                let ptr = view as *const wgpu::TextureView as usize;
+                if self.ao_bound_ptr != ptr {
+                    self.cur_ao_view = view.clone();
+                    self.ao_bound_ptr = ptr;
+                    self.rebuild_frame_bind_group();
+                }
+            }
+            None => {
+                self.ssao_has.set(false);
+                if self.ao_bound_ptr != 0 {
+                    self.cur_ao_view = self.ao_fallback_view.clone();
+                    self.ao_bound_ptr = 0;
+                    self.rebuild_frame_bind_group();
+                }
+            }
+        }
+    }
+
     fn flush(&mut self) {
         let ctxt = Context::get();
 
@@ -1854,6 +2181,8 @@ impl Material3d for ObjectMaterial {
         let transparent = data.alpha_mode().is_transparent(data.color().a);
         let render_surface = data.surface_rendering_active()
             && match context.phase {
+                // The prepass rasterizes opaque surfaces only (for SSAO geometry).
+                crate::resource::RenderPhase::Prepass => !transparent,
                 crate::resource::RenderPhase::Opaque => !transparent,
                 crate::resource::RenderPhase::Transparent => transparent,
             };
@@ -1934,18 +2263,21 @@ impl Material3d for ObjectMaterial {
             .unwrap_or(&self.default_metallic_roughness_map);
         let ao_map = data.ao_map().unwrap_or(&self.default_ao_map);
         let emissive_map = data.emissive_map().unwrap_or(&self.default_emissive_map);
+        let height_map = data.height_map().unwrap_or(&self.default_height_map);
 
         let normal_ptr = std::sync::Arc::as_ptr(normal_map) as usize;
         let mr_ptr = std::sync::Arc::as_ptr(metallic_roughness_map) as usize;
         let ao_ptr = std::sync::Arc::as_ptr(ao_map) as usize;
         let emissive_ptr = std::sync::Arc::as_ptr(emissive_map) as usize;
+        let height_ptr = std::sync::Arc::as_ptr(height_map) as usize;
 
         let textures_changed = gpu_data.texture_bind_group.is_none()
             || gpu_data.cached_texture_ptr != texture_ptr
             || gpu_data.cached_normal_map_ptr != normal_ptr
             || gpu_data.cached_metallic_roughness_map_ptr != mr_ptr
             || gpu_data.cached_ao_map_ptr != ao_ptr
-            || gpu_data.cached_emissive_map_ptr != emissive_ptr;
+            || gpu_data.cached_emissive_map_ptr != emissive_ptr
+            || gpu_data.cached_height_map_ptr != height_ptr;
 
         if textures_changed {
             gpu_data.texture_bind_group = Some(self.create_texture_bind_group(
@@ -1954,12 +2286,14 @@ impl Material3d for ObjectMaterial {
                 metallic_roughness_map,
                 ao_map,
                 emissive_map,
+                height_map,
             ));
             gpu_data.cached_texture_ptr = texture_ptr;
             gpu_data.cached_normal_map_ptr = normal_ptr;
             gpu_data.cached_metallic_roughness_map_ptr = mr_ptr;
             gpu_data.cached_ao_map_ptr = ao_ptr;
             gpu_data.cached_emissive_map_ptr = emissive_ptr;
+            gpu_data.cached_height_map_ptr = height_ptr;
         }
 
         // Render surface (filled triangles)
@@ -1971,6 +2305,7 @@ impl Material3d for ObjectMaterial {
             // no-cull per the object's backface-culling setting.
             let cull = data.backface_culling_enabled();
             let pipeline = match (context.phase, cull) {
+                (crate::resource::RenderPhase::Prepass, _) => &self.prepass_pipeline,
                 (crate::resource::RenderPhase::Transparent, true) => &self.oit_pipeline_cull,
                 (crate::resource::RenderPhase::Transparent, false) => &self.oit_pipeline_no_cull,
                 (crate::resource::RenderPhase::Opaque, true) => &self.pipeline_cull,

@@ -65,6 +65,11 @@ pub struct Window {
     /// rendered into its `Rgba16Float` target, then tonemapped into the LDR
     /// swapchain/offscreen output. See [`HdrPipeline`].
     pub(super) hdr: HdrPipeline,
+    /// Equirectangular skybox drawn as the rasterizer's scene background.
+    pub(super) skybox: crate::renderer::Skybox,
+    /// Screen-space ambient occlusion (created on first enable).
+    pub(super) ssao: Option<crate::renderer::Ssao>,
+    pub(super) ssao_enabled: bool,
     pub(super) post_process_render_target: RenderTarget,
     /// Offscreen render target used when the window is hidden, so `snap` and
     /// recording work without a presentable surface. Created on first use.
@@ -427,6 +432,69 @@ impl Window {
         &mut self.fog
     }
 
+    /// Sets the rasterizer skybox from an equirectangular image file.
+    ///
+    /// Accepts HDR (`.hdr`), EXR, or any format the `image` crate decodes. The
+    /// image is drawn as the scene background and uses the same direction→UV
+    /// mapping as the path tracer's HDRI, so the two backends show the same sky.
+    /// Returns `false` if the file cannot be decoded.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use kiss3d::prelude::*;
+    /// # use std::path::Path;
+    /// # async fn main() {
+    /// # let mut window = Window::new("Example").await;
+    /// window.set_skybox_from_file(Path::new("assets/sky.hdr"));
+    /// # }
+    /// ```
+    pub fn set_skybox_from_file(&mut self, path: &Path) -> bool {
+        self.skybox.set_from_file(path)
+    }
+
+    /// Sets the rasterizer skybox from an already-decoded equirectangular image.
+    pub fn set_skybox_image(&mut self, image: &image::DynamicImage) {
+        self.skybox.set_image(image);
+    }
+
+    /// Sets the skybox Y-axis rotation (radians) and luminance multiplier.
+    pub fn set_skybox_orientation(&mut self, rotation_radians: f32, intensity: f32) {
+        self.skybox.set_orientation(rotation_radians, intensity);
+    }
+
+    /// Removes the skybox, so subsequent frames render the plain background color.
+    pub fn clear_skybox(&mut self) {
+        self.skybox.clear();
+    }
+
+    /// Whether a skybox environment is currently set.
+    pub fn has_skybox(&self) -> bool {
+        self.skybox.is_set()
+    }
+
+    /// Enables or disables screen-space ambient occlusion (SSAO).
+    ///
+    /// When enabled, a depth/view-position prepass plus a hemisphere-sampling
+    /// pass darken the ambient lighting in creases and contact areas. Adds a
+    /// geometry prepass per frame. Disabled by default.
+    pub fn set_ssao_enabled(&mut self, enabled: bool) {
+        self.ssao_enabled = enabled;
+    }
+
+    /// Whether SSAO is enabled.
+    pub fn ssao_enabled(&self) -> bool {
+        self.ssao_enabled
+    }
+
+    /// Mutable access to the SSAO settings (radius, bias, intensity, power),
+    /// creating the SSAO state if needed.
+    pub fn ssao_settings_mut(&mut self) -> &mut crate::renderer::SsaoSettings {
+        let (w, h) = self.canvas.size();
+        self.ssao
+            .get_or_insert_with(|| crate::renderer::Ssao::new(w, h))
+            .settings_mut()
+    }
+
     /// Enables or disables real-time shadow mapping for the rasterizer.
     ///
     /// Shadows are enabled by default. When disabled, no shadow pre-pass runs and
@@ -727,6 +795,9 @@ impl Window {
             #[cfg(feature = "egui")]
             egui_context: EguiContext::new(),
             hdr: HdrPipeline::new(width, height, 1, canvas_surface_format),
+            skybox: crate::renderer::Skybox::new(),
+            ssao: None,
+            ssao_enabled: false,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             offscreen_output_target: None,
             aov_renderer: None,
@@ -785,6 +856,9 @@ impl Window {
             egui_context: EguiContext::new(),
             // Offscreen rendering is single-sampled (see `render_single_frame`).
             hdr: HdrPipeline::new(width, height, 1, canvas_surface_format),
+            skybox: crate::renderer::Skybox::new(),
+            ssao: None,
+            ssao_enabled: false,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             offscreen_output_target: None,
             aov_renderer: None,

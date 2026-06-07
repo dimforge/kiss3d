@@ -51,6 +51,7 @@ pub struct OrbitCamera3d {
     znear: f32,
     zfar: f32,
     projection: super::Projection,
+    render_layers: u32,
     view: Mat4,
     proj: Mat4,
     proj_view: Mat4,
@@ -125,6 +126,7 @@ impl OrbitCamera3d {
             znear,
             zfar,
             projection: super::Projection::Perspective,
+            render_layers: u32::MAX,
             view: Mat4::IDENTITY,
             proj: Mat4::IDENTITY,
             proj_view: Mat4::IDENTITY,
@@ -480,6 +482,13 @@ impl OrbitCamera3d {
         self.projection
     }
 
+    /// Sets the render-layer bitmask this camera draws (see
+    /// [`Camera3d::render_layers`](super::Camera3d::render_layers)).
+    #[inline]
+    pub fn set_render_layers(&mut self, layers: u32) {
+        self.render_layers = layers;
+    }
+
     /// Sets the projection mode (perspective or orthographic).
     ///
     /// In [`Orthographic`](super::Projection::Orthographic) mode the view is a
@@ -585,6 +594,10 @@ impl Camera3d for OrbitCamera3d {
     #[inline]
     fn view_transform_pair(&self, _pass: usize) -> (Pose3, Mat4) {
         (self.view_transform(), self.proj)
+    }
+
+    fn render_layers(&self) -> u32 {
+        self.render_layers
     }
 
     fn transformation(&self) -> Mat4 {

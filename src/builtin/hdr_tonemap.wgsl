@@ -13,7 +13,8 @@ struct TonemapUniforms {
     tonemap_op: u32,
     // Additive bloom intensity (0 disables the bloom contribution).
     bloom_intensity: f32,
-    _pad: f32,
+    // 1.0 when the adapted exposure texture should override `exposure`.
+    auto_exposure: f32,
     // Color grading: white-balance gain (rgb) + unused.
     white_balance: vec4<f32>,
     // (saturation, contrast, gamma, hue).
@@ -70,6 +71,8 @@ fn color_grade(c_in: vec3<f32>) -> vec3<f32> {
 @group(0) @binding(2) var t_bloom: texture_2d<f32>;
 @group(0) @binding(3) var s_bloom: sampler;
 @group(0) @binding(4) var<uniform> u: TonemapUniforms;
+// 1x1 adapted exposure (auto-exposure); ignored unless `auto_exposure > 0.5`.
+@group(0) @binding(5) var t_exposure: texture_2d<f32>;
 
 struct VsOut {
     @builtin(position) clip_position: vec4<f32>,
@@ -90,8 +93,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let scene = textureSample(t_scene, s_scene, in.uv);
     let bloom = textureSample(t_bloom, s_bloom, in.uv).rgb;
 
+    // Exposure: the adapted auto-exposure value when enabled, else the manual one.
+    var exposure = u.exposure;
+    if u.auto_exposure > 0.5 {
+        exposure = textureSampleLevel(t_exposure, s_scene, vec2<f32>(0.5, 0.5), 0.0).r;
+    }
+
     // Composite bloom additively in linear HDR space, then expose.
-    let exposed = (scene.rgb + bloom * u.bloom_intensity) * u.exposure;
+    let exposed = (scene.rgb + bloom * u.bloom_intensity) * exposure;
 
     // Artistic color grading, then the tonemap operator.
     let hdr = color_grade(exposed);

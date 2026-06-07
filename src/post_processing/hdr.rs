@@ -115,6 +115,17 @@ pub struct HdrSettings {
     pub bloom_intensity: f32,
     /// Artistic color grading applied before the tonemap operator.
     pub color_grading: ColorGrading,
+    /// When enabled, the exposure is computed automatically from the scene's
+    /// average luminance (eye adaptation) instead of using [`exposure`](Self::exposure).
+    pub auto_exposure: bool,
+    /// Adaptation speed (per second) for auto-exposure. Higher adapts faster.
+    pub auto_exposure_speed: f32,
+    /// Smallest exposure multiplier auto-exposure may settle at (brightest scenes).
+    pub auto_exposure_min: f32,
+    /// Largest exposure multiplier auto-exposure may settle at (darkest scenes).
+    pub auto_exposure_max: f32,
+    /// Target middle-gray key value for auto-exposure (≈ 0.18).
+    pub auto_exposure_key: f32,
 }
 
 impl Default for HdrSettings {
@@ -128,6 +139,11 @@ impl Default for HdrSettings {
             bloom_knee: 0.5,
             bloom_intensity: 0.04,
             color_grading: ColorGrading::default(),
+            auto_exposure: false,
+            auto_exposure_speed: 3.0,
+            auto_exposure_min: 0.05,
+            auto_exposure_max: 8.0,
+            auto_exposure_key: 0.18,
         }
     }
 }
@@ -152,11 +168,24 @@ struct TonemapUniforms {
     exposure: f32,
     operator: u32,
     bloom_intensity: f32,
-    _pad: f32,
+    // 1.0 when the adapted exposure texture overrides `exposure`.
+    auto_exposure: f32,
     // Color grading: white-balance gain (rgb) + unused.
     white_balance: [f32; 4],
     // (saturation, contrast, gamma, hue).
     grading: [f32; 4],
+}
+
+/// Uniforms for the auto-exposure adaptation pass (`auto_exposure_adapt.wgsl`).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct AdaptUniforms {
+    dt: f32,
+    speed: f32,
+    min_exposure: f32,
+    max_exposure: f32,
+    key: f32,
+    _pad: [f32; 3],
 }
 
 /// A single mip level of the bloom chain.
@@ -249,6 +278,23 @@ pub struct HdrPipeline {
     vertex_buffer: wgpu::Buffer,
     bloom_uniform: wgpu::Buffer,
     tonemap_uniform: wgpu::Buffer,
+
+    // === Auto-exposure ===
+    // 1x1 metered average luminance (R16Float).
+    _meter_texture: wgpu::Texture,
+    meter_view: wgpu::TextureView,
+    // Ping-pong pair of 1x1 adapted-exposure textures (R16Float).
+    _exposure_texs: [wgpu::Texture; 2],
+    exposure_views: [wgpu::TextureView; 2],
+    // Index of the texture written this frame (the other holds the previous value).
+    exposure_index: usize,
+    meter_layout: wgpu::BindGroupLayout,
+    meter_pipeline: wgpu::RenderPipeline,
+    adapt_layout: wgpu::BindGroupLayout,
+    adapt_pipeline: wgpu::RenderPipeline,
+    adapt_uniform: wgpu::Buffer,
+    // Wall-clock of the previous adaptation, for the dt-based smoothing.
+    last_adapt_time: Option<web_time::Instant>,
 }
 
 impl HdrPipeline {
@@ -430,6 +476,17 @@ impl HdrPipeline {
                     },
                     count: None,
                 },
+                // Auto-exposure: the 1x1 adapted-exposure texture (binding 5).
+                wgpu::BindGroupLayoutEntry {
+                    binding: 5,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
                 // Tony McMapface 3D LUT + its sampler (shared `tonemap_ops.wgsl`
                 // declares these at bindings 6 & 7).
                 wgpu::BindGroupLayoutEntry {
@@ -583,6 +640,156 @@ impl HdrPipeline {
             wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         );
 
+        // === Auto-exposure resources ===
+        // 1x1 R16Float targets: one metered-luminance + a ping-pong exposure pair.
+        let make_1x1 = |label: &str| {
+            let tex = ctxt.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::R16Float,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            (tex, view)
+        };
+        let (meter_texture, meter_view) = make_1x1("hdr_autoexposure_meter");
+        let (exposure_tex0, exposure_view0) = make_1x1("hdr_autoexposure_exp0");
+        let (exposure_tex1, exposure_view1) = make_1x1("hdr_autoexposure_exp1");
+
+        // Metering pipeline: scene texture + sampler -> 1x1 average luminance.
+        let meter_layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("hdr_autoexposure_meter_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let meter_shader = ctxt.create_shader_module(
+            Some("hdr_autoexposure_meter"),
+            include_str!("../builtin/auto_exposure_meter.wgsl"),
+        );
+        let make_1x1_pipeline =
+            |label: &str, layout: &wgpu::BindGroupLayout, shader: &wgpu::ShaderModule| {
+                let pl = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some(label),
+                    bind_group_layouts: &[Some(layout)],
+                    immediate_size: 0,
+                });
+                ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pl),
+                    vertex: wgpu::VertexState {
+                        module: shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &[],
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::R16Float,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: None,
+                    multisample: wgpu::MultisampleState {
+                        count: 1,
+                        mask: !0,
+                        alpha_to_coverage_enabled: false,
+                    },
+                    multiview_mask: None,
+                    cache: None,
+                })
+            };
+        let meter_pipeline = make_1x1_pipeline("hdr_autoexposure_meter", &meter_layout, &meter_shader);
+
+        // Adaptation pipeline: meter + prev exposure + sampler + uniforms -> new exposure.
+        let adapt_layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("hdr_autoexposure_adapt_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let adapt_shader = ctxt.create_shader_module(
+            Some("hdr_autoexposure_adapt"),
+            include_str!("../builtin/auto_exposure_adapt.wgsl"),
+        );
+        let adapt_pipeline = make_1x1_pipeline("hdr_autoexposure_adapt", &adapt_layout, &adapt_shader);
+        let adapt_uniform = ctxt.create_buffer_simple(
+            Some("hdr_autoexposure_adapt_uniform"),
+            std::mem::size_of::<AdaptUniforms>() as u64,
+            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        );
+
         let targets = Self::create_targets(width, height, sample_count);
 
         HdrPipeline {
@@ -618,6 +825,17 @@ impl HdrPipeline {
             vertex_buffer,
             bloom_uniform,
             tonemap_uniform,
+            _meter_texture: meter_texture,
+            meter_view,
+            _exposure_texs: [exposure_tex0, exposure_tex1],
+            exposure_views: [exposure_view0, exposure_view1],
+            exposure_index: 0,
+            meter_layout,
+            meter_pipeline,
+            adapt_layout,
+            adapt_pipeline,
+            adapt_uniform,
+            last_adapt_time: None,
         }
     }
 
@@ -1130,8 +1348,124 @@ impl HdrPipeline {
     /// The scene must already have been rendered into `scene_render_view` (and,
     /// if MSAA is active, resolved into the single-sample scene texture by the
     /// scene render pass's `resolve_target`).
+    /// Meters the scene's average luminance and adapts the exposure toward it.
+    /// Returns the index of the exposure texture holding this frame's value (which
+    /// the tonemap pass samples). Ping-pongs the two 1x1 exposure textures.
+    fn run_auto_exposure(&mut self, encoder: &mut wgpu::CommandEncoder) -> usize {
+        let ctxt = Context::get();
+        let write_index = self.exposure_index;
+        let prev_index = 1 - write_index;
+
+        // dt for the adaptation smoothing (clamped against long stalls / first frame).
+        let now = web_time::Instant::now();
+        let dt = match self.last_adapt_time {
+            Some(t) => (now - t).as_secs_f32().clamp(0.0, 0.5),
+            None => 0.0,
+        };
+        self.last_adapt_time = Some(now);
+
+        ctxt.write_buffer(
+            &self.adapt_uniform,
+            0,
+            bytemuck::bytes_of(&AdaptUniforms {
+                dt,
+                speed: self.settings.auto_exposure_speed,
+                min_exposure: self.settings.auto_exposure_min,
+                max_exposure: self.settings.auto_exposure_max,
+                key: self.settings.auto_exposure_key,
+                _pad: [0.0; 3],
+            }),
+        );
+
+        // Metering pass: scene -> 1x1 average luminance.
+        let meter_bg = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hdr_autoexposure_meter_bg"),
+            layout: &self.meter_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.scene_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hdr_autoexposure_meter_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.meter_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.meter_pipeline);
+            pass.set_bind_group(0, &meter_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // Adaptation pass: (meter, prev exposure) -> new exposure.
+        let adapt_bg = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("hdr_autoexposure_adapt_bg"),
+            layout: &self.adapt_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.meter_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.exposure_views[prev_index]),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.adapt_uniform.as_entire_binding(),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("hdr_autoexposure_adapt_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.exposure_views[write_index],
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.adapt_pipeline);
+            pass.set_bind_group(0, &adapt_bg, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
+        // The texture just written is read this frame; ping-pong for the next.
+        self.exposure_index = prev_index;
+        write_index
+    }
+
     pub(crate) fn resolve(
-        &self,
+        &mut self,
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
         gpu: &mut crate::renderer::timings::GpuTimer,
@@ -1142,6 +1476,15 @@ impl HdrPipeline {
         if bloom_enabled {
             self.run_bloom(encoder);
         }
+
+        // Auto-exposure: meter + adapt before tonemapping. The resulting 1x1
+        // exposure texture is sampled by the tonemap pass (binding 5).
+        let auto = self.settings.auto_exposure;
+        let exposure_index = if auto {
+            self.run_auto_exposure(encoder)
+        } else {
+            self.exposure_index
+        };
 
         ctxt.write_buffer(
             &self.tonemap_uniform,
@@ -1154,7 +1497,7 @@ impl HdrPipeline {
                 } else {
                     0.0
                 },
-                _pad: 0.0,
+                auto_exposure: if auto { 1.0 } else { 0.0 },
                 white_balance: {
                     let w = self.settings.color_grading.white_balance;
                     [w[0], w[1], w[2], 0.0]
@@ -1195,6 +1538,12 @@ impl HdrPipeline {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: self.tonemap_uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(
+                        &self.exposure_views[exposure_index],
+                    ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
