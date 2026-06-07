@@ -50,6 +50,17 @@ jobs:
       - run: rustup target add wasm32-unknown-unknown
       - name: build kiss3d
         run: cargo build --verbose --target wasm32-unknown-unknown;
+  # Instantiate every shader variant on a real (software) GPU backend, so any
+  # variant that fails to compile on the device is caught. `mesa-vulkan-drivers`
+  # provides lavapipe, a software Vulkan device, so the GPU-less runner can create a
+  # wgpu device. See `src/shader_validity.rs`.
+  shader-validity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y cmake libxcb-composite0-dev mesa-vulkan-drivers vulkan-tools
+      - name: Instantiate all shader variants
+        run: WGPU_BACKEND=vulkan cargo test --lib shader_validity -- --nocapture
   # If this fails, consider changing your text or adding something to .typos.toml
   # You can find typos here: https://crates.io/crates/typos'
   typos:

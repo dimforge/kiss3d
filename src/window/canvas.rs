@@ -135,6 +135,16 @@ impl Canvas {
         self.canvas.set_sample_count(samples as u32)
     }
 
+    /// Whether vsync is currently enabled.
+    pub fn vsync(&self) -> bool {
+        self.canvas.vsync()
+    }
+
+    /// Enables/disables vsync at runtime (reconfigures the surface present mode).
+    pub fn set_vsync(&mut self, enabled: bool) {
+        self.canvas.set_vsync(enabled)
+    }
+
     /// Gets the surface format.
     pub fn surface_format(&self) -> wgpu::TextureFormat {
         self.canvas.surface_format()

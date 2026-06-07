@@ -101,7 +101,10 @@ impl Denoise {
 
         let shader = ctxt.create_shader_module(
             Some("rt_denoise_shader"),
-            include_str!("../../builtin/raytrace/denoise.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::denoise",
+                include_str!("../../builtin/raytrace/denoise.wgsl"),
+            ),
         );
 
         let pipeline = ctxt

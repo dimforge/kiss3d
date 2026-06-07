@@ -1,3 +1,4 @@
+import package::common::{fullscreen_triangle_xy, fullscreen_uv_from_clip};
 // Reprojects six captured cube faces (stored as layers of a 2D array) into one
 // equirectangular map, used by runtime reflection-probe capture.
 //
@@ -39,15 +40,10 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-    var corners = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
-    );
-    let xy = corners[vid];
+    let xy = fullscreen_triangle_xy(vid);
     var out: VsOut;
     out.pos = vec4<f32>(xy, 0.0, 1.0);
-    out.uv = vec2<f32>((xy.x + 1.0) * 0.5, (1.0 - xy.y) * 0.5);
+    out.uv = fullscreen_uv_from_clip(xy);
     return out;
 }
 

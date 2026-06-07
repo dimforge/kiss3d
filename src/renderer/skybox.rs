@@ -85,9 +85,18 @@ impl Skybox {
             immediate_size: 0,
         });
 
+        // `skybox` imports the shared equirect mapping from the `pbr_env` module.
         let shader = ctxt.create_shader_module(
             Some("skybox_shader"),
-            include_str!("../builtin/skybox.wgsl"),
+            &crate::builtin::compile_wesl(
+                &[
+                    ("package::skybox", include_str!("../builtin/skybox.wgsl")),
+                    ("package::pbr_env", crate::builtin::PBR_ENV_WESL),
+                    ("package::common", crate::builtin::COMMON_WESL),
+                ],
+                "package::skybox",
+                &[],
+            ),
         );
 
         // Built lazily per MSAA sample count to match the HDR scene attachment.
@@ -205,6 +214,7 @@ impl Skybox {
         color_view: &wgpu::TextureView,
         sample_count: u32,
         inverse_view_proj: glamx::Mat4,
+        gpu: Option<&mut crate::renderer::timings::GpuTimer>,
     ) {
         if !self.environment.present {
             return;
@@ -245,6 +255,7 @@ impl Skybox {
         });
 
         let pipeline = self.pipeline.get(sample_count);
+        let skybox_ts = gpu.and_then(|g| g.render_scope("skybox"));
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("skybox_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -259,7 +270,7 @@ impl Skybox {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: skybox_ts,
             occlusion_query_set: None,
             multiview_mask: None,
         });

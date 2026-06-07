@@ -38,10 +38,12 @@ use super::window_cache::WindowCache;
 pub(super) static DEFAULT_WIDTH: u32 = 800u32;
 pub(super) static DEFAULT_HEIGHT: u32 = 600u32;
 
-/// Default per-layer resolution of the rasterizer shadow atlas. 4096 keeps shadows
-/// crisp across the cascades; lower it with [`Window::set_shadow_resolution`] to
-/// trade sharpness for memory (the atlas is `resolution² × MAX_SHADOW_VIEWS`).
-pub(super) static DEFAULT_SHADOW_RESOLUTION: u32 = 4096u32;
+/// Default per-layer resolution of the rasterizer shadow atlas. 2048 balances
+/// shadow sharpness against the per-frame cost of clearing/rasterizing the atlas
+/// (a point light alone uses six faces); raise it with
+/// [`Window::set_shadow_resolution`] for crisper shadows, lower it to save memory
+/// and fill (the atlas is `resolution² × MAX_SHADOW_VIEWS`).
+pub(super) static DEFAULT_SHADOW_RESOLUTION: u32 = 2048u32;
 
 /// Structure representing a window and a 3D scene.
 ///
@@ -89,6 +91,14 @@ pub struct Window {
     /// it; stays `None` / inactive on WebGL2).
     pub(super) ssr: Option<crate::renderer::Ssr>,
     pub(super) ssr_enabled: bool,
+    /// Depth of field (created on first enable). Shares the geometry prepass with
+    /// SSAO/SSR for the view-position depth it blurs by.
+    pub(super) dof: Option<crate::renderer::Dof>,
+    pub(super) dof_enabled: bool,
+    /// Refraction background snapshot for glass (created on first use). Built from
+    /// the resolved scene each frame that contains refractive surfaces.
+    pub(super) transmission: Option<crate::renderer::Transmission>,
+    pub(super) transmission_enabled: bool,
     pub(super) post_process_render_target: RenderTarget,
     /// Offscreen render target used when the window is hidden, so `snap` and
     /// recording work without a presentable surface. Created on first use.
@@ -108,6 +118,9 @@ pub struct Window {
     /// Per-step timings of the most recently rendered frame, for the active
     /// renderer. `None` until the first frame. See [`Window::render_timings`].
     pub(super) last_timings: Option<RenderTimings>,
+    /// Instant the previous frame started, to derive the wall-clock frame-to-frame
+    /// period ([`RenderTimings::frame_wall`]). `None` until the first frame.
+    pub(super) last_frame_instant: Option<web_time::Instant>,
     /// GPU timestamp-query timer (disabled if the device lacks `TIMESTAMP_QUERY`).
     pub(super) gpu_timer: GpuTimer,
     #[cfg(feature = "egui")]
@@ -165,6 +178,24 @@ impl Window {
     #[inline]
     pub fn set_samples(&mut self, samples: NumSamples) {
         self.canvas.set_samples(samples);
+    }
+
+    /// Whether vsync is currently enabled (vsync is on by default).
+    #[inline]
+    pub fn vsync(&self) -> bool {
+        self.canvas.vsync()
+    }
+
+    /// Enables or disables vsync at runtime, reconfiguring the surface present mode
+    /// (`AutoVsync` ↔ `AutoNoVsync`); takes effect on the next presented frame.
+    ///
+    /// With vsync **off**, frames present uncapped (as fast as the GPU produces
+    /// them) instead of being paced to the display refresh — useful for measuring
+    /// GPU-bound throughput via the wall-clock frame time. No effect on a hidden /
+    /// offscreen window (which has no presentable surface).
+    #[inline]
+    pub fn set_vsync(&mut self, enabled: bool) {
+        self.canvas.set_vsync(enabled);
     }
 
     /// Gets a reference to the underlying canvas.
@@ -599,6 +630,58 @@ impl Window {
             .settings_mut()
     }
 
+    /// Enables or disables depth of field (DoF).
+    ///
+    /// When enabled, the geometry G-buffer prepass (shared with SSAO/SSR) feeds a
+    /// thin-lens blur that keeps surfaces near the focal plane sharp and blurs the
+    /// rest, with the amount controlled by [`DofSettings`](crate::renderer::DofSettings)
+    /// (focal distance, aperture, etc). Runs after SSR and before tonemapping.
+    /// Disabled by default.
+    pub fn set_dof_enabled(&mut self, enabled: bool) {
+        self.dof_enabled = enabled;
+    }
+
+    /// Whether depth of field is enabled.
+    pub fn dof_enabled(&self) -> bool {
+        self.dof_enabled
+    }
+
+    /// Enables or disables refractive transmission (glass).
+    ///
+    /// When enabled (the default), objects with a non-zero
+    /// [`set_transmission`](crate::scene::Object3d::set_transmission) refract the
+    /// rendered scene behind them: after the opaque pass is resolved, its color is
+    /// snapshotted (with a blurred mip chain for frosted glass) and the glass
+    /// objects are drawn sampling it, bent by their IOR/thickness and tinted by the
+    /// volume attenuation. Disable it to skip the extra passes (glass then renders
+    /// as a plain opaque PBR surface). Has no effect on the path tracer.
+    pub fn set_transmission_enabled(&mut self, enabled: bool) {
+        self.transmission_enabled = enabled;
+    }
+
+    /// Whether refractive transmission (glass) is enabled.
+    pub fn transmission_enabled(&self) -> bool {
+        self.transmission_enabled
+    }
+
+    /// Mutable access to the refractive-transmission settings (e.g. the roughness
+    /// blur quality), creating the transmission state if needed.
+    pub fn transmission_settings_mut(&mut self) -> &mut crate::renderer::TransmissionSettings {
+        let (w, h) = self.canvas.size();
+        self.transmission
+            .get_or_insert_with(|| crate::renderer::Transmission::new(w, h))
+            .settings_mut()
+    }
+
+    /// Mutable access to the depth-of-field settings, creating the DoF state if
+    /// needed.
+    pub fn dof_settings_mut(&mut self) -> &mut crate::renderer::DofSettings {
+        let (w, h) = self.canvas.size();
+        self.dof
+            .get_or_insert_with(|| crate::renderer::Dof::new(w, h))
+            .settings_mut()
+    }
+
     /// Enables or disables real-time shadow mapping for the rasterizer.
     ///
     /// Shadows are enabled by default. When disabled, no shadow pre-pass runs and
@@ -883,6 +966,7 @@ impl Window {
             close_key: Some(Key::Escape),
             close_modifiers: None,
             last_timings: None,
+            last_frame_instant: None,
             gpu_timer: GpuTimer::new(),
             canvas,
             events: Rc::new(event_receive),
@@ -909,6 +993,10 @@ impl Window {
             reflection_capture_layers: u32::MAX,
             ssr: None,
             ssr_enabled: false,
+            dof: None,
+            dof_enabled: false,
+            transmission: None,
+            transmission_enabled: true,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             offscreen_output_target: None,
             aov_renderer: None,
@@ -950,6 +1038,7 @@ impl Window {
             close_key: None,
             close_modifiers: None,
             last_timings: None,
+            last_frame_instant: None,
             gpu_timer: GpuTimer::new(),
             canvas,
             events: Rc::new(event_receive),
@@ -977,6 +1066,10 @@ impl Window {
             reflection_capture_layers: u32::MAX,
             ssr: None,
             ssr_enabled: false,
+            dof: None,
+            dof_enabled: false,
+            transmission: None,
+            transmission_enabled: true,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             offscreen_output_target: None,
             aov_renderer: None,

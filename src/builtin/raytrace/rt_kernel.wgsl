@@ -1,6 +1,25 @@
-// Backend-independent path-tracing kernel. Appended after the preamble and an
-// intersection snippet, so `trace_closest` / `trace_any` and all bindings are in
-// scope. One sample per pixel per frame is accumulated as a running mean.
+// Backend-independent path-tracing kernel. Composed (via WESL module imports) with
+// the preamble and the selected intersection module, which provide all scene
+// bindings/types and `trace_closest` / `trace_any`. One sample per pixel per frame
+// is accumulated as a running mean.
+
+// Shared scene data + types from the preamble module (unused items strip away).
+import package::rt_preamble::{
+    RtVertex, RtTriangle, RtMaterial, RtLight, FrameUniforms, Hit, RtEmitter,
+    BSDF_OPAQUE, BSDF_GLASS, BSDF_METAL, BSDF_EMISSIVE, PI, EPS, T_MAX,
+    frame, pixels, vertices, triangles, materials, lights, emitters,
+    tex_array, tex_sampler, env_tex, env_sampler
+};
+// The intersection contract, from whichever backend module is mounted as
+// `package::rt_intersect` (the compute BVH or the hardware ray-query backend).
+import package::rt_intersect::{trace_closest, trace_any};
+// Shared equirectangular mapping (same convention as the rasterizer/skybox).
+import package::pbr_env::equirect_dir_to_uv;
+import package::common::luminance;
+
+// The hardware ray-query backend needs this extension; gated so the compute
+// (software) variant stays portable WGSL.
+@if(hardware) enable wgpu_ray_query;
 
 // ---- Random numbers (PCG hash) ------------------------------------------------
 
@@ -20,10 +39,6 @@ fn rand(state: ptr<function, u32>) -> f32 {
 }
 
 // ---- Sampling helpers ---------------------------------------------------------
-
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
 
 // Power heuristic (beta = 2) used for multiple-importance sampling.
 fn power_heuristic(pf: f32, pg: f32) -> f32 {
@@ -222,10 +237,7 @@ fn env_rotate(rd: vec3<f32>) -> vec3<f32> {
 }
 
 fn dir_to_equirect(rd: vec3<f32>) -> vec2<f32> {
-    let d = env_rotate(rd);
-    let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
-    let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
-    return vec2<f32>(u, v);
+    return equirect_dir_to_uv(env_rotate(rd));
 }
 
 // Radiance seen where a ray escapes the scene: the HDRI environment map if one is

@@ -2,10 +2,12 @@
 //
 // Reads the linear HDR scene texture (`Rgba16Float`), additively composites the
 // blurred bloom texture, applies an exposure multiplier, then the selected
-// tonemap operator + gamma via the shared `apply_tonemap` (see `tonemap_ops.wgsl`,
-// concatenated as a prefix), and writes the LDR result to the output view.
-//
-// `tonemap_ops.wgsl` declares the Tony McMapface LUT at group(0) bindings 6 & 7.
+// tonemap operator + gamma via the shared `apply_tonemap`, imported from the
+// `tonemap_ops` WESL module (which also declares the Tony McMapface LUT at
+// group(0) bindings 6 & 7), and writes the LDR result to the output view.
+
+import package::tonemap_ops::apply_tonemap;
+import package::common::luminance;
 
 struct TonemapUniforms {
     exposure: f32,
@@ -20,11 +22,6 @@ struct TonemapUniforms {
     // (saturation, contrast, gamma, hue).
     grading: vec4<f32>,
 };
-
-// Rec. 709 luminance.
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
 
 // Artistic color grading in linear HDR space: white balance, hue rotation,
 // saturation, contrast (around mid-gray 0.18) and gamma. A neutral uniform

@@ -1,3 +1,4 @@
+import package::common::fullscreen_uv_from_clip;
 // HDR bloom passes for the rasterization pipeline.
 //
 // This shader bundles the three building blocks of a dual-filter (Kawase) bloom:
@@ -33,8 +34,7 @@ struct VsOut {
 fn vs_main(@location(0) position: vec2<f32>) -> VsOut {
     var out: VsOut;
     out.clip_position = vec4<f32>(position, 0.0, 1.0);
-    out.uv = (position + vec2<f32>(1.0, 1.0)) * 0.5;
-    out.uv.y = 1.0 - out.uv.y;
+    out.uv = fullscreen_uv_from_clip(position);
     return out;
 }
 

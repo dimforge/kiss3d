@@ -1,3 +1,4 @@
+import package::common::{unpack_mat2, unpack_mat3};
 // Planar points shader for thick point rendering of 2D mesh vertices
 // Adapted from 3D wireframe_points.wgsl for 2D planar rendering
 //
@@ -60,21 +61,10 @@ struct VertexOutput {
 }
 
 // Reconstruct mat3x3 from padded vec4 columns
-fn unpack_mat3(col0: vec4<f32>, col1: vec4<f32>, col2: vec4<f32>) -> mat3x3<f32> {
-    return mat3x3<f32>(
-        col0.xyz,
-        col1.xyz,
-        col2.xyz
-    );
-}
+
 
 // Reconstruct mat2x2 from padded vec4 columns
-fn unpack_mat2(col0: vec4<f32>, col1: vec4<f32>) -> mat2x2<f32> {
-    return mat2x2<f32>(
-        col0.xy,
-        col1.xy
-    );
-}
+
 
 @vertex
 fn vs_main(

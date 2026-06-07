@@ -79,13 +79,7 @@ async fn main() {
     // No per-frame delta is exposed by the window, so advance at a fixed timestep.
     let dt = 1.0 / 60.0;
 
-    let mut raytracer = RayTracer::with_enabled(false);
-    let mut inspector = Inspector::default();
-
-    while window
-        .raytrace_3d(&mut scene, &mut camera, &mut raytracer)
-        .await
-    {
+    while window.render_3d(&mut scene, &mut camera).await {
         fox.player.update(dt);
         morph_cube.player.update(dt);
 
@@ -139,8 +133,6 @@ async fn main() {
                     n.set_color(Color::new(c.r, c.g, c.b, opacity));
                 }
             });
-
-            window.draw_inspector(&mut inspector, &mut scene, Some(&mut raytracer));
         }
     }
 }

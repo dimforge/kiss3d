@@ -80,17 +80,27 @@ impl PathTracePipeline {
     pub fn new(backend: RayBackend) -> PathTracePipeline {
         let ctxt = Context::get();
 
-        let intersect = match backend {
-            RayBackend::Software => INTERSECT_BVH,
-            RayBackend::Hardware => INTERSECT_RAYQUERY,
+        // Compose the kernel with the preamble and the backend-specific intersection
+        // module via WESL imports (instead of source concatenation). The selected
+        // intersect file is mounted as `package::rt_intersect`; the `hardware` feature
+        // gates the `enable wgpu_ray_query;` directive in the kernel.
+        let hardware = matches!(backend, RayBackend::Hardware);
+        let intersect = if hardware {
+            INTERSECT_RAYQUERY
+        } else {
+            INTERSECT_BVH
         };
-        // The `enable` directive must precede all declarations, so it is prepended
-        // to the whole module for the ray-query backend.
-        let prologue = match backend {
-            RayBackend::Software => "",
-            RayBackend::Hardware => "enable wgpu_ray_query;\n",
-        };
-        let source = format!("{prologue}{PREAMBLE}\n{intersect}\n{KERNEL}");
+        let source = crate::builtin::compile_wesl(
+            &[
+                ("package::rt_preamble", PREAMBLE),
+                ("package::rt_intersect", intersect),
+                ("package::rt_kernel", KERNEL),
+                ("package::pbr_env", crate::builtin::PBR_ENV_WESL),
+                ("package::common", crate::builtin::COMMON_WESL),
+            ],
+            "package::rt_kernel",
+            &[("hardware", hardware)],
+        );
         let shader = ctxt.create_shader_module(Some("rt_path_tracer"), &source);
 
         let group0_layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

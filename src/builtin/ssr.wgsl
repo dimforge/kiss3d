@@ -9,7 +9,9 @@
 // untouched. Where the ray misses, the delta is zero and the forward pass's
 // environment/probe specular remains. See `ssr.rs`.
 
-const PI: f32 = 3.14159265359;
+// Shared equirectangular mapping + analytic env-BRDF (same as the default material).
+import package::pbr_env::{equirect_dir_to_uv, env_brdf_approx};
+import package::common::{fullscreen_triangle_xy, fullscreen_uv_from_clip};
 
 struct SsrUniforms {
     view: mat4x4<f32>,
@@ -53,22 +55,8 @@ fn ibl_rotate(rd: vec3<f32>, rot: f32) -> vec3<f32> {
     return vec3<f32>(c * rd.x + s * rd.z, rd.y, -s * rd.x + c * rd.z);
 }
 
-fn dir_to_uv(d: vec3<f32>) -> vec2<f32> {
-    return vec2<f32>(atan2(d.z, d.x) / (2.0 * PI) + 0.5, acos(clamp(d.y, -1.0, 1.0)) / PI);
-}
-
 fn env_sample(dir: vec3<f32>, lod: f32) -> vec3<f32> {
-    return textureSampleLevel(t_env, samp, dir_to_uv(ibl_rotate(dir, u.ibl.w)), lod).rgb;
-}
-
-// Karis' analytic environment BRDF approximation (matches default.wgsl).
-fn env_brdf_approx(f0: vec3<f32>, roughness: f32, nov: f32) -> vec3<f32> {
-    let c0 = vec4<f32>(-1.0, -0.0275, -0.572, 0.022);
-    let c1 = vec4<f32>(1.0, 0.0425, 1.04, -0.04);
-    let r = roughness * c0 + c1;
-    let a004 = min(r.x * r.x, exp2(-9.28 * nov)) * r.x + r.y;
-    let ab = vec2<f32>(-1.04, 1.04) * a004 + vec2<f32>(r.z, r.w);
-    return f0 * ab.x + vec3<f32>(ab.y);
+    return textureSampleLevel(t_env, samp, equirect_dir_to_uv(ibl_rotate(dir, u.ibl.w)), lod).rgb;
 }
 
 struct VsOut {
@@ -78,11 +66,10 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-    var c = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
-    let xy = c[vid];
+    let xy = fullscreen_triangle_xy(vid);
     var o: VsOut;
     o.pos = vec4<f32>(xy, 0.0, 1.0);
-    o.uv = vec2<f32>((xy.x + 1.0) * 0.5, (1.0 - xy.y) * 0.5);
+    o.uv = fullscreen_uv_from_clip(xy);
     return o;
 }
 

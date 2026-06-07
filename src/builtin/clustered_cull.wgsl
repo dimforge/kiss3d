@@ -28,7 +28,9 @@ struct GpuLight {
     outer_cone_cos: f32,
     attenuation_radius: f32,
     shadow_slot: u32,
-    pad: f32,
+    // Light-layer bitmask (lighting channels); unused by culling, kept for layout
+    // parity with GpuLight in object_material.rs / LightData in default.wgsl.
+    layers: u32,
 };
 
 @group(0) @binding(0) var<uniform> u: ClusterUniforms;

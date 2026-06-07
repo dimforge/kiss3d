@@ -62,7 +62,10 @@ impl Grayscales {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("grayscales_shader"),
-            include_str!("../builtin/grayscales.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::grayscales",
+                include_str!("../builtin/grayscales.wgsl"),
+            ),
         );
 
         // Vertex buffer layout

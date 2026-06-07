@@ -244,7 +244,7 @@ impl ReflectionProbes {
         );
 
         let mut encoder = ctxt.create_command_encoder(Some("reflection_probe_mipgen"));
-        self.generate_layer_mips(&mut encoder, idx);
+        self.generate_layer_mips(&mut encoder, idx, None);
         ctxt.submit(std::iter::once(encoder.finish()));
     }
 
@@ -252,7 +252,12 @@ impl ReflectionProbes {
     /// from the previous one (mip 0 must already be populated). Recorded into the
     /// supplied encoder so it can be folded into the frame (used by runtime
     /// capture) or submitted standalone (used by [`set_image`](Self::set_image)).
-    pub fn generate_layer_mips(&self, encoder: &mut wgpu::CommandEncoder, layer: usize) {
+    pub(crate) fn generate_layer_mips(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        layer: usize,
+        mut gpu: Option<&mut crate::renderer::timings::GpuTimer>,
+    ) {
         if self.mip_count <= 1 || layer >= MAX_PROBES {
             return;
         }
@@ -292,6 +297,7 @@ impl ReflectionProbes {
                     },
                 ],
             });
+            let mip_ts = gpu.as_deref_mut().and_then(|g| g.render_scope("probe"));
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("reflection_probe_downsample_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -304,7 +310,7 @@ impl ReflectionProbes {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: mip_ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -320,7 +326,10 @@ impl ReflectionProbes {
         let ctxt = Context::get();
         let shader = ctxt.create_shader_module(
             Some("reflection_probe_downsample"),
-            include_str!("../builtin/env_downsample.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::env_downsample",
+                crate::builtin::ENV_DOWNSAMPLE_WESL,
+            ),
         );
         let layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("reflection_probe_downsample_layout"),
@@ -541,7 +550,10 @@ impl ProbeCapture {
 
         let shader = ctxt.create_shader_module(
             Some("cube_to_equirect"),
-            include_str!("../builtin/cube_to_equirect.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::cube_to_equirect",
+                include_str!("../builtin/cube_to_equirect.wgsl"),
+            ),
         );
         let reproject_layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("probe_reproject_layout"),
@@ -636,7 +648,12 @@ impl ProbeCapture {
     }
 
     /// Reprojects the six captured faces into `dst` (a probe layer's mip-0 view).
-    pub fn reproject(&self, encoder: &mut wgpu::CommandEncoder, dst: &wgpu::TextureView) {
+    pub(crate) fn reproject(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: &wgpu::TextureView,
+        gpu: &mut crate::renderer::timings::GpuTimer,
+    ) {
         let ctxt = Context::get();
         let bg = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("probe_reproject_bg"),
@@ -652,6 +669,7 @@ impl ProbeCapture {
                 },
             ],
         });
+        let reproject_ts = gpu.render_scope("probe");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("probe_reproject_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -664,7 +682,7 @@ impl ProbeCapture {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: reproject_ts,
             occlusion_query_set: None,
             multiview_mask: None,
         });

@@ -76,6 +76,12 @@ impl SceneNodeData2d {
         self.object.is_some()
     }
 
+    /// This node's direct children.
+    #[inline]
+    pub fn children(&self) -> &[SceneNode2d] {
+        &self.children
+    }
+
     /// Whether this node has no parent.
     #[inline]
     pub fn is_root(&self) -> bool {
@@ -472,6 +478,19 @@ impl SceneNode2d {
     /// The data of this scene node.
     pub fn data_mut(&mut self) -> RefMut<'_, SceneNodeData2d> {
         self.data.borrow_mut()
+    }
+
+    /// A stable per-node identifier (the address of the node's shared data),
+    /// usable as an `egui` id (e.g. by the built-in inspector's scene tree).
+    #[inline]
+    pub fn ptr_id(&self) -> u64 {
+        Rc::as_ptr(&self.data) as *const () as u64
+    }
+
+    /// Whether `self` and `other` are handles to the same underlying node.
+    #[inline]
+    pub fn same_node(&self, other: &SceneNode2d) -> bool {
+        Rc::ptr_eq(&self.data, &other.data)
     }
 
     /*

@@ -1,3 +1,4 @@
+import package::common::unpack_mat3;
 // 2D point rendering shader for kiss3d
 // Used for rendering debug points with configurable size in 2D scenes
 //
@@ -36,13 +37,7 @@ struct VertexOutput {
 }
 
 // Reconstruct mat3x3 from padded vec4 columns
-fn unpack_mat3(col0: vec4<f32>, col1: vec4<f32>, col2: vec4<f32>) -> mat3x3<f32> {
-    return mat3x3<f32>(
-        col0.xyz,
-        col1.xyz,
-        col2.xyz
-    );
-}
+
 
 @vertex
 fn vs_main(@builtin(vertex_index) vertex_index: u32) -> VertexOutput {

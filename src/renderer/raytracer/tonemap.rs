@@ -94,13 +94,20 @@ impl Tonemap {
             immediate_size: 0,
         });
 
-        let shader = ctxt.create_shader_module(
-            Some("rt_tonemap_shader"),
-            concat!(
-                include_str!("../../builtin/tonemap_ops.wgsl"),
-                include_str!("../../builtin/raytrace/tonemap.wgsl"),
-            ),
+        // The RT tonemap pass imports the shared `apply_tonemap` from the
+        // `tonemap_ops` WESL module (composed here instead of source concatenation).
+        let shader_wgsl = crate::builtin::compile_wesl(
+            &[
+                ("package::tonemap_ops", crate::builtin::TONEMAP_OPS_WESL),
+                (
+                    "package::rt_tonemap",
+                    include_str!("../../builtin/raytrace/tonemap.wgsl"),
+                ),
+            ],
+            "package::rt_tonemap",
+            &[],
         );
+        let shader = ctxt.create_shader_module(Some("rt_tonemap_shader"), &shader_wgsl);
 
         let vertex_buffer_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,

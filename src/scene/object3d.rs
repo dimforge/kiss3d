@@ -257,6 +257,15 @@ pub struct ObjectData3d {
     /// Render-layer bitmask. The object is drawn by a camera only when this
     /// shares a bit with the camera's mask. Defaults to layer 0 (`1`).
     render_layers: u32,
+    /// Light-layer bitmask (lighting channels). A light affects this object only
+    /// when this shares a bit with the light's mask. Defaults to `u32::MAX` (all
+    /// channels), so every light affects it.
+    light_layers: u32,
+    /// Whether this object contributes geometry to the shadow depth pass. Defaults
+    /// to `true`. Set `false` for visible objects that should not occlude lights —
+    /// e.g. an emissive marker placed at a light's position, which would otherwise
+    /// self-shadow the whole scene.
+    casts_shadows: bool,
     // PBR material properties
     metallic: f32,
     roughness: f32,
@@ -265,10 +274,24 @@ pub struct ObjectData3d {
     // Path-tracer BSDF properties (ignored by the rasterizer).
     bsdf: Bsdf,
     ior: f32,
+    /// Refractive transmission factor in `[0, 1]`. When `> 0` the rasterizer draws
+    /// the surface as glass: it refracts the rendered scene behind it (offset by
+    /// the normal, `ior` and `thickness`), blurred by `roughness`, tinted by the
+    /// volume attenuation, with a Fresnel reflection on top.
     transmission: f32,
     specular_tint: Color,
     subsurface: f32,
     subsurface_radius: f32,
+    /// Volume thickness (world units) of a transmissive surface. Drives the
+    /// refraction offset distance and the Beer-Lambert attenuation path length.
+    /// `0` behaves as a thin refracting interface.
+    thickness: f32,
+    /// Volume attenuation (absorption) color for transmissive surfaces — the color
+    /// light becomes after travelling `attenuation_distance` through the medium.
+    attenuation_color: Color,
+    /// Distance (world units) over which transmitted light is attenuated to
+    /// `attenuation_color`. `f32::INFINITY` (the default) disables tinting.
+    attenuation_distance: f32,
     // Extended PBR surface properties, honored by BOTH the rasterizer and the
     // path tracer where applicable.
     /// Dielectric specular intensity remap in `[0, 1]`: `F0 = 0.16 *
@@ -616,6 +639,12 @@ impl ObjectData3d {
         self.render_layers
     }
 
+    /// Returns this object's light-layer bitmask (lighting channels).
+    #[inline]
+    pub fn light_layers(&self) -> u32 {
+        self.light_layers
+    }
+
     /// Returns the path-tracer BSDF model for this object.
     #[inline]
     pub fn bsdf(&self) -> Bsdf {
@@ -628,10 +657,28 @@ impl ObjectData3d {
         self.ior
     }
 
-    /// Returns the transmission (specular-transmittance) factor in `[0, 1]`.
+    /// Returns the refractive transmission factor in `[0, 1]` (`> 0` = glass).
     #[inline]
     pub fn transmission(&self) -> f32 {
         self.transmission
+    }
+
+    /// Returns the volume thickness (world units) of a transmissive surface.
+    #[inline]
+    pub fn thickness(&self) -> f32 {
+        self.thickness
+    }
+
+    /// Returns the volume attenuation (absorption) color for transmissive surfaces.
+    #[inline]
+    pub fn attenuation_color(&self) -> Color {
+        self.attenuation_color
+    }
+
+    /// Returns the attenuation distance (world units); `f32::INFINITY` disables tinting.
+    #[inline]
+    pub fn attenuation_distance(&self) -> f32 {
+        self.attenuation_distance
     }
 
     /// Returns the specular tint color (multiplies the specular/conductor lobe).
@@ -974,7 +1021,9 @@ impl Object3d {
             segmentation_id: next_segmentation_id(),
             material,
             user_data: Box::new(user_data),
-            render_layers: 1, // layer 0
+            render_layers: 1,         // layer 0
+            light_layers: u32::MAX,   // affected by every light
+            casts_shadows: true,      // contributes to the shadow depth pass
 
             // PBR defaults (backward compatible with Blinn-Phong appearance)
             metallic: 0.0,
@@ -988,6 +1037,9 @@ impl Object3d {
             specular_tint: crate::color::WHITE,
             subsurface: 0.0,
             subsurface_radius: 0.0,
+            thickness: 0.0,
+            attenuation_color: crate::color::WHITE,
+            attenuation_distance: f32::INFINITY,
             reflectance: 0.5,
             clearcoat: 0.0,
             clearcoat_roughness: 0.0,
@@ -1083,9 +1135,21 @@ impl Object3d {
     }
 
     /// Whether this object contributes surface geometry to the shadow pre-pass.
+    /// True only when surface rendering is active *and* shadow casting is enabled
+    /// (see [`set_casts_shadows`](Self::set_casts_shadows)).
     #[doc(hidden)]
     pub fn casts_shadows(&self) -> bool {
-        self.data.surface_rendering_active()
+        self.data.casts_shadows && self.data.surface_rendering_active()
+    }
+
+    /// Sets whether this object occludes lights in the shadow depth pass.
+    ///
+    /// Defaults to `true`. Set `false` for a visible object that should not cast a
+    /// shadow — e.g. an emissive sphere marking a light's position, which would
+    /// otherwise enclose the light and shadow the entire scene.
+    #[inline]
+    pub fn set_casts_shadows(&mut self, casts_shadows: bool) {
+        self.data.casts_shadows = casts_shadows;
     }
 
     /// Draws this object's surface geometry into the shadow depth pass.
@@ -1653,6 +1717,26 @@ impl Object3d {
         self.data.render_layers
     }
 
+    /// Sets this object's light-layer bitmask (lighting channels).
+    ///
+    /// A light affects this object only when its mask (see
+    /// [`Light::layers`](crate::light::Light::layers)) shares at least one bit
+    /// with `layers`. Objects default to `u32::MAX` (every channel), so every
+    /// light affects them. Use this together with
+    /// [`Light::with_layers`](crate::light::Light::with_layers) to confine a light
+    /// to a subset of the scene — a per-light culling mask. Affects only the
+    /// rasterizer.
+    #[inline]
+    pub fn set_light_layers(&mut self, layers: u32) {
+        self.data.light_layers = layers;
+    }
+
+    /// Returns this object's light-layer bitmask (lighting channels).
+    #[inline]
+    pub fn light_layers(&self) -> u32 {
+        self.data.light_layers
+    }
+
     /// Sets how this object's alpha is interpreted (see [`AlphaMode`]).
     ///
     /// - [`AlphaMode::Opaque`] ignores alpha (always opaque).
@@ -1681,13 +1765,37 @@ impl Object3d {
         self.data.ior = ior.max(1.0);
     }
 
-    /// Sets the transmission (specular-transmittance) factor in `[0, 1]`.
+    /// Sets the refractive transmission factor in `[0, 1]`.
     ///
-    /// A value above zero lets light pass through the surface (refraction for the
-    /// glass BSDF, diffuse/specular transmission otherwise).
+    /// A value above zero turns the surface into glass on the rasterizer: it
+    /// refracts the rendered scene behind it (bent by [`set_ior`](Self::set_ior)
+    /// and [`set_thickness`](Self::set_thickness)), blurred by `roughness` (frosted
+    /// glass), tinted by the volume attenuation
+    /// ([`set_attenuation`](Self::set_attenuation)), with a Fresnel reflection on
+    /// top. The path tracer uses it for its glass/specular-transmission BSDF.
     #[inline]
     pub fn set_transmission(&mut self, transmission: f32) {
         self.data.transmission = transmission.clamp(0.0, 1.0);
+    }
+
+    /// Sets the volume thickness (world units) of a transmissive surface.
+    ///
+    /// Drives the refraction offset distance and the Beer-Lambert attenuation path
+    /// length. `0` behaves as a thin refracting interface (no volume tint).
+    #[inline]
+    pub fn set_thickness(&mut self, thickness: f32) {
+        self.data.thickness = thickness.max(0.0);
+    }
+
+    /// Sets the volume attenuation (absorption) for a transmissive surface.
+    ///
+    /// `color` is what transmitted light becomes after travelling `distance` world
+    /// units through the medium (Beer-Lambert). A `distance` of `f32::INFINITY`
+    /// (the default) disables tinting; smaller distances give denser colored glass.
+    #[inline]
+    pub fn set_attenuation(&mut self, color: Color, distance: f32) {
+        self.data.attenuation_color = color;
+        self.data.attenuation_distance = distance.max(0.0);
     }
 
     /// Sets the specular tint color, which multiplies the specular/conductor lobe.

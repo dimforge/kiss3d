@@ -96,6 +96,20 @@ pub struct Light {
     /// attenuates the light contribution of occluded fragments. Has no effect on
     /// the path tracer, which always computes ray-traced shadows.
     pub casts_shadows: bool,
+    /// Light-layer bitmask (lighting channels). This light only affects an object
+    /// when their masks share at least one bit (`object_layers & light_layers != 0`),
+    /// the same idea as a per-light culling mask. Defaults to
+    /// `u32::MAX` (every bit set), so by default a light affects every object. See
+    /// [`Object3d::set_light_layers`](crate::scene::Object3d::set_light_layers).
+    #[cfg_attr(feature = "serde", serde(default = "all_layers"))]
+    pub layers: u32,
+}
+
+/// Default light-layer mask (all channels) — used by serde so scenes serialized
+/// before the `layers` field deserialize as "affects every object" rather than `0`.
+#[cfg(feature = "serde")]
+fn all_layers() -> u32 {
+    u32::MAX
 }
 
 impl Default for Light {
@@ -107,6 +121,7 @@ impl Default for Light {
             radius: 0.0,
             enabled: true,
             casts_shadows: true,
+            layers: u32::MAX,
         }
     }
 }
@@ -192,6 +207,17 @@ impl Light {
         self.casts_shadows = casts_shadows;
         self
     }
+
+    /// Sets the light-layer bitmask (lighting channels).
+    ///
+    /// The light only affects objects whose own layer mask (see
+    /// [`Object3d::set_light_layers`](crate::scene::Object3d::set_light_layers))
+    /// shares at least one bit with `layers`. Defaults to `u32::MAX` (affects every
+    /// object). Use this to confine a light to a subset of the scene.
+    pub fn with_layers(mut self, layers: u32) -> Self {
+        self.layers = layers;
+        self
+    }
 }
 
 /// A light that has been collected from the scene tree with its world-space transform.
@@ -211,6 +237,8 @@ pub struct CollectedLight {
     pub radius: f32,
     /// Whether this light should cast shadows in the rasterization pipeline.
     pub casts_shadows: bool,
+    /// Light-layer bitmask (lighting channels); see [`Light::layers`].
+    pub layers: u32,
 }
 
 /// Distance-fog falloff curve.

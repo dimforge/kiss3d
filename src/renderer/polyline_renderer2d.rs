@@ -130,7 +130,10 @@ impl PolylineRenderer2d {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("planar_polyline_shader"),
-            include_str!("../builtin/polyline2d.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::polyline2d",
+                include_str!("../builtin/polyline2d.wgsl"),
+            ),
         );
 
         // Built lazily per MSAA sample count: 2D polylines render into the

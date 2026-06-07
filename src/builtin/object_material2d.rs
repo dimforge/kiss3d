@@ -404,7 +404,10 @@ impl ObjectMaterial2d {
         // Load shader
         let shader = ctxt.create_shader_module(
             Some("planar_material_shader"),
-            include_str!("object2d.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::object2d",
+                include_str!("object2d.wgsl"),
+            ),
         );
 
         // Main 2D surface pipeline, built lazily per MSAA sample count (2D content
@@ -569,7 +572,10 @@ impl ObjectMaterial2d {
         // Load wireframe shader
         let wireframe_shader = ctxt.create_shader_module(
             Some("planar_wireframe_shader"),
-            include_str!("wireframe_polyline2d.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::wireframe_polyline2d",
+                include_str!("wireframe_polyline2d.wgsl"),
+            ),
         );
 
         // Wireframe pipeline, built lazily per MSAA sample count.
@@ -730,7 +736,10 @@ impl ObjectMaterial2d {
         // Load points shader
         let points_shader = ctxt.create_shader_module(
             Some("planar_points_shader"),
-            include_str!("wireframe_points2d.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::wireframe_points2d",
+                include_str!("wireframe_points2d.wgsl"),
+            ),
         );
 
         // Points pipeline, built lazily per MSAA sample count.

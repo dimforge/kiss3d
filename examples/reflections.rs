@@ -72,7 +72,11 @@ async fn main() {
         s.set_render_layers(0b10);
         let offset = (i as f32 - 2.0) * 2.4; // signed distance from the middle sphere
         let radius = offset.abs();
-        let base_angle = if offset >= 0.0 { 0.0 } else { std::f32::consts::PI };
+        let base_angle = if offset >= 0.0 {
+            0.0
+        } else {
+            std::f32::consts::PI
+        };
         spheres.push((s, radius, base_angle));
     }
 
@@ -152,7 +156,8 @@ async fn main() {
                         ui.add(egui::Slider::new(&mut ssr.max_steps, 8..=128).text("max steps"));
                         ui.add(egui::Slider::new(&mut ssr.thickness, 0.01..=3.0).text("thickness"));
                         ui.add(
-                            egui::Slider::new(&mut ssr.max_distance, 1.0..=200.0).text("max distance"),
+                            egui::Slider::new(&mut ssr.max_distance, 1.0..=200.0)
+                                .text("max distance"),
                         );
                         ui.add(
                             egui::Slider::new(&mut ssr.roughness_cutoff, 0.0..=1.0)

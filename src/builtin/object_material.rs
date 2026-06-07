@@ -11,7 +11,9 @@ use crate::scene::{InstancesBuffer3d, ObjectData3d};
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat3, Pose3, Vec3};
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
 
 /// GPU representation of a single light.
 ///
@@ -33,7 +35,9 @@ pub(crate) struct GpuLight {
     /// `u32::MAX` when it casts no shadow. Used by the clustered tier; the primary
     /// tier indexes shadows by its own uniform-array slot instead.
     shadow_slot: u32,
-    _padding: f32,
+    /// Light-layer bitmask (lighting channels). A fragment skips this light when
+    /// `(object.light_layers & layers) == 0`. `u32::MAX` affects every object.
+    layers: u32,
 }
 
 impl Default for GpuLight {
@@ -48,7 +52,7 @@ impl Default for GpuLight {
             outer_cone_cos: 0.0,
             attenuation_radius: 100.0,
             shadow_slot: u32::MAX,
-            _padding: 0.0,
+            layers: u32::MAX,
         }
     }
 }
@@ -84,7 +88,7 @@ impl GpuLight {
             outer_cone_cos,
             attenuation_radius,
             shadow_slot: u32::MAX,
-            _padding: 0.0,
+            layers: light.layers,
         }
     }
 }
@@ -162,7 +166,11 @@ struct ObjectUniforms {
     color: [f32; 4],
     metallic: f32,
     roughness: f32,
-    _pad0: [f32; 2],
+    // Light-layer bitmask (lighting channels): a light affects this object only
+    // when `(light_layers & light.layers) != 0`.
+    light_layers: u32,
+    // Index of refraction for refractive transmission (glass). 1.5 = window glass.
+    ior: f32,
     emissive: [f32; 4],
     // Texture presence flags (0.0 or 1.0 - WGSL doesn't support bool in uniforms)
     has_normal_map: f32,
@@ -192,6 +200,11 @@ struct ObjectUniforms {
     // Reflector world-space plane normal (xyz); w unused. Used for the
     // normal-alignment falloff.
     reflector_normal: [f32; 4],
+    // Refractive transmission (glass) volume attenuation color (rgb); a unused.
+    attenuation_color: [f32; 4],
+    // Refractive transmission volume params: (thickness, attenuation_distance,
+    // unused, unused). attenuation_distance < 0 means "infinite" (no tint).
+    volume: [f32; 4],
 }
 
 /// View uniforms for wireframe rendering (includes viewport).
@@ -455,17 +468,24 @@ impl GpuData for ObjectMaterialGpuData {
 /// - Wireframe/points view uniforms (view, proj, viewport) are shared and written once per frame
 /// - This significantly reduces the number of `write_buffer` calls per frame
 pub struct ObjectMaterial {
-    /// Pipeline with backface culling enabled (lazily built per MSAA sample count)
-    pipeline_cull: PipelineCache,
-    /// Pipeline with backface culling disabled (lazily built per MSAA sample count)
-    pipeline_no_cull: PipelineCache,
-    /// Weighted-blended OIT pipeline (backface culling), writing the accum +
-    /// revealage targets with no depth write. Used in the transparent phase.
-    oit_pipeline_cull: PipelineCache,
-    /// Weighted-blended OIT pipeline (no culling).
-    oit_pipeline_no_cull: PipelineCache,
-    /// Depth + view-position prepass pipeline (single target), for SSAO.
-    prepass_pipeline: PipelineCache,
+    // === Specialized shader variants (WESL conditional compilation) ===
+    /// Pipeline layout shared by every plain (non-deform) surface/prepass variant.
+    pipeline_layout: wgpu::PipelineLayout,
+    /// Pipeline layout for the deform variants (adds group 4); `None` when the
+    /// backend has no spare bind group (web / WebGL2) — deform then falls back to the
+    /// plain path.
+    deform_pipeline_layout: Option<wgpu::PipelineLayout>,
+    /// Opaque-surface pipeline builder: `(layout, module, _skinned, cull, label, samples)`.
+    build_opaque: SurfacePipelineBuilder,
+    /// Weighted-blended OIT pipeline builder (same signature as `build_opaque`).
+    build_oit: SurfacePipelineBuilder,
+    /// Depth + view-position prepass pipeline builder: `(layout, module, _skinned, samples)`.
+    build_prepass: PrepassPipelineBuilder,
+    /// WESL-compiled shader modules, keyed by feature mask (lazily compiled, cached).
+    shader_modules: RefCell<HashMap<ShaderFeatures, Rc<wgpu::ShaderModule>>>,
+    /// Specialized surface/prepass pipelines, keyed by `(features, sample_count, kind)`.
+    surface_pipelines:
+        RefCell<HashMap<(ShaderFeatures, u32, PipelineKind), Rc<wgpu::RenderPipeline>>>,
     object_bind_group_layout: wgpu::BindGroupLayout,
     /// Combined material-texture bind group layout (albedo + PBR maps, group 2).
     texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -525,6 +545,9 @@ pub struct ObjectMaterial {
     ibl_rotation: Cell<f32>,
     /// Whether SSAO is active this frame (gates the AO sample in the shader).
     ssao_has: Cell<bool>,
+    /// Whether distance fog is active this frame (fog mode != off). Drives the `fog`
+    /// shader feature; set in `prepare()` from the scene's fog params.
+    fog_has: Cell<bool>,
     /// Active while a reflection probe is being captured. The capture's per-face
     /// views have no clustered cull data (and the clustered buffers may still be
     /// placeholders), so it forces the fixed-light path; it also disables
@@ -539,6 +562,13 @@ pub struct ObjectMaterial {
     cur_probe_view: wgpu::TextureView,
     /// Identity of the bound probe view (`0` = fallback) to avoid rebuilds.
     probe_bound_ptr: usize,
+    // === Transmission background (group 0 binding 8/9). ===
+    /// Trilinear+clamp sampler for the refraction background mip chain.
+    bg_sampler: wgpu::Sampler,
+    /// Currently-bound background view (clone; defaults to the IBL 1x1 fallback).
+    cur_bg_view: wgpu::TextureView,
+    /// Identity of the bound background view (`0` = fallback) to avoid rebuilds.
+    bg_bound_ptr: usize,
     /// Packed probe records + count + max LOD, written into the frame uniform.
     probe_records: Cell<[GpuProbe; MAX_PROBES]>,
     probe_count: Cell<u32>,
@@ -572,27 +602,26 @@ pub struct ObjectMaterial {
     default_shadow_bind_group: wgpu::BindGroup,
     /// Keeps the dummy atlas/sampler/buffer alive for `default_shadow_bind_group`.
     _default_shadow_resources: DefaultShadowResources,
-
-    // === GPU vertex deformation: skinning + morph targets (native only) ===
-    /// Deformed pipeline variants. `None` on web (and any adapter without a 5th bind
-    /// group), where skinned/morphed meshes fall back to the plain pipelines (base
-    /// rest shape). The per-object deform bind group (group 4) is owned by the object
-    /// (see [`crate::builtin::deform`]); these are only the pipelines.
-    deform: Option<DeformResources>,
 }
 
-/// Deformed pipeline variants. Mirror the plain opaque/OIT/prepass pipelines but
-/// bind the deform group (group 4: joint palette + skin joints/weights + morph
-/// deltas + control uniform) and use the deformed vertex entry. The vertex *layout*
-/// is identical to the plain one — all deform data is read from storage by vertex
-/// index, not vertex attributes.
-struct DeformResources {
-    pipeline_cull: PipelineCache,
-    pipeline_no_cull: PipelineCache,
-    oit_pipeline_cull: PipelineCache,
-    oit_pipeline_no_cull: PipelineCache,
-    prepass_pipeline: PipelineCache,
-}
+/// Builds an opaque-surface or OIT pipeline from a compiled module:
+/// `(pipeline_layout, shader_module, _skinned, cull_mode, label, sample_count)`.
+/// Captures nothing; the deform variant differs only in the module + layout passed.
+type SurfacePipelineBuilder = Rc<
+    dyn Fn(
+        &wgpu::PipelineLayout,
+        &wgpu::ShaderModule,
+        bool,
+        Option<wgpu::Face>,
+        &'static str,
+        u32,
+    ) -> wgpu::RenderPipeline,
+>;
+
+/// Builds the depth + view-position prepass pipeline:
+/// `(pipeline_layout, shader_module, _skinned, sample_count)`.
+type PrepassPipelineBuilder =
+    Rc<dyn Fn(&wgpu::PipelineLayout, &wgpu::ShaderModule, bool, u32) -> wgpu::RenderPipeline>;
 
 /// Owns the GPU resources backing [`ObjectMaterial`]'s neutral shadow bind group.
 struct DefaultShadowResources {
@@ -605,201 +634,110 @@ struct DefaultShadowResources {
     _transmittance_sampler: wgpu::Sampler,
 }
 
-// Non-skinned vertex input: injected into `default.wgsl` at `//__VERTEX_INPUT__`.
-// Must reproduce the original struct exactly so the non-skinned shader is
-// byte-identical to before this split.
-const PLAIN_VERTEX_INPUT: &str = "struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) tex_coord: vec2<f32>,
-    @location(2) normal: vec3<f32>,
-}";
+/// Conditional-compilation features for the object shader. Each bit maps to a WESL
+/// `@if(...)` feature flag in `default.wgsl`; a per-object/per-frame mask selects a
+/// specialized shader variant so the features an object/frame doesn't use — and the
+/// registers and bindings they need — are stripped out entirely. The vertex/binding
+/// layout is identical across variants (unused bindings simply strip away), so all
+/// variants share the same pipeline layout and bind groups. See `compile_object_wgsl`.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub(crate) struct ShaderFeatures(u32);
 
-// Deformed vertex input: identical vertex attributes to the plain variant (skin
-// joints/weights and morph deltas are read from the group-4 storage buffers by
-// vertex index, not as vertex attributes), plus the deform bind group at group 4.
-const DEFORM_VERTEX_INPUT: &str = "struct VertexInput {
-    @location(0) position: vec3<f32>,
-    @location(1) tex_coord: vec2<f32>,
-    @location(2) normal: vec3<f32>,
-}
-struct DeformControl {
-    num_targets: u32,
-    num_vertices: u32,
-    has_skin: u32,
-    has_morph_normals: u32,
-    weights: array<vec4<f32>, 16>,
-}
-@group(4) @binding(0) var<storage, read> joint_palette: array<mat4x4<f32>>;
-@group(4) @binding(1) var<storage, read> skin_joints: array<vec4<u32>>;
-@group(4) @binding(2) var<storage, read> skin_weights: array<vec4<f32>>;
-@group(4) @binding(3) var<storage, read> morph_pos: array<vec4<f32>>;
-@group(4) @binding(4) var<storage, read> morph_nrm: array<vec4<f32>>;
-@group(4) @binding(5) var<uniform> deform: DeformControl;";
+impl ShaderFeatures {
+    // Structural / capability axes (resolved against backend support).
+    const DEFORM: u32 = 1 << 0;
+    const CLUSTERED: u32 = 1 << 1;
+    // Global / per-frame.
+    const SHADOWS: u32 = 1 << 2;
+    const IBL: u32 = 1 << 3;
+    const PROBES: u32 = 1 << 4;
+    const FOG: u32 = 1 << 5;
+    const SSAO: u32 = 1 << 6;
+    // Per-object material.
+    const NORMAL_MAP: u32 = 1 << 7;
+    const MR_MAP: u32 = 1 << 8;
+    const AO_MAP: u32 = 1 << 9;
+    const EMISSIVE_MAP: u32 = 1 << 10;
+    const PARALLAX: u32 = 1 << 11;
+    const CLEARCOAT: u32 = 1 << 12;
+    const ANISOTROPY: u32 = 1 << 13;
+    const TRANSMISSION: u32 = 1 << 14;
+    const REFLECTOR: u32 = 1 << 15;
 
-// Non-skinned vertex entry, injected at `//__VS_MAIN__`. Byte-identical to the
-// original `vs_main`.
-const PLAIN_VS_MAIN: &str = "@vertex
-fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
-    var out: VertexOutput;
+    /// `(WESL feature name, bit)` — names MUST match the `@if(...)` flags in
+    /// `default.wgsl`.
+    const TABLE: [(&'static str, u32); 16] = [
+        ("deform", Self::DEFORM),
+        ("clustered", Self::CLUSTERED),
+        ("shadows", Self::SHADOWS),
+        ("ibl", Self::IBL),
+        ("probes", Self::PROBES),
+        ("fog", Self::FOG),
+        ("ssao", Self::SSAO),
+        ("normal_map", Self::NORMAL_MAP),
+        ("mr_map", Self::MR_MAP),
+        ("ao_map", Self::AO_MAP),
+        ("emissive_map", Self::EMISSIVE_MAP),
+        ("parallax", Self::PARALLAX),
+        ("clearcoat", Self::CLEARCOAT),
+        ("anisotropy", Self::ANISOTROPY),
+        ("transmission", Self::TRANSMISSION),
+        ("reflector", Self::REFLECTOR),
+    ];
 
-    // Build deformation matrix from instance data
-    let deformation = mat3x3<f32>(
-        instance.inst_def_0,
-        instance.inst_def_1,
-        instance.inst_def_2
-    );
-
-    // Transform position
-    let scaled_pos = object.scale * vertex.position;
-    let deformed_pos = deformation * scaled_pos;
-    let model_pos = object.transform * vec4<f32>(deformed_pos, 1.0);
-    let world_pos = vec4<f32>(instance.inst_tra, 0.0) + model_pos;
-
-    out.clip_position = frame.proj * frame.view * world_pos;
-    out.world_pos = world_pos.xyz;
-
-    // Transform normal to world space
-    out.world_normal = normalize(deformation * object.ntransform * vertex.normal);
-
-    // View-space position for lighting calculations
-    let view_pos = frame.view * world_pos;
-    out.view_pos = view_pos.xyz / view_pos.w;
-
-    out.tex_coord = vertex.tex_coord;
-    out.vert_color = instance.inst_color;
-
-    return out;
-}";
-
-// Deformed vertex entry. First applies morph targets (Σ weightᵢ·Δ, read from the
-// group-4 storage buffers by vertex index), then — when the mesh is skinned — the
-// joint-palette blend (ignoring the mesh node's own transform, per the glTF spec),
-// or otherwise the ordinary instance/object-transform path. One control uniform
-// gates both so skin-only, morph-only, and skin+morph meshes share this entry.
-const DEFORM_VS_MAIN: &str = "@vertex
-fn vs_main(vertex: VertexInput, instance: InstanceInput, @builtin(vertex_index) vid: u32) -> VertexOutput {
-    var out: VertexOutput;
-
-    // Morph: accumulate weighted position (and optional normal) deltas.
-    var pos = vertex.position;
-    var nrm = vertex.normal;
-    if (deform.num_targets > 0u) {
-        for (var t = 0u; t < deform.num_targets; t = t + 1u) {
-            let wgt = deform.weights[t >> 2u][t & 3u];
-            if (wgt != 0.0) {
-                let idx = t * deform.num_vertices + vid;
-                pos = pos + wgt * morph_pos[idx].xyz;
-                if (deform.has_morph_normals != 0u) {
-                    nrm = nrm + wgt * morph_nrm[idx].xyz;
-                }
-            }
-        }
+    #[inline]
+    fn has(self, bit: u32) -> bool {
+        self.0 & bit != 0
     }
 
-    if (deform.has_skin != 0u) {
-        // Skin: blend the joint matrices by their (renormalized) weights.
-        var w = skin_weights[vid];
-        let j = skin_joints[vid];
-        let wsum = w.x + w.y + w.z + w.w;
-        if (wsum > 0.0) { w = w / wsum; }
-        let skin =
-            w.x * joint_palette[j.x] +
-            w.y * joint_palette[j.y] +
-            w.z * joint_palette[j.z] +
-            w.w * joint_palette[j.w];
-
-        let world_pos = skin * vec4<f32>(pos, 1.0);
-        out.clip_position = frame.proj * frame.view * world_pos;
-        out.world_pos = world_pos.xyz;
-        let skin3 = mat3x3<f32>(skin[0].xyz, skin[1].xyz, skin[2].xyz);
-        out.world_normal = normalize(skin3 * nrm);
-        let view_pos = frame.view * world_pos;
-        out.view_pos = view_pos.xyz / view_pos.w;
-    } else {
-        // Morph-only (or rigid): the usual instance/object-transform path.
-        let deformation = mat3x3<f32>(
-            instance.inst_def_0,
-            instance.inst_def_1,
-            instance.inst_def_2
-        );
-        let scaled_pos = object.scale * pos;
-        let deformed_pos = deformation * scaled_pos;
-        let model_pos = object.transform * vec4<f32>(deformed_pos, 1.0);
-        let world_pos = vec4<f32>(instance.inst_tra, 0.0) + model_pos;
-
-        out.clip_position = frame.proj * frame.view * world_pos;
-        out.world_pos = world_pos.xyz;
-        out.world_normal = normalize(deformation * object.ntransform * nrm);
-        let view_pos = frame.view * world_pos;
-        out.view_pos = view_pos.xyz / view_pos.w;
+    #[inline]
+    fn with(mut self, bit: u32, on: bool) -> Self {
+        if on {
+            self.0 |= bit;
+        } else {
+            self.0 &= !bit;
+        }
+        self
     }
 
-    out.tex_coord = vertex.tex_coord;
-    out.vert_color = instance.inst_color;
+    /// The feature subset that affects the prepass: only the vertex stage (`deform`)
+    /// matters — `fs_prepass` ignores every shading feature — so collapsing to this
+    /// keeps the prepass to a single module per deform-ness.
+    #[inline]
+    fn prepass_key(self) -> Self {
+        ShaderFeatures(self.0 & Self::DEFORM)
+    }
+}
 
-    return out;
-}";
+/// Compiles `default.wgsl` to specialized WGSL for `features`, via WESL conditional
+/// translation. Dead-code elimination (WESL "strip") then removes the now-unreachable
+/// helpers and their bindings, so the output is both leaner (fewer live registers →
+/// higher GPU occupancy) and, on the non-`clustered`/non-`deform` variants, free of
+/// storage bindings (WebGL2-safe).
+fn compile_object_wgsl(features: ShaderFeatures) -> String {
+    let feats: Vec<(&str, bool)> = ShaderFeatures::TABLE
+        .iter()
+        .map(|(name, bit)| (*name, features.has(*bit)))
+        .collect();
+    crate::builtin::compile_wesl(
+        &[
+            ("package::default", include_str!("default.wgsl")),
+            ("package::pbr_env", crate::builtin::PBR_ENV_WESL),
+        ],
+        "package::default",
+        &feats,
+    )
+}
 
-/// Clustered forward+ storage bindings, injected into group 0 only for the
-/// clustered pipeline variant. Omitted on the fixed-light fallback so the shader
-/// declares no storage buffers (WebGL2-safe).
-const CLUSTERED_BINDINGS: &str =
-    "@group(0) @binding(4) var<storage, read> clustered_lights: array<LightData>;
-@group(0) @binding(5) var<storage, read> cluster_light_grid: array<vec2<u32>>;
-@group(0) @binding(6) var<storage, read> cluster_light_index: array<u32>;";
-
-/// The clustered-light shading loop, injected after the primary-light loop in
-/// `shade()`. Locates the fragment's cluster, then accumulates the (shadowless)
-/// contribution of every light the cull pass recorded for it.
-const CLUSTERED_LOOP: &str = "if frame.cluster_grid_dims.w > 0.5 {
-        let near = frame.cluster_depth.x;
-        let log_ratio = frame.cluster_depth.z;
-        let gz = frame.cluster_grid_dims.z;
-        let zv = max(-in.view_pos.z, near);
-        var fslice = floor(log(zv / near) / log_ratio * gz);
-        fslice = clamp(fslice, 0.0, gz - 1.0);
-        let slice = u32(fslice);
-        let gx = u32(frame.cluster_grid_dims.x);
-        let gy = u32(frame.cluster_grid_dims.y);
-        let tx = min(u32(in.clip_position.x / frame.cluster_tile.x), gx - 1u);
-        let ty = min(u32(in.clip_position.y / frame.cluster_tile.y), gy - 1u);
-        let cluster = tx + ty * gx + slice * gx * gy;
-        let cell = cluster_light_grid[cluster];
-        for (var k = 0u; k < cell.y; k = k + 1u) {
-            let li = cluster_light_index[cell.x + k];
-            let cl = clustered_lights[li];
-            var contrib = shade_light(
-                cl, in.view_pos, V, N_view, F0, albedo, metallic,
-                alpha, aniso, at, ab, aniso_t, aniso_b, cc_alpha
-            );
-            // A clustered light with an allocated shadow slot is shadow-mapped too.
-            if cl.shadow_slot != 0xffffffffu {
-                contrib *= compute_shadow(cl.shadow_slot, in.world_pos, dpos_dx, dpos_dy, receives_transmit);
-            }
-            Lo += contrib;
-        }
-    }";
-
-/// Assembles the object shader source, injecting either the plain or the deformed
-/// (skinning + morph) vertex input + vertex entry into `default.wgsl`, and the
-/// clustered forward+ bindings + loop when `clustered` is set. The whole fragment
-/// stage (apart from the injected clustered loop) is shared between all variants.
-fn build_object_shader_src(deformed: bool, clustered: bool) -> String {
-    let (vertex_input, vs_main) = if deformed {
-        (DEFORM_VERTEX_INPUT, DEFORM_VS_MAIN)
-    } else {
-        (PLAIN_VERTEX_INPUT, PLAIN_VS_MAIN)
-    };
-    let (cl_bindings, cl_loop) = if clustered {
-        (CLUSTERED_BINDINGS, CLUSTERED_LOOP)
-    } else {
-        ("", "")
-    };
-    include_str!("default.wgsl")
-        .replace("//__VERTEX_INPUT__", vertex_input)
-        .replace("//__VS_MAIN__", vs_main)
-        .replace("//__CLUSTERED_BINDINGS__", cl_bindings)
-        .replace("//__CLUSTERED_LOOP__", cl_loop)
+/// Which surface pipeline to build from a compiled module (the opaque/OIT cull and
+/// no-cull variants, plus the shared depth/G-buffer prepass).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum PipelineKind {
+    OpaqueCull,
+    OpaqueNoCull,
+    OitCull,
+    OitNoCull,
+    Prepass,
 }
 
 /// The vertex buffer layouts shared by the opaque and OIT surface pipelines.
@@ -982,6 +920,26 @@ impl ObjectMaterial {
             },
             count: None,
         });
+        // Transmission background (binding 8) + its sampler (9): the resolved opaque
+        // scene color with a blurred mip chain, sampled by refractive (glass) objects
+        // to refract the scene behind them. Always present; only the refraction shader
+        // variant reads it (a 1x1 fallback is bound when no glass is in the scene).
+        frame_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 8,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        });
+        frame_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 9,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
         let frame_bind_group_layout =
             ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("object_material_frame_bind_group_layout"),
@@ -1047,6 +1005,19 @@ impl ObjectMaterial {
             label: Some("object_material_ibl_fallback_sampler"),
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
+
+        // Sampler for the transmission background (binding 9): clamp + trilinear so
+        // the refraction sample can read the blurred mip chain by roughness LOD.
+        let bg_sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("object_material_transmission_bg_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
 
@@ -1218,21 +1189,12 @@ impl ObjectMaterial {
             immediate_size: 0,
         });
 
-        // Load shader (non-skinned variant). The skinned variant, built below,
-        // shares the whole fragment stage and differs only in its vertex input +
-        // entry point. When clustered lighting is unsupported,
-        // `build_object_shader_src(false, false)` reproduces the original
-        // `default.wgsl` byte-for-byte (no storage bindings, WebGL2-safe).
-        let shader = ctxt.create_shader_module(
-            Some("object_material_shader"),
-            &build_object_shader_src(false, clustered),
-        );
-
         // Shared opaque-surface pipeline builder, parameterized by the pipeline
-        // layout, shader module, and whether the skinned vertex layout (joints +
-        // weights at slots 6/7) is used — so the plain and skinned pipelines reuse
-        // one descriptor. Each `PipelineCache` builds lazily per MSAA sample count
-        // (the scene is rasterized into the optionally-multisampled HDR film).
+        // layout and the (WESL-specialized) shader module. The `skinned` flag is
+        // vestigial — deform data is read from group-4 storage by index, so the
+        // vertex layout is identical; the deform variant differs only in the module +
+        // layout passed. Stored on the material and invoked lazily per
+        // `(features, sample_count)` by `surface_pipeline`.
         let build_opaque = std::rc::Rc::new(
             |layout: &wgpu::PipelineLayout,
              shader: &wgpu::ShaderModule,
@@ -1288,28 +1250,6 @@ impl ObjectMaterial {
                 })
             },
         );
-
-        let pipeline_cull = PipelineCache::new({
-            let build = build_opaque.clone();
-            let l = pipeline_layout.clone();
-            let s = shader.clone();
-            move |sc| {
-                build(
-                    &l,
-                    &s,
-                    false,
-                    Some(wgpu::Face::Back),
-                    "object_material_pipeline_cull",
-                    sc,
-                )
-            }
-        });
-        let pipeline_no_cull = PipelineCache::new({
-            let build = build_opaque.clone();
-            let l = pipeline_layout.clone();
-            let s = shader.clone();
-            move |sc| build(&l, &s, false, None, "object_material_pipeline_no_cull", sc)
-        });
 
         // Weighted-blended OIT pipelines: same vertex stage and bind groups, but the
         // `fs_oit` entry point writes two targets — an additive premultiplied-weighted
@@ -1401,36 +1341,6 @@ impl ObjectMaterial {
                 })
             },
         );
-        let oit_pipeline_cull = PipelineCache::new({
-            let build = build_oit.clone();
-            let l = pipeline_layout.clone();
-            let s = shader.clone();
-            move |sc| {
-                build(
-                    &l,
-                    &s,
-                    false,
-                    Some(wgpu::Face::Back),
-                    "object_material_oit_pipeline_cull",
-                    sc,
-                )
-            }
-        });
-        let oit_pipeline_no_cull = PipelineCache::new({
-            let build = build_oit.clone();
-            let l = pipeline_layout.clone();
-            let s = shader.clone();
-            move |sc| {
-                build(
-                    &l,
-                    &s,
-                    false,
-                    None,
-                    "object_material_oit_pipeline_no_cull",
-                    sc,
-                )
-            }
-        });
 
         // Depth + view-position prepass pipeline: reuses the surface vertex stage
         // and the full pipeline layout (so the per-object bind calls are
@@ -1509,24 +1419,18 @@ impl ObjectMaterial {
                 })
             },
         );
-        let prepass_pipeline = PipelineCache::new({
-            let build = build_prepass.clone();
-            let l = pipeline_layout.clone();
-            let s = shader.clone();
-            move |sc| build(&l, &s, false, sc)
-        });
-
-        // Deformed pipeline variants (native only). The deform bind group is a 5th
-        // bind group, which exceeds WebGPU/WebGL2's 4-group cap, so on web (or any
-        // adapter without a free group) skinned/morphed objects fall back to the
-        // plain pipeline and render in their base rest shape. Built lazily per sample
-        // count like the plain pipelines, sharing the same builder closures. The
-        // deform bind-group layout is the shared one from `builtin::deform`, so the
-        // per-object bind group also works in the shadow pipelines.
+        // Deform pipeline layout (native only). The deform bind group is a 5th bind
+        // group, which exceeds WebGPU/WebGL2's 4-group cap, so on web (or any adapter
+        // without a free group) skinned/morphed objects fall back to the plain path
+        // and render in their base rest shape. The actual deform pipelines are built
+        // lazily per `(features, sample_count)` by `surface_pipeline`, using this
+        // layout and the `deform`-featured module. The deform bind-group layout is the
+        // shared one from `builtin::deform`, so the per-object bind group also works
+        // in the shadow pipelines.
         #[cfg(not(target_arch = "wasm32"))]
-        let deform = {
+        let deform_pipeline_layout = {
             let deform_bind_group_layout = crate::builtin::deform::deform_bind_group_layout();
-            let deform_pipeline_layout =
+            Some(
                 ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("object_material_deform_pipeline_layout"),
                     bind_group_layouts: &[
@@ -1537,71 +1441,11 @@ impl ObjectMaterial {
                         Some(&deform_bind_group_layout),
                     ],
                     immediate_size: 0,
-                });
-            let deform_shader = ctxt.create_shader_module(
-                Some("object_material_deform_shader"),
-                &build_object_shader_src(true, clustered),
-            );
-
-            let pipeline_cull = PipelineCache::new({
-                let build = build_opaque.clone();
-                let l = deform_pipeline_layout.clone();
-                let s = deform_shader.clone();
-                move |sc| {
-                    build(
-                        &l,
-                        &s,
-                        true,
-                        Some(wgpu::Face::Back),
-                        "object_material_deform_cull",
-                        sc,
-                    )
-                }
-            });
-            let pipeline_no_cull = PipelineCache::new({
-                let build = build_opaque.clone();
-                let l = deform_pipeline_layout.clone();
-                let s = deform_shader.clone();
-                move |sc| build(&l, &s, true, None, "object_material_deform_no_cull", sc)
-            });
-            let oit_pipeline_cull = PipelineCache::new({
-                let build = build_oit.clone();
-                let l = deform_pipeline_layout.clone();
-                let s = deform_shader.clone();
-                move |sc| {
-                    build(
-                        &l,
-                        &s,
-                        true,
-                        Some(wgpu::Face::Back),
-                        "object_material_deform_oit_cull",
-                        sc,
-                    )
-                }
-            });
-            let oit_pipeline_no_cull = PipelineCache::new({
-                let build = build_oit.clone();
-                let l = deform_pipeline_layout.clone();
-                let s = deform_shader.clone();
-                move |sc| build(&l, &s, true, None, "object_material_deform_oit_no_cull", sc)
-            });
-            let prepass_pipeline = PipelineCache::new({
-                let build = build_prepass.clone();
-                let l = deform_pipeline_layout.clone();
-                let s = deform_shader.clone();
-                move |sc| build(&l, &s, true, sc)
-            });
-
-            Some(DeformResources {
-                pipeline_cull,
-                pipeline_no_cull,
-                oit_pipeline_cull,
-                oit_pipeline_no_cull,
-                prepass_pipeline,
-            })
+                }),
+            )
         };
         #[cfg(target_arch = "wasm32")]
-        let deform: Option<DeformResources> = None;
+        let deform_pipeline_layout: Option<wgpu::PipelineLayout> = None;
 
         // Create wireframe shader and pipelines for lines/points
         // Note: _wireframe_shader, _wireframe_pipeline_layout, and _wireframe_vertex_buffer_layouts
@@ -2074,6 +1918,16 @@ impl ObjectMaterial {
             binding: 7,
             resource: wgpu::BindingResource::TextureView(&probe_fallback_view),
         });
+        // Transmission background: 1x1 black fallback (reusing the IBL fallback) until
+        // a glass-bearing frame hands over the snapshot via `set_transmission_background`.
+        frame_group_entries.push(wgpu::BindGroupEntry {
+            binding: 8,
+            resource: wgpu::BindingResource::TextureView(&ibl_fallback_view),
+        });
+        frame_group_entries.push(wgpu::BindGroupEntry {
+            binding: 9,
+            resource: wgpu::BindingResource::Sampler(&bg_sampler),
+        });
         let frame_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shared_frame_bind_group"),
             layout: &frame_bind_group_layout,
@@ -2240,11 +2094,13 @@ impl ObjectMaterial {
         };
 
         ObjectMaterial {
-            pipeline_cull,
-            pipeline_no_cull,
-            oit_pipeline_cull,
-            oit_pipeline_no_cull,
-            prepass_pipeline,
+            pipeline_layout,
+            deform_pipeline_layout,
+            build_opaque,
+            build_oit,
+            build_prepass,
+            shader_modules: RefCell::new(HashMap::new()),
+            surface_pipelines: RefCell::new(HashMap::new()),
             object_bind_group_layout,
             texture_bind_group_layout,
             default_normal_map,
@@ -2268,6 +2124,9 @@ impl ObjectMaterial {
             cur_ibl_view: ibl_fallback_view.clone(),
             cur_ibl_sampler: ibl_fallback_sampler.clone(),
             cur_ao_view: ao_fallback_view.clone(),
+            cur_bg_view: ibl_fallback_view.clone(),
+            bg_sampler,
+            bg_bound_ptr: 0,
             _ibl_fallback_texture: ibl_fallback_texture,
             ibl_fallback_view,
             ibl_fallback_sampler,
@@ -2280,6 +2139,7 @@ impl ObjectMaterial {
             ibl_intensity: Cell::new(1.0),
             ibl_rotation: Cell::new(0.0),
             ssao_has: Cell::new(false),
+            fog_has: Cell::new(false),
             capture_mode: Cell::new(false),
             cur_probe_view: probe_fallback_view.clone(),
             _probe_fallback_texture: probe_fallback_texture,
@@ -2299,8 +2159,153 @@ impl ObjectMaterial {
             points_view_bind_group,
             default_shadow_bind_group,
             _default_shadow_resources: default_shadow_resources,
-            deform,
         }
+    }
+
+    /// Returns the WESL-compiled, specialized shader module for `features`, compiling
+    /// and caching it on first use. The vertex/binding layout is identical across
+    /// variants — unused bindings simply strip away — so every module is compatible
+    /// with the shared pipeline layouts.
+    fn shader_module(&self, features: ShaderFeatures) -> Rc<wgpu::ShaderModule> {
+        if let Some(m) = self.shader_modules.borrow().get(&features) {
+            return m.clone();
+        }
+        let wgsl = compile_object_wgsl(features);
+        let module =
+            Rc::new(Context::get().create_shader_module(Some("object_material_shader"), &wgsl));
+        self.shader_modules
+            .borrow_mut()
+            .insert(features, module.clone());
+        module
+    }
+
+    /// Returns the surface/prepass pipeline for `(features, sample_count, kind)`,
+    /// building (and compiling its module) on first use and caching it. Picks the
+    /// deform pipeline layout when `features` has `DEFORM`, else the plain one.
+    fn surface_pipeline(
+        &self,
+        features: ShaderFeatures,
+        sample_count: u32,
+        kind: PipelineKind,
+    ) -> Rc<wgpu::RenderPipeline> {
+        let sample_count = sample_count.max(1);
+        let key = (features, sample_count, kind);
+        if let Some(p) = self.surface_pipelines.borrow().get(&key) {
+            return p.clone();
+        }
+        let module = self.shader_module(features);
+        let layout = if features.has(ShaderFeatures::DEFORM) {
+            self.deform_pipeline_layout
+                .as_ref()
+                .expect("deform pipeline layout (native only) must exist for a deform variant")
+        } else {
+            &self.pipeline_layout
+        };
+        let pipeline = match kind {
+            PipelineKind::OpaqueCull => (self.build_opaque)(
+                layout,
+                &module,
+                false,
+                Some(wgpu::Face::Back),
+                "object_material_pipeline_cull",
+                sample_count,
+            ),
+            PipelineKind::OpaqueNoCull => (self.build_opaque)(
+                layout,
+                &module,
+                false,
+                None,
+                "object_material_pipeline_no_cull",
+                sample_count,
+            ),
+            PipelineKind::OitCull => (self.build_oit)(
+                layout,
+                &module,
+                false,
+                Some(wgpu::Face::Back),
+                "object_material_oit_pipeline_cull",
+                sample_count,
+            ),
+            PipelineKind::OitNoCull => (self.build_oit)(
+                layout,
+                &module,
+                false,
+                None,
+                "object_material_oit_pipeline_no_cull",
+                sample_count,
+            ),
+            PipelineKind::Prepass => (self.build_prepass)(layout, &module, false, sample_count),
+        };
+        let pipeline = Rc::new(pipeline);
+        self.surface_pipelines
+            .borrow_mut()
+            .insert(key, pipeline.clone());
+        pipeline
+    }
+
+    /// Number of `@if` feature flags the object shader has — so the shader-validity
+    /// test can enumerate variants (`bits` in `0..2^FEATURE_COUNT`).
+    #[cfg(test)]
+    pub(crate) const FEATURE_COUNT: u32 = ShaderFeatures::TABLE.len() as u32;
+
+    /// Test-only: instantiates (compiles the WESL module + creates the real wgpu
+    /// shader module and render pipeline for) the object-shader variant whose feature
+    /// mask is `bits`, so the shader-validity test can confirm it compiles on the
+    /// device. Returns `false` (without building) when the variant needs a
+    /// `CLUSTERED`/`DEFORM` binding this material's pipeline layout doesn't carry
+    /// (otherwise the layout wouldn't match the shader). Building the opaque pipeline
+    /// creates the module, which also validates `fs_oit`/`fs_prepass` (same module).
+    /// Any invalid variant surfaces as a wgpu validation error in the caller's error
+    /// scope.
+    #[cfg(test)]
+    pub(crate) fn try_instantiate_variant_for_test(&self, bits: u32, sample_count: u32) -> bool {
+        let f = ShaderFeatures(bits);
+        if (f.has(ShaderFeatures::CLUSTERED) && !self.clustered)
+            || (f.has(ShaderFeatures::DEFORM) && self.deform_pipeline_layout.is_none())
+        {
+            return false;
+        }
+        let _ = self.surface_pipeline(f, sample_count, PipelineKind::OpaqueCull);
+        true
+    }
+
+    /// Computes the specialized shader feature mask for `data` in the current frame.
+    /// Per-object features come from the material; global ones (shadows/ibl/probes/
+    /// fog/ssao) from the per-frame state; structural ones (deform/clustered) are
+    /// resolved against backend capability. Each flag is a *superset* of the shader's
+    /// runtime test, so a stripped feature can never skip work the object needs.
+    ///
+    /// `use_deform` and `shadows_active` are passed from `render()` (they depend on the
+    /// object's deform bind group and the bound shadow group, respectively).
+    fn object_features(
+        &self,
+        data: &ObjectData3d,
+        use_deform: bool,
+        shadows_active: bool,
+    ) -> ShaderFeatures {
+        let f = ShaderFeatures::default()
+            // Structural / capability.
+            .with(ShaderFeatures::DEFORM, use_deform)
+            .with(ShaderFeatures::CLUSTERED, self.clustered);
+
+        let probes = self.probe_count.get() > 0 && !self.capture_mode.get();
+        f.with(ShaderFeatures::SHADOWS, shadows_active)
+            .with(ShaderFeatures::IBL, self.ibl_has.get())
+            .with(ShaderFeatures::PROBES, probes)
+            .with(ShaderFeatures::FOG, self.fog_has.get())
+            .with(ShaderFeatures::SSAO, self.ssao_has.get())
+            .with(ShaderFeatures::NORMAL_MAP, data.normal_map().is_some())
+            .with(
+                ShaderFeatures::MR_MAP,
+                data.metallic_roughness_map().is_some(),
+            )
+            .with(ShaderFeatures::AO_MAP, data.ao_map().is_some())
+            .with(ShaderFeatures::EMISSIVE_MAP, data.emissive_map().is_some())
+            .with(ShaderFeatures::PARALLAX, data.height_map().is_some())
+            .with(ShaderFeatures::CLEARCOAT, data.clearcoat() > 0.0)
+            .with(ShaderFeatures::ANISOTROPY, data.anisotropy() != 0.0)
+            .with(ShaderFeatures::TRANSMISSION, data.transmission() > 0.0)
+            .with(ShaderFeatures::REFLECTOR, data.reflector().is_some())
     }
 
     /// Builds the combined material-texture bind group (group 2): albedo at
@@ -2344,6 +2349,14 @@ impl ObjectMaterial {
         entries.push(wgpu::BindGroupEntry {
             binding: 7,
             resource: wgpu::BindingResource::TextureView(&self.cur_probe_view),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 8,
+            resource: wgpu::BindingResource::TextureView(&self.cur_bg_view),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 9,
+            resource: wgpu::BindingResource::Sampler(&self.bg_sampler),
         });
         self.frame_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shared_frame_bind_group"),
@@ -2536,6 +2549,10 @@ impl Material3d for ObjectMaterial {
         if is_new_frame {
             self.last_frame.set(current_frame);
 
+            // Record whether distance fog is active this frame (mode != off, params.x)
+            // so `object_features` can gate the `fog` shader feature.
+            self.fog_has.set(lights.fog.params()[0] != 0.0);
+
             // Write frame uniforms once per frame
             let (view, proj) = camera.view_transform_pair(pass);
 
@@ -2691,7 +2708,8 @@ impl Material3d for ObjectMaterial {
             color: [color.r, color.g, color.b, color.a],
             metallic: data.metallic(),
             roughness: data.roughness(),
-            _pad0: [0.0; 2],
+            light_layers: data.light_layers(),
+            ior: data.ior(),
             emissive: [emissive.r, emissive.g, emissive.b, emissive.a],
             has_normal_map: if data.normal_map().is_some() {
                 1.0
@@ -2751,6 +2769,17 @@ impl Material3d for ObjectMaterial {
                     [n.x, n.y, n.z, 0.0]
                 }
                 None => [0.0; 4],
+            },
+            attenuation_color: {
+                let a = data.attenuation_color();
+                [a.r, a.g, a.b, 1.0]
+            },
+            volume: {
+                // Encode an infinite attenuation distance as a negative sentinel so
+                // the shader can branch cheaply (no tint).
+                let dist = data.attenuation_distance();
+                let encoded = if dist.is_finite() { dist } else { -1.0 };
+                [data.thickness(), encoded, 0.0, 0.0]
             },
         };
 
@@ -2838,13 +2867,14 @@ impl Material3d for ObjectMaterial {
                 self.ibl_max_lod.set((e.mip_count.max(1) - 1) as f32);
                 self.ibl_intensity.set(e.intensity);
                 self.ibl_rotation.set(e.rotation);
-                let ptr = e.view as *const wgpu::TextureView as usize;
-                if self.ibl_bound_ptr != ptr {
-                    self.cur_ibl_view = e.view.clone();
-                    self.cur_ibl_sampler = e.sampler.clone();
-                    self.ibl_bound_ptr = ptr;
-                    self.rebuild_frame_bind_group();
-                }
+                // Always rebind: the env map is recreated when the skybox is (re)loaded,
+                // and a fresh `TextureView` can reuse a just-freed address, so pointer
+                // identity can't reliably detect the change (stale-view-after-realloc
+                // trap — same as SSAO / probes / the transmission background).
+                self.cur_ibl_view = e.view.clone();
+                self.cur_ibl_sampler = e.sampler.clone();
+                self.ibl_bound_ptr = 1;
+                self.rebuild_frame_bind_group();
             }
             None => {
                 self.ibl_has.set(false);
@@ -2876,12 +2906,12 @@ impl Material3d for ObjectMaterial {
                 }
                 self.probe_records.set(records);
                 self.probe_count.set(n as u32);
-                let ptr = p.array_view as *const wgpu::TextureView as usize;
-                if self.probe_bound_ptr != ptr {
-                    self.cur_probe_view = p.array_view.clone();
-                    self.probe_bound_ptr = ptr;
-                    self.rebuild_frame_bind_group();
-                }
+                // Always rebind: the probe array view can be recreated (re-registration
+                // / runtime capture) and reuse a just-freed address, so pointer identity
+                // can't reliably detect the change (stale-view-after-realloc trap).
+                self.cur_probe_view = p.array_view.clone();
+                self.probe_bound_ptr = 1;
+                self.rebuild_frame_bind_group();
             }
             _ => {
                 self.probe_count.set(0);
@@ -2904,20 +2934,47 @@ impl Material3d for ObjectMaterial {
 
     fn set_ssao(&mut self, ao: Option<&wgpu::TextureView>) {
         match ao {
+            // Always rebind: the SSAO texture is recreated on every window resize, and
+            // a fresh `TextureView` can reuse a just-freed address, so pointer identity
+            // can't reliably detect the change (would leave a stale/freed view bound —
+            // the same "frozen after resize" trap as the transmission background).
             Some(view) => {
                 self.ssao_has.set(true);
-                let ptr = view as *const wgpu::TextureView as usize;
-                if self.ao_bound_ptr != ptr {
-                    self.cur_ao_view = view.clone();
-                    self.ao_bound_ptr = ptr;
-                    self.rebuild_frame_bind_group();
-                }
+                self.cur_ao_view = view.clone();
+                self.ao_bound_ptr = 1;
+                self.rebuild_frame_bind_group();
             }
             None => {
                 self.ssao_has.set(false);
                 if self.ao_bound_ptr != 0 {
                     self.cur_ao_view = self.ao_fallback_view.clone();
                     self.ao_bound_ptr = 0;
+                    self.rebuild_frame_bind_group();
+                }
+            }
+        }
+    }
+
+    /// Binds the transmission background (the resolved opaque scene color + its
+    /// blurred mip chain) sampled by refractive (glass) objects, or `None` to fall
+    /// back to the 1x1 placeholder. Mirrors [`set_ssao`].
+    fn set_transmission_background(&mut self, bg: Option<&wgpu::TextureView>) {
+        match bg {
+            // Always rebind when a background is supplied: the snapshot texture is
+            // rebuilt on every resize, and a fresh `TextureView` can reuse a just-freed
+            // pointer, so pointer identity can't reliably detect the change. Skipping
+            // the rebuild would leave the bind group referencing a stale/freed view
+            // (the "frozen glass after resizing" bug). The cost is one bind-group
+            // rebuild per frame, only while refractive surfaces are present.
+            Some(view) => {
+                self.cur_bg_view = view.clone();
+                self.bg_bound_ptr = 1;
+                self.rebuild_frame_bind_group();
+            }
+            None => {
+                if self.bg_bound_ptr != 0 {
+                    self.cur_bg_view = self.ibl_fallback_view.clone();
+                    self.bg_bound_ptr = 0;
                     self.rebuild_frame_bind_group();
                 }
             }
@@ -3000,12 +3057,18 @@ impl Material3d for ObjectMaterial {
         // off the object color's alpha (per-instance alpha uses this classification
         // too).
         let transparent = data.alpha_mode().is_transparent(data.color().a);
+        // Refractive glass draws in its own post-resolve pass (so it can sample the
+        // scene behind it), not the opaque/prepass passes — otherwise it would be
+        // drawn opaque and double-rendered.
+        let glass = data.transmission() > 0.0;
         let render_surface = data.surface_rendering_active()
             && match context.phase {
-                // The prepass rasterizes opaque surfaces only (for SSAO geometry).
-                crate::resource::RenderPhase::Prepass => !transparent,
-                crate::resource::RenderPhase::Opaque => !transparent,
+                // The prepass rasterizes opaque surfaces only (for SSAO geometry +
+                // the depth the glass pass tests against — glass stays out of it).
+                crate::resource::RenderPhase::Prepass => !transparent && !glass,
+                crate::resource::RenderPhase::Opaque => !transparent && !glass,
                 crate::resource::RenderPhase::Transparent => transparent,
+                crate::resource::RenderPhase::Transmission => glass,
             };
         let in_opaque_phase = context.phase == crate::resource::RenderPhase::Opaque;
         let render_wireframe = in_opaque_phase && data.lines_width() > 0.0;
@@ -3143,38 +3206,38 @@ impl Material3d for ObjectMaterial {
             let cull = data.backface_culling_enabled() && !context.force_no_cull;
 
             // A skinned/morphed object uses the deform pipeline only when the deform
-            // pipelines exist (native) and the object's deform bind group was built
-            // this frame (in `SceneNode3d::update_deformations`); otherwise it renders
+            // path exists (native) and the object's deform bind group was built this
+            // frame (in `SceneNode3d::update_deformations`); otherwise it renders
             // through the plain path (base rest shape).
-            let use_deform = self.deform.is_some() && data.deform_bind_group().is_some();
+            let use_deform =
+                self.deform_pipeline_layout.is_some() && data.deform_bind_group().is_some();
 
             let texture_bind_group = gpu_data.texture_bind_group.as_ref().unwrap();
             let object_bind_group = self.object_bind_group.as_ref().unwrap();
 
-            // Select pipeline: deformed vs. plain, OIT (transparent phase) vs. opaque,
-            // and cull vs. no-cull per the object's backface-culling setting.
-            let pipeline = if use_deform {
-                let dr = self.deform.as_ref().unwrap();
-                match (context.phase, cull) {
-                    (crate::resource::RenderPhase::Prepass, _) => &dr.prepass_pipeline,
-                    (crate::resource::RenderPhase::Transparent, true) => &dr.oit_pipeline_cull,
-                    (crate::resource::RenderPhase::Transparent, false) => &dr.oit_pipeline_no_cull,
-                    (crate::resource::RenderPhase::Opaque, true) => &dr.pipeline_cull,
-                    (crate::resource::RenderPhase::Opaque, false) => &dr.pipeline_no_cull,
-                }
-                .get(context.sample_count)
-            } else {
-                match (context.phase, cull) {
-                    (crate::resource::RenderPhase::Prepass, _) => &self.prepass_pipeline,
-                    (crate::resource::RenderPhase::Transparent, true) => &self.oit_pipeline_cull,
-                    (crate::resource::RenderPhase::Transparent, false) => {
-                        &self.oit_pipeline_no_cull
-                    }
-                    (crate::resource::RenderPhase::Opaque, true) => &self.pipeline_cull,
-                    (crate::resource::RenderPhase::Opaque, false) => &self.pipeline_no_cull,
-                }
-                .get(context.sample_count)
+            // Select the specialized pipeline: which entry/targets (opaque vs. OIT vs.
+            // prepass, cull vs. no-cull) and which WESL feature variant. Shadows are
+            // active this frame iff the window bound a real shadow group (else the
+            // neutral one is used and the `shadows` feature strips out).
+            let shadows_active = context.shadow_bind_group.is_some();
+            let kind = match (context.phase, cull) {
+                (crate::resource::RenderPhase::Prepass, _) => PipelineKind::Prepass,
+                (crate::resource::RenderPhase::Transparent, true) => PipelineKind::OitCull,
+                (crate::resource::RenderPhase::Transparent, false) => PipelineKind::OitNoCull,
+                // Glass reuses the opaque pipeline (it writes opaque color/depth);
+                // the refraction is computed in-shader by sampling the background.
+                (crate::resource::RenderPhase::Transmission, true)
+                | (crate::resource::RenderPhase::Opaque, true) => PipelineKind::OpaqueCull,
+                (crate::resource::RenderPhase::Transmission, false)
+                | (crate::resource::RenderPhase::Opaque, false) => PipelineKind::OpaqueNoCull,
             };
+            let mut features = self.object_features(data, use_deform, shadows_active);
+            // The prepass ignores all shading features; collapse to the structural key
+            // so it stays a single module per deform-ness.
+            if kind == PipelineKind::Prepass {
+                features = features.prepass_key();
+            }
+            let pipeline = self.surface_pipeline(features, context.sample_count, kind);
             render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
             // Use dynamic offset for object uniforms!

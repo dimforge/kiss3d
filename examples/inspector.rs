@@ -63,7 +63,8 @@ async fn main() {
         .raytrace_3d(&mut scene, &mut camera, &mut raytracer)
         .await
     {
-        // Draw the inspector overlay.
-        window.draw_inspector(&mut inspector, &mut scene, Some(&mut raytracer));
+        // Draw the inspector overlay. Pass `Some(&mut scene_2d)` as the third
+        // argument to also inspect a 2D scene.
+        window.draw_inspector(&mut inspector, Some(&mut scene), None, Some(&mut raytracer));
     }
 }

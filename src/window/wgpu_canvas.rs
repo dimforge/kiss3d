@@ -765,6 +765,32 @@ impl WgpuCanvas {
     ///
     /// For an off-screen (headless) canvas this is the only way to change the
     /// render size, since there is no window to emit resize events.
+    /// Whether vsync (the `AutoVsync` present mode) is currently enabled.
+    pub fn vsync(&self) -> bool {
+        self.surface_config.present_mode == wgpu::PresentMode::AutoVsync
+    }
+
+    /// Enables/disables vsync at runtime by switching the surface present mode
+    /// (`AutoVsync` ↔ `AutoNoVsync`) and reconfiguring the surface. With vsync off,
+    /// frames present as fast as the GPU produces them (uncapped), which is what you
+    /// want when measuring GPU-bound throughput; on, presentation is paced to the
+    /// display refresh. No-op on a headless/offscreen canvas (no surface).
+    pub fn set_vsync(&mut self, enabled: bool) {
+        let present_mode = if enabled {
+            wgpu::PresentMode::AutoVsync
+        } else {
+            wgpu::PresentMode::AutoNoVsync
+        };
+        if self.surface_config.present_mode == present_mode {
+            return;
+        }
+        self.surface_config.present_mode = present_mode;
+        if let Some(surface) = &self.surface {
+            let ctxt = Context::get();
+            surface.configure(&ctxt.device, &self.surface_config);
+        }
+    }
+
     pub fn resize(&mut self, width: u32, height: u32) {
         let width = width.max(1);
         let height = height.max(1);

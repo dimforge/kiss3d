@@ -106,7 +106,16 @@ impl Window {
         mut post_processing: Option<&mut dyn PostProcessingEffect>,
     ) -> bool {
         // Frame timing: CPU wall-clock for the whole frame (and submit/present
-        // below) plus per-pass GPU timestamps recorded into the GPU timer.
+        // below) plus per-pass GPU timestamps recorded into the GPU timer. The
+        // frame-to-frame wall-clock period (true FPS) is the delta between
+        // successive frames at this same point — it captures the vsync/present wait
+        // and app/event time that the per-pass GPU timestamps don't.
+        let frame_start = web_time::Instant::now();
+        let frame_wall = self
+            .last_frame_instant
+            .map(|prev| frame_start.duration_since(prev))
+            .unwrap_or_default();
+        self.last_frame_instant = Some(frame_start);
         let cpu = CpuTimer::start();
         self.gpu_timer.begin_frame();
 
@@ -212,6 +221,7 @@ impl Window {
         // Clear the render target at the start of the frame
         {
             let bg = self.background;
+            let clear_ts = self.gpu_timer.render_scope("clear");
             let _clear_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("clear_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -236,7 +246,7 @@ impl Window {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes: clear_ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -301,7 +311,16 @@ impl Window {
         // contents are computed below (after prepare propagates transforms) into
         // that same texture, before the opaque pass samples it.
         let ssr_active = self.ssr_enabled && Context::get().supports_clustered_lighting();
-        if self.ssao_enabled || ssr_active {
+        // DoF only needs the view-position G-buffer (no compute/storage), so it runs
+        // on every backend the prepass does.
+        let dof_active = self.dof_enabled;
+        // Refractive glass: needs the opaque scene resolved + the prepass depth (for
+        // occlusion), even when SSAO/SSR/DoF are all off.
+        let glass_active = self.transmission_enabled
+            && scene
+                .as_deref()
+                .is_some_and(|s| s.has_refractive_surfaces());
+        if self.ssao_enabled || ssr_active || dof_active || glass_active {
             let ssao = self
                 .ssao
                 .get_or_insert_with(|| crate::renderer::Ssao::new(w, h));
@@ -370,8 +389,7 @@ impl Window {
                     }
                     MaterialManager3d::get_global_manager(|mm| mm.flush());
 
-                    let mut fenc =
-                        ctxt.create_command_encoder(Some("probe_capture_face_encoder"));
+                    let mut fenc = ctxt.create_command_encoder(Some("probe_capture_face_encoder"));
                     let cap = self.probe_capture.as_ref().unwrap();
                     if sky_set {
                         self.skybox.render(
@@ -379,6 +397,7 @@ impl Window {
                             cap.face_color_view(face),
                             1,
                             cam.inverse_transformation(),
+                            None,
                         );
                     }
                     let ctx = RenderContext {
@@ -397,6 +416,7 @@ impl Window {
                         } else {
                             wgpu::LoadOp::Clear(wgpu::Color::BLACK)
                         };
+                        let probe_ts = self.gpu_timer.render_scope("probe");
                         let mut pass = fenc.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("probe_capture_face"),
                             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -418,7 +438,7 @@ impl Window {
                                     stencil_ops: None,
                                 },
                             ),
-                            timestamp_writes: None,
+                            timestamp_writes: probe_ts,
                             occlusion_query_set: None,
                             multiview_mask: None,
                         });
@@ -435,10 +455,13 @@ impl Window {
                 // (its own submission, after the face submits that produced them).
                 if let Some(probes) = self.reflection_probes.as_ref() {
                     let dst = probes.layer_mip0_view(idx);
-                    let mut renc =
-                        ctxt.create_command_encoder(Some("probe_reproject_encoder"));
-                    self.probe_capture.as_ref().unwrap().reproject(&mut renc, &dst);
-                    probes.generate_layer_mips(&mut renc, idx);
+                    let mut renc = ctxt.create_command_encoder(Some("probe_reproject_encoder"));
+                    self.probe_capture.as_ref().unwrap().reproject(
+                        &mut renc,
+                        &dst,
+                        &mut self.gpu_timer,
+                    );
+                    probes.generate_layer_mips(&mut renc, idx, Some(&mut self.gpu_timer));
                     ctxt.submit(std::iter::once(renc.finish()));
                 }
             }
@@ -475,6 +498,7 @@ impl Window {
                 &color_view,
                 sample_count,
                 camera.inverse_transformation(),
+                Some(&mut self.gpu_timer),
             );
         }
 
@@ -512,7 +536,7 @@ impl Window {
             // metallic into the prepass MRT, then (if SSAO is on) runs the SSAO +
             // blur passes into the AO texture the opaque pass samples. SSR consumes
             // the same G-buffer after the opaque pass.
-            if (self.ssao_enabled || ssr_active) && pass == 0 {
+            if (self.ssao_enabled || ssr_active || dof_active || glass_active) && pass == 0 {
                 if let Some(scene) = scene.as_deref_mut() {
                     let ssao = self.ssao.as_ref().unwrap();
                     let prepass_ctx = RenderContext {
@@ -531,6 +555,7 @@ impl Window {
                             load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                             store: wgpu::StoreOp::Store,
                         };
+                        let prepass_ts = self.gpu_timer.render_scope("prepass");
                         let mut pp = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("gbuffer_prepass"),
                             color_attachments: &[
@@ -569,7 +594,7 @@ impl Window {
                                     stencil_ops: None,
                                 },
                             ),
-                            timestamp_writes: None,
+                            timestamp_writes: prepass_ts,
                             occlusion_query_set: None,
                             multiview_mask: None,
                         });
@@ -579,7 +604,7 @@ impl Window {
                     }
                     if self.ssao_enabled {
                         let (_, proj) = camera.view_transform_pair(0);
-                        ssao.compute(&mut encoder, proj);
+                        ssao.compute(&mut encoder, proj, &mut self.gpu_timer);
                     }
                 }
             }
@@ -595,7 +620,15 @@ impl Window {
                 let clustered = self
                     .clustered
                     .get_or_insert_with(|| crate::builtin::clustered::Clustered::new(w, h));
-                let realloc = clustered.run(&mut encoder, &lights, &shadow_slots, &*camera, w, h);
+                let realloc = clustered.run(
+                    &mut encoder,
+                    &lights,
+                    &shadow_slots,
+                    &*camera,
+                    w,
+                    h,
+                    &mut self.gpu_timer,
+                );
                 let lights_buf = clustered.lights_buffer().clone();
                 let grid_buf = clustered.grid_buffer().clone();
                 let index_buf = clustered.index_buffer().clone();
@@ -702,7 +735,13 @@ impl Window {
         // composited over the opaque HDR scene — so transparency needs no sorting and
         // is robust to interpenetration. Points/polylines are opaque overlays already
         // drawn above. Done once (not per stereo pass).
-        if let Some(scene) = scene {
+        //
+        // Skipped entirely when nothing in the scene is transparent (the common
+        // case): the geometry pass clears + MSAA-resolves the accum/revealage targets
+        // and the composite blends them back, all for zero draws otherwise. The
+        // `has_transparent_surfaces` check uses the same per-object classification the
+        // material applies, so a real transparent surface is never dropped.
+        if let Some(scene) = scene.as_deref_mut().filter(|s| s.has_transparent_surfaces()) {
             let oit_context = RenderContext {
                 surface_format: Context::render_format(),
                 // The OIT geometry pass shares the (MSAA) opaque depth buffer, so its
@@ -763,7 +802,7 @@ impl Window {
                     .data_mut()
                     .render(0, camera, &lights, &mut oit_pass, &oit_context);
             }
-            self.hdr.composite_oit(&mut encoder);
+            self.hdr.composite_oit(&mut encoder, &mut self.gpu_timer);
         }
 
         camera.render_complete(&self.canvas);
@@ -788,8 +827,13 @@ impl Window {
             // Flush all accumulated uniform data to GPU
             MaterialManager2d::get_global_manager(|mm| mm.flush());
 
-            // Render phase for scene (single render pass)
-            {
+            // Render phase for the 2D scene (single render pass). Skipped entirely
+            // when there is no 2D scene: the pass only does a full-screen Load/Store
+            // of the (MSAA) HDR film, so on a 3D-only frame it is pure wasted
+            // bandwidth — and skipping it leaves the film's contents untouched,
+            // exactly as a no-op Load/Store pass would.
+            if let Some(scene_2d) = scene_2d {
+                let scene2d_ts = self.gpu_timer.render_scope("2d");
                 let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("2d_scene_render_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -802,16 +846,14 @@ impl Window {
                         depth_slice: None,
                     })],
                     depth_stencil_attachment: None,
-                    timestamp_writes: None,
+                    timestamp_writes: scene2d_ts,
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
 
-                if let Some(scene_2d) = scene_2d {
-                    scene_2d
-                        .data_mut()
-                        .render(camera_2d, &mut render_pass, &context_2d);
-                }
+                scene_2d
+                    .data_mut()
+                    .render(camera_2d, &mut render_pass, &context_2d);
             }
 
             // Polylines and points render on top of surfaces (into the HDR film).
@@ -842,7 +884,15 @@ impl Window {
         // HDR resolve: the scene was rasterized into the HDR film. If MSAA is
         // active, resolve the multisampled HDR attachment into the single-sample
         // HDR texture first (a render pass resolves on End even with no draws).
+        //
+        // The MSAA attachment is `Discard`-stored, not `Store`d: only the resolved
+        // single-sample texture is read afterwards (SSR/DoF/tonemap), so writing the
+        // four multisampled samples back to memory is pure waste — and an expensive
+        // one at high resolution on tile-based GPUs, where it is a full extra
+        // round-trip of the 4× HDR film. The resolve_target is written regardless of
+        // the store op.
         if let Some(resolve_view) = &resolve_view {
+            let resolve_ts = self.gpu_timer.render_scope("resolve");
             let _resolve_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hdr_msaa_resolve_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -850,15 +900,119 @@ impl Window {
                     resolve_target: Some(resolve_view),
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
+                        store: wgpu::StoreOp::Discard,
                     },
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: resolve_ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+        }
+
+        // Refractive transmission (glass): snapshot the resolved opaque scene into a
+        // blurred mip chain, then draw the refractive objects into the resolved scene
+        // sampling that snapshot (offset by their IOR/thickness, mip by roughness).
+        // Runs before SSR/DoF so glass shares their depth and gets blurred with them.
+        if glass_active {
+            {
+                let t = self
+                    .transmission
+                    .get_or_insert_with(|| crate::renderer::Transmission::new(w, h));
+                t.resize(w, h);
+            }
+            let steps = self.transmission.as_ref().unwrap().steps() as usize;
+            // Collect the glass objects and sort them back-to-front (farthest first).
+            let mut glass_nodes: Vec<SceneNode3d> = Vec::new();
+            if let Some(s) = scene.as_deref() {
+                s.collect_refractive(&mut glass_nodes);
+            }
+            if let Some(ssao) = self.ssao.as_ref() {
+                if !glass_nodes.is_empty() {
+                    let (view_pose, _proj) = camera.view_transform_pair(0);
+                    let view = view_pose.to_mat4();
+                    // View-space z is most negative for the farthest objects; ascending
+                    // z sorts farthest-first.
+                    glass_nodes.sort_by(|a, b| {
+                        let za = view.transform_point3(a.world_position()).z;
+                        let zb = view.transform_point3(b.world_position()).z;
+                        za.partial_cmp(&zb).unwrap_or(std::cmp::Ordering::Equal)
+                    });
+                    let num = glass_nodes.len();
+                    // Split into `min(steps, num)` depth layers, each preceded by a fresh
+                    // snapshot. The farthest objects share the first layer; each of the
+                    // nearest `groups-1` objects gets its own layer, so a front object
+                    // refracts a snapshot that already contains the glass behind it —
+                    // revealing glass through glass. `steps == 1` => one layer (refracts
+                    // only the opaque scene), matching the cheap default.
+                    let groups = steps.clamp(1, num);
+                    let first_len = num - groups + 1;
+
+                    let scene_resolved = self.hdr.scene_resolved_view();
+                    let t = self.transmission.as_ref().unwrap();
+                    let glass_ctx = RenderContext {
+                        surface_format: crate::post_processing::HDR_FORMAT,
+                        sample_count: 1,
+                        viewport_width: w,
+                        viewport_height: h,
+                        render_layers: camera.render_layers(),
+                        force_no_cull: false,
+                        shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                        phase: RenderPhase::Transmission,
+                    };
+                    for g in 0..groups {
+                        let lo = if g == 0 { 0 } else { first_len + (g - 1) };
+                        let hi = if g == 0 { first_len } else { first_len + g };
+                        // Snapshot the resolved scene as it stands (opaque + the glass
+                        // layers already drawn), then draw this layer sampling it.
+                        t.build(&mut encoder, scene_resolved, &mut self.gpu_timer);
+                        {
+                            let default_mat =
+                                MaterialManager3d::get_global_manager(|mm| mm.get_default());
+                            default_mat
+                                .borrow_mut()
+                                .set_transmission_background(Some(t.view()));
+                        }
+                        let glass_ts = self.gpu_timer.render_scope("transmission");
+                        let mut glass_pass =
+                            encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                label: Some("transmission_glass_pass"),
+                                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                    view: scene_resolved,
+                                    resolve_target: None,
+                                    ops: wgpu::Operations {
+                                        load: wgpu::LoadOp::Load,
+                                        store: wgpu::StoreOp::Store,
+                                    },
+                                    depth_slice: None,
+                                })],
+                                depth_stencil_attachment: Some(
+                                    wgpu::RenderPassDepthStencilAttachment {
+                                        view: ssao.depth_view(),
+                                        depth_ops: Some(wgpu::Operations {
+                                            load: wgpu::LoadOp::Load,
+                                            store: wgpu::StoreOp::Store,
+                                        }),
+                                        stencil_ops: None,
+                                    },
+                                ),
+                                timestamp_writes: glass_ts,
+                                occlusion_query_set: None,
+                                multiview_mask: None,
+                            });
+                        for node in glass_nodes[lo..hi].iter_mut() {
+                            node.data_mut().render_object_only(
+                                0,
+                                camera,
+                                &lights,
+                                &mut glass_pass,
+                                &glass_ctx,
+                            );
+                        }
+                    }
+                }
+            }
         }
 
         // Screen-space reflections: now that the opaque scene is resolved into the
@@ -893,6 +1047,33 @@ impl Window {
                     view_pose.to_mat4(),
                     proj,
                     env,
+                    &mut self.gpu_timer,
+                );
+            }
+        }
+
+        // Depth of field: blur the resolved HDR scene by per-pixel circle of
+        // confusion (focal distance + aperture), reading the prepass view-position
+        // for depth and writing the composite back into the scene before tonemap.
+        // Background pixels (no opaque surface) use the far clip plane as their
+        // depth so the sky blurs like a distant surface.
+        if dof_active {
+            {
+                let dof = self
+                    .dof
+                    .get_or_insert_with(|| crate::renderer::Dof::new(w, h));
+                dof.resize(w, h);
+            }
+            if let Some(ssao) = self.ssao.as_ref() {
+                let (_, proj) = camera.view_transform_pair(0);
+                let scene_resolved = self.hdr.scene_resolved_view();
+                self.dof.as_ref().unwrap().compute(
+                    &mut encoder,
+                    scene_resolved,
+                    ssao.viewpos_view(),
+                    proj,
+                    zfar,
+                    &mut self.gpu_timer,
                 );
             }
         }
@@ -992,6 +1173,7 @@ impl Window {
         // render work and not the idle wait for the next animation frame.
         self.last_timings = Some(RenderTimings {
             renderer: "Rasterizer",
+            frame_wall,
             total: cpu.elapsed(),
             cpu_submit,
             cpu_present,
@@ -1032,6 +1214,14 @@ impl Window {
         camera: &mut dyn Camera3d,
         raytracer: &mut RayTracer,
     ) -> bool {
+        // Wall-clock frame-to-frame period (true FPS), the metric the per-pass GPU
+        // timestamps don't capture. See `render_single_frame`.
+        let frame_start = web_time::Instant::now();
+        let frame_wall = self
+            .last_frame_instant
+            .map(|prev| frame_start.duration_since(prev))
+            .unwrap_or_default();
+        self.last_frame_instant = Some(frame_start);
         let cpu = CpuTimer::start();
         self.gpu_timer.begin_frame();
         let offscreen = self.hidden;
@@ -1179,6 +1369,7 @@ impl Window {
 
         self.last_timings = Some(RenderTimings {
             renderer: "Path tracer",
+            frame_wall,
             total: cpu.elapsed(),
             cpu_submit,
             cpu_present,
@@ -1317,8 +1508,12 @@ impl Window {
         // Build a mirror camera per reflector and (in the same walk) resize its
         // target + store the reflected view-proj on it. Collect the views + clip
         // plane so the renders below don't need to re-borrow the scene's reflectors.
-        let mut jobs: Vec<(crate::renderer::MirrorCamera, wgpu::TextureView, wgpu::TextureView, [f32; 4])> =
-            Vec::new();
+        let mut jobs: Vec<(
+            crate::renderer::MirrorCamera,
+            wgpu::TextureView,
+            wgpu::TextureView,
+            [f32; 4],
+        )> = Vec::new();
         scene.apply_to_objects_with_world_mut_recursive(&mut |pose, _scale, obj| {
             let local_n = match obj.reflector() {
                 Some(r) => r.local_normal(),
@@ -1367,8 +1562,13 @@ impl Window {
             // Render into this reflector's target (its own queue submission).
             let mut menc = ctxt.create_command_encoder(Some("reflector_encoder"));
             if sky_set {
-                self.skybox
-                    .render(&mut menc, &color_view, 1, mcam.inverse_transformation());
+                self.skybox.render(
+                    &mut menc,
+                    &color_view,
+                    1,
+                    mcam.inverse_transformation(),
+                    None,
+                );
             }
             let ctx = RenderContext {
                 surface_format: crate::post_processing::HDR_FORMAT,
@@ -1387,6 +1587,7 @@ impl Window {
                 } else {
                     wgpu::LoadOp::Clear(wgpu::Color::BLACK)
                 };
+                let reflector_ts = self.gpu_timer.render_scope("reflector");
                 let mut pass = menc.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("reflector_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1406,7 +1607,7 @@ impl Window {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: reflector_ts,
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });

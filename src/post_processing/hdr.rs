@@ -354,7 +354,10 @@ impl HdrPipeline {
 
         let bloom_shader = ctxt.create_shader_module(
             Some("hdr_bloom_shader"),
-            include_str!("../builtin/hdr_bloom.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::hdr_bloom",
+                include_str!("../builtin/hdr_bloom.wgsl"),
+            ),
         );
 
         let vertex_layout = wgpu::VertexBufferLayout {
@@ -526,13 +529,21 @@ impl HdrPipeline {
             ..Default::default()
         });
 
-        let tonemap_shader = ctxt.create_shader_module(
-            Some("hdr_tonemap_shader"),
-            concat!(
-                include_str!("../builtin/tonemap_ops.wgsl"),
-                include_str!("../builtin/hdr_tonemap.wgsl"),
-            ),
+        // `hdr_tonemap` imports the shared `apply_tonemap` from the `tonemap_ops`
+        // WESL module (composed here instead of source concatenation).
+        let tonemap_wgsl = crate::builtin::compile_wesl(
+            &[
+                ("package::tonemap_ops", crate::builtin::TONEMAP_OPS_WESL),
+                (
+                    "package::hdr_tonemap",
+                    include_str!("../builtin/hdr_tonemap.wgsl"),
+                ),
+                ("package::common", crate::builtin::COMMON_WESL),
+            ],
+            "package::hdr_tonemap",
+            &[],
         );
+        let tonemap_shader = ctxt.create_shader_module(Some("hdr_tonemap_shader"), &tonemap_wgsl);
 
         let tonemap_pipeline_layout =
             ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -689,7 +700,10 @@ impl HdrPipeline {
         });
         let meter_shader = ctxt.create_shader_module(
             Some("hdr_autoexposure_meter"),
-            include_str!("../builtin/auto_exposure_meter.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::auto_exposure_meter",
+                include_str!("../builtin/auto_exposure_meter.wgsl"),
+            ),
         );
         let make_1x1_pipeline =
             |label: &str, layout: &wgpu::BindGroupLayout, shader: &wgpu::ShaderModule| {
@@ -783,7 +797,10 @@ impl HdrPipeline {
         });
         let adapt_shader = ctxt.create_shader_module(
             Some("hdr_autoexposure_adapt"),
-            include_str!("../builtin/auto_exposure_adapt.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::auto_exposure_adapt",
+                include_str!("../builtin/auto_exposure_adapt.wgsl"),
+            ),
         );
         let adapt_pipeline =
             make_1x1_pipeline("hdr_autoexposure_adapt", &adapt_layout, &adapt_shader);
@@ -1189,7 +1206,11 @@ impl HdrPipeline {
 
     /// Composites the transparent OIT result over the opaque HDR scene. Run after
     /// the transparent geometry pass and before [`resolve`](Self::resolve).
-    pub fn composite_oit(&self, encoder: &mut wgpu::CommandEncoder) {
+    pub(crate) fn composite_oit(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        gpu: &mut crate::renderer::timings::GpuTimer,
+    ) {
         let ctxt = Context::get();
         // Sample the single-sample (resolved, under MSAA) OIT targets.
         let bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1206,6 +1227,7 @@ impl HdrPipeline {
                 },
             ],
         });
+        let composite_ts = gpu.render_scope("composite");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("hdr_oit_composite_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1222,7 +1244,7 @@ impl HdrPipeline {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: composite_ts,
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -1281,12 +1303,17 @@ impl HdrPipeline {
     /// Runs the bloom prefilter + downsample + upsample chain. The final blurred
     /// result lands in `bloom_mips[0]` (half resolution), which the tonemap pass
     /// samples.
-    fn run_bloom(&self, encoder: &mut wgpu::CommandEncoder) {
+    fn run_bloom(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        gpu: &mut crate::renderer::timings::GpuTimer,
+    ) {
         let ctxt = Context::get();
 
         // Prefilter the full-res scene into the first (half-res) mip.
         {
             let bg = self.bloom_bind_group(&ctxt, &self.scene_view, self.width, self.height);
+            let bloom_ts = gpu.render_scope("bloom");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hdr_bloom_prefilter_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1299,7 +1326,7 @@ impl HdrPipeline {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: bloom_ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1314,6 +1341,7 @@ impl HdrPipeline {
             let src = &self.bloom_mips[i];
             let dst = &self.bloom_mips[i + 1];
             let bg = self.bloom_bind_group(&ctxt, &src.view, src.width, src.height);
+            let bloom_ts = gpu.render_scope("bloom");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hdr_bloom_downsample_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1326,7 +1354,7 @@ impl HdrPipeline {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: bloom_ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1341,6 +1369,7 @@ impl HdrPipeline {
             let src = &self.bloom_mips[i + 1];
             let dst = &self.bloom_mips[i];
             let bg = self.bloom_bind_group(&ctxt, &src.view, src.width, src.height);
+            let bloom_ts = gpu.render_scope("bloom");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hdr_bloom_upsample_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1354,7 +1383,7 @@ impl HdrPipeline {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: bloom_ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1374,7 +1403,11 @@ impl HdrPipeline {
     /// Meters the scene's average luminance and adapts the exposure toward it.
     /// Returns the index of the exposure texture holding this frame's value (which
     /// the tonemap pass samples). Ping-pongs the two 1x1 exposure textures.
-    fn run_auto_exposure(&mut self, encoder: &mut wgpu::CommandEncoder) -> usize {
+    fn run_auto_exposure(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        gpu: &mut crate::renderer::timings::GpuTimer,
+    ) -> usize {
         let ctxt = Context::get();
         let write_index = self.exposure_index;
         let prev_index = 1 - write_index;
@@ -1416,6 +1449,7 @@ impl HdrPipeline {
             ],
         });
         {
+            let exposure_ts = gpu.render_scope("exposure");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hdr_autoexposure_meter_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1428,7 +1462,7 @@ impl HdrPipeline {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: exposure_ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1461,6 +1495,7 @@ impl HdrPipeline {
             ],
         });
         {
+            let exposure_ts = gpu.render_scope("exposure");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("hdr_autoexposure_adapt_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1473,7 +1508,7 @@ impl HdrPipeline {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: exposure_ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -1497,14 +1532,14 @@ impl HdrPipeline {
 
         let bloom_enabled = self.settings.bloom_enabled && self.settings.bloom_intensity > 0.0;
         if bloom_enabled {
-            self.run_bloom(encoder);
+            self.run_bloom(encoder, gpu);
         }
 
         // Auto-exposure: meter + adapt before tonemapping. The resulting 1x1
         // exposure texture is sampled by the tonemap pass (binding 5).
         let auto = self.settings.auto_exposure;
         let exposure_index = if auto {
-            self.run_auto_exposure(encoder)
+            self.run_auto_exposure(encoder, gpu)
         } else {
             self.exposure_index
         };

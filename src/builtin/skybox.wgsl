@@ -3,10 +3,11 @@
 // Draws a full-screen triangle into the HDR scene target before the opaque pass.
 // For each pixel it reconstructs the world-space view ray from the inverse
 // view-projection matrix and samples an equirectangular environment map. The
-// direction→UV mapping and the Y-axis rotation match the path tracer
-// (`rt_kernel.wgsl::dir_to_equirect`) so both backends show the same sky.
+// direction→UV mapping is the shared `equirect_dir_to_uv` (so the rasterizer, SSR
+// and the path tracer all show the same sky); the Y-axis rotation matches too.
 
-const PI: f32 = 3.14159265359;
+import package::pbr_env::equirect_dir_to_uv;
+import package::common::fullscreen_triangle_xy;
 
 struct SkyUniforms {
     inv_view_proj: mat4x4<f32>,
@@ -25,15 +26,9 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-    // Oversized full-screen triangle covering the viewport.
-    var corners = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
-    );
-    let xy = corners[vid];
-    var out: VsOut;
     // z = 1 keeps the sky at the far plane; the pass uses no depth test/write.
+    let xy = fullscreen_triangle_xy(vid);
+    var out: VsOut;
     out.pos = vec4<f32>(xy, 1.0, 1.0);
     out.ndc = xy;
     return out;
@@ -53,11 +48,7 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let far = u.inv_view_proj * vec4<f32>(in.ndc, 1.0, 1.0);
     let dir = normalize(far.xyz / far.w - near.xyz / near.w);
 
-    let d = env_rotate(dir);
-    let uv = vec2<f32>(
-        atan2(d.z, d.x) / (2.0 * PI) + 0.5,
-        acos(clamp(d.y, -1.0, 1.0)) / PI,
-    );
+    let uv = equirect_dir_to_uv(env_rotate(dir));
     let c = textureSampleLevel(env_tex, env_samp, uv, 0.0).rgb * u.params.z;
     return vec4<f32>(c, 1.0);
 }

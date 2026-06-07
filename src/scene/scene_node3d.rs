@@ -166,6 +166,7 @@ impl SceneNodeData3d {
                     world_direction: self.world_transform.rotation * local_direction,
                     radius: light.radius,
                     casts_shadows: light.casts_shadows,
+                    layers: light.layers,
                 });
             }
         }
@@ -249,6 +250,31 @@ impl SceneNodeData3d {
             if bc.visible {
                 bc.do_render(pass, camera, lights, render_pass, context)
             }
+        }
+    }
+
+    /// Renders only this node's own object (not its children). Used by the
+    /// refractive-transmission pass, which draws glass objects individually in
+    /// back-to-front order so each can refract the ones already drawn behind it.
+    #[doc(hidden)]
+    pub fn render_object_only(
+        &mut self,
+        pass: usize,
+        camera: &mut dyn Camera3d,
+        lights: &LightCollection,
+        render_pass: &mut wgpu::RenderPass<'_>,
+        context: &RenderContext,
+    ) {
+        if let Some(ref mut o) = self.object {
+            o.render(
+                self.world_transform,
+                self.world_scale,
+                pass,
+                camera,
+                lights,
+                render_pass,
+                context,
+            )
         }
     }
 
@@ -856,6 +882,34 @@ impl SceneNode3d {
     /// A `RefMut` guard to the `SceneNodeData`
     pub fn data_mut(&mut self) -> RefMut<'_, SceneNodeData3d> {
         self.data.borrow_mut()
+    }
+
+    /// This node's world-space position (the translation of its world transform,
+    /// valid after the per-frame transform propagation in `prepare`).
+    #[doc(hidden)]
+    pub fn world_position(&self) -> Vec3 {
+        self.data().world_transform.translation
+    }
+
+    /// Collects (handles to) every visible refractive (glass, `transmission > 0`)
+    /// object in this subtree. The transmission pass renders these individually,
+    /// depth-sorted, so glass can be seen through other glass.
+    #[doc(hidden)]
+    pub fn collect_refractive(&self, out: &mut Vec<SceneNode3d>) {
+        let d = self.data();
+        if !d.visible {
+            return;
+        }
+        let is_glass = d.object.as_ref().is_some_and(|o| {
+            let od = o.data();
+            od.surface_rendering_active() && od.transmission() > 0.0
+        });
+        if is_glass {
+            out.push(self.clone());
+        }
+        for c in d.children.iter() {
+            c.collect_refractive(out);
+        }
     }
 
     /// A stable, process-unique identifier for this node, derived from the
@@ -2129,10 +2183,27 @@ impl SceneNode3d {
         self.clone()
     }
 
-    /// Sets the transmission (specular-transmittance) factor in `[0, 1]`.
+    /// Sets the refractive transmission factor in `[0, 1]` (`> 0` = glass). See
+    /// [`Object3d::set_transmission`](crate::scene::Object3d::set_transmission).
     #[inline]
     pub fn set_transmission(&mut self, transmission: f32) -> Self {
         self.apply_to_object_mut(&mut |o| o.set_transmission(transmission));
+        self.clone()
+    }
+
+    /// Sets the volume thickness (world units) of a transmissive surface. See
+    /// [`Object3d::set_thickness`](crate::scene::Object3d::set_thickness).
+    #[inline]
+    pub fn set_thickness(&mut self, thickness: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_thickness(thickness));
+        self.clone()
+    }
+
+    /// Sets the volume attenuation (absorption) color + distance for a transmissive
+    /// surface. See [`Object3d::set_attenuation`](crate::scene::Object3d::set_attenuation).
+    #[inline]
+    pub fn set_attenuation(&mut self, color: crate::color::Color, distance: f32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_attenuation(color, distance));
         self.clone()
     }
 
@@ -2188,6 +2259,24 @@ impl SceneNode3d {
     #[inline]
     pub fn set_render_layers(&mut self, layers: u32) -> Self {
         self.apply_to_object_mut(&mut |o| o.set_render_layers(layers));
+        self.clone()
+    }
+
+    /// Sets this node's object light-layer bitmask, i.e. which lights affect it
+    /// (see [`Object3d::set_light_layers`](crate::scene::Object3d::set_light_layers)).
+    #[inline]
+    pub fn set_light_layers(&mut self, layers: u32) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_light_layers(layers));
+        self.clone()
+    }
+
+    /// Sets whether this node's object occludes lights in the shadow pass (see
+    /// [`Object3d::set_casts_shadows`](crate::scene::Object3d::set_casts_shadows)).
+    /// Set `false` for a visible object that should not cast a shadow, e.g. an
+    /// emissive marker at a light's position.
+    #[inline]
+    pub fn set_casts_shadows(&mut self, casts_shadows: bool) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_casts_shadows(casts_shadows));
         self.clone()
     }
 
@@ -2560,6 +2649,37 @@ impl SceneNode3d {
         for c in data.children.iter() {
             c.apply_to_objects_recursive(f)
         }
+    }
+
+    /// Whether any surface in this subtree renders in the transparent (OIT) pass,
+    /// using the same classification the material applies per object
+    /// ([`AlphaMode::is_transparent`] on the object color). Lets the renderer skip
+    /// the OIT geometry + composite passes entirely for fully-opaque scenes — the
+    /// common case — which would otherwise clear, resolve and composite the MSAA
+    /// transparency targets every frame for nothing.
+    pub(crate) fn has_transparent_surfaces(&self) -> bool {
+        let mut any = false;
+        self.apply_to_objects_recursive(&mut |obj| {
+            let d = obj.data();
+            if d.surface_rendering_active() && d.alpha_mode().is_transparent(d.color().a) {
+                any = true;
+            }
+        });
+        any
+    }
+
+    /// Whether any surface in this subtree is refractive (glass): `transmission > 0`.
+    /// Lets the renderer run the prepass + background snapshot + glass pass only when
+    /// glass is actually present.
+    pub(crate) fn has_refractive_surfaces(&self) -> bool {
+        let mut any = false;
+        self.apply_to_objects_recursive(&mut |obj| {
+            let d = obj.data();
+            if d.surface_rendering_active() && d.transmission() > 0.0 {
+                any = true;
+            }
+        });
+        any
     }
 
     // TODO: add folding?

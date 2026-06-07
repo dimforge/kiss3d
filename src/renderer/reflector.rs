@@ -209,7 +209,12 @@ impl Reflector {
     fn make_targets(
         w: u32,
         h: u32,
-    ) -> (wgpu::Texture, wgpu::TextureView, wgpu::Texture, wgpu::TextureView) {
+    ) -> (
+        wgpu::Texture,
+        wgpu::TextureView,
+        wgpu::Texture,
+        wgpu::TextureView,
+    ) {
         let ctxt = Context::get();
         let color = ctxt.create_texture(&wgpu::TextureDescriptor {
             label: Some("reflector_color"),

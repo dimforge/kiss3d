@@ -191,7 +191,10 @@ impl Ssr {
         // The downsample shader uses only a texture + sampler (no uniform).
         let downsample_shader = ctxt.create_shader_module(
             Some("ssr_downsample"),
-            include_str!("../builtin/env_downsample.wgsl"),
+            &crate::builtin::compile_shader_with_common(
+                "package::env_downsample",
+                crate::builtin::ENV_DOWNSAMPLE_WESL,
+            ),
         );
         let downsample_layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("ssr_downsample_layout"),
@@ -214,9 +217,20 @@ impl Ssr {
         );
 
         // SSR additive pass: viewpos, normal, material, refl-chain, env, per-object
-        // SSR params + sampler + uniform.
-        let ssr_shader =
-            ctxt.create_shader_module(Some("ssr"), include_str!("../builtin/ssr.wgsl"));
+        // SSR params + sampler + uniform. `ssr` imports the shared equirect mapping
+        // + analytic env-BRDF from the `pbr_env` WESL module.
+        let ssr_shader = ctxt.create_shader_module(
+            Some("ssr"),
+            &crate::builtin::compile_wesl(
+                &[
+                    ("package::ssr", include_str!("../builtin/ssr.wgsl")),
+                    ("package::pbr_env", crate::builtin::PBR_ENV_WESL),
+                    ("package::common", crate::builtin::COMMON_WESL),
+                ],
+                "package::ssr",
+                &[],
+            ),
+        );
         let ssr_layout = make_layout("ssr_layout", 6);
         // Additive blend so the SSR delta adds onto the resolved scene; the COLOR
         // write mask leaves alpha untouched.
@@ -307,7 +321,7 @@ impl Ssr {
     /// `normal` and `material` are the prepass G-buffer attachments; `view`/`proj`
     /// are the (pass-0) camera matrices; `env` is the global IBL fallback (if any).
     #[allow(clippy::too_many_arguments)]
-    pub fn compute(
+    pub(crate) fn compute(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         scene_view: &wgpu::TextureView,
@@ -318,11 +332,12 @@ impl Ssr {
         view: Mat4,
         proj: Mat4,
         env: Option<EnvLight<'_>>,
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
         let ctxt = Context::get();
 
         // 1. Build the reflection mip chain (mip 0 = resolved scene).
-        self.build_refl_chain(encoder, scene_view);
+        self.build_refl_chain(encoder, scene_view, gpu);
 
         // 2. Upload uniforms.
         let (ibl_has, ibl_max_lod, ibl_intensity, ibl_rotation, env_view) = match &env {
@@ -375,6 +390,7 @@ impl Ssr {
                 },
             ],
         });
+        let ssr_ts = gpu.render_scope("ssr");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("ssr_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -387,7 +403,7 @@ impl Ssr {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: ssr_ts,
             occlusion_query_set: None,
             multiview_mask: None,
         });
@@ -398,26 +414,36 @@ impl Ssr {
 
     /// Box-downsamples `scene_view` into the reflection mip chain (mip 0 = a copy
     /// of the resolved scene, coarser mips = blurrier reflections).
-    fn build_refl_chain(&self, encoder: &mut wgpu::CommandEncoder, scene_view: &wgpu::TextureView) {
+    fn build_refl_chain(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        scene_view: &wgpu::TextureView,
+        gpu: &mut crate::renderer::timings::GpuTimer,
+    ) {
         let ctxt = Context::get();
         for mip in 0..self.refl_mips {
             let prev_view = if mip == 0 {
                 None
             } else {
-                Some(self._refl_texture.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("ssr_refl_src"),
-                    base_mip_level: mip - 1,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                }))
+                Some(
+                    self._refl_texture
+                        .create_view(&wgpu::TextureViewDescriptor {
+                            label: Some("ssr_refl_src"),
+                            base_mip_level: mip - 1,
+                            mip_level_count: Some(1),
+                            ..Default::default()
+                        }),
+                )
             };
             let src_ref: &wgpu::TextureView = prev_view.as_ref().unwrap_or(scene_view);
-            let dst = self._refl_texture.create_view(&wgpu::TextureViewDescriptor {
-                label: Some("ssr_refl_dst"),
-                base_mip_level: mip,
-                mip_level_count: Some(1),
-                ..Default::default()
-            });
+            let dst = self
+                ._refl_texture
+                .create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("ssr_refl_dst"),
+                    base_mip_level: mip,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                });
             let bg = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ssr_downsample_bg"),
                 layout: &self.downsample_layout,
@@ -429,6 +455,7 @@ impl Ssr {
                     },
                 ],
             });
+            let downsample_ts = gpu.render_scope("ssr");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ssr_downsample_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -441,7 +468,7 @@ impl Ssr {
                     depth_slice: None,
                 })],
                 depth_stencil_attachment: None,
-                timestamp_writes: None,
+                timestamp_writes: downsample_ts,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });

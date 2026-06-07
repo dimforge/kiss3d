@@ -1,3 +1,4 @@
+import package::common::{fullscreen_triangle_xy, fullscreen_uv_from_clip};
 // Screen-space ambient occlusion from the view-position prepass.
 //
 // For each pixel it reconstructs the view-space normal from neighboring
@@ -26,11 +27,10 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-    var c = array<vec2<f32>, 3>(vec2<f32>(-1.0, -1.0), vec2<f32>(3.0, -1.0), vec2<f32>(-1.0, 3.0));
-    let xy = c[vid];
+    let xy = fullscreen_triangle_xy(vid);
     var o: VsOut;
     o.pos = vec4<f32>(xy, 0.0, 1.0);
-    o.uv = vec2<f32>((xy.x + 1.0) * 0.5, (1.0 - xy.y) * 0.5);
+    o.uv = fullscreen_uv_from_clip(xy);
     return o;
 }
 

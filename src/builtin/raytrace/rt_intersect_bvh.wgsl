@@ -13,6 +13,14 @@
 //     trace_closest(origin, dir, tmax) -> Hit
 //     trace_any(origin, dir, tmax)     -> bool
 
+// Shared scene data + types from the preamble module (unused items strip away).
+import package::rt_preamble::{
+    RtVertex, RtTriangle, RtMaterial, RtLight, FrameUniforms, Hit, RtEmitter,
+    BSDF_OPAQUE, BSDF_GLASS, BSDF_METAL, BSDF_EMISSIVE, PI, EPS, T_MAX,
+    frame, pixels, vertices, triangles, materials, lights, emitters,
+    tex_array, tex_sampler, env_tex, env_sampler
+};
+
 struct BvhNode {
     aabb_min: vec3<f32>,
     left_first: u32,

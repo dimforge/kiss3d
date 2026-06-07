@@ -169,8 +169,14 @@ impl Ssao {
                 cache: None,
             })
         };
-        let ssao_pipeline =
-            make_pipeline("ssao", include_str!("../builtin/ssao.wgsl"), &ssao_layout);
+        let ssao_pipeline = make_pipeline(
+            "ssao",
+            &crate::builtin::compile_shader_with_common(
+                "package::ssao",
+                include_str!("../builtin/ssao.wgsl"),
+            ),
+            &ssao_layout,
+        );
         let blur_pipeline = make_pipeline(
             "ssao_blur",
             include_str!("../builtin/ssao_blur.wgsl"),
@@ -329,7 +335,12 @@ impl Ssao {
     /// Runs the SSAO + blur passes. The view-position prepass must already have
     /// been rendered into [`viewpos_view`](Self::viewpos_view). `proj` is the
     /// camera projection used to project samples back to screen space.
-    pub fn compute(&self, encoder: &mut wgpu::CommandEncoder, proj: Mat4) {
+    pub(crate) fn compute(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        proj: Mat4,
+        gpu: &mut crate::renderer::timings::GpuTimer,
+    ) {
         let ctxt = Context::get();
         let inv_res = [1.0 / self.width as f32, 1.0 / self.height as f32];
 
@@ -377,6 +388,7 @@ impl Ssao {
             &ssao_bg,
             &self.ao.view,
             "ssao_pass",
+            gpu,
         );
 
         // Blur pass: raw AO -> blurred AO.
@@ -404,6 +416,7 @@ impl Ssao {
             &blur_bg,
             &self.ao_blur.view,
             "ssao_blur_pass",
+            gpu,
         );
     }
 
@@ -413,7 +426,9 @@ impl Ssao {
         bind_group: &wgpu::BindGroup,
         target: &wgpu::TextureView,
         label: &str,
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
+        let ssao_ts = gpu.render_scope("ssao");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -426,7 +441,7 @@ impl Ssao {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: ssao_ts,
             occlusion_query_set: None,
             multiview_mask: None,
         });

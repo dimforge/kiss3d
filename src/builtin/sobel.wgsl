@@ -1,3 +1,4 @@
+import package::common::fullscreen_uv_from_clip;
 // Sobel edge highlight post-processing effect shader
 
 // Bind group 0: Color texture and sampler
@@ -42,9 +43,7 @@ struct VertexOutput {
 fn vs_main(vertex: VertexInput) -> VertexOutput {
     var out: VertexOutput;
     out.clip_position = vec4<f32>(vertex.position, 0.0, 1.0);
-    out.tex_coord = (vertex.position + vec2<f32>(1.0, 1.0)) / 2.0;
-    // Flip Y coordinate for wgpu coordinate system
-    out.tex_coord.y = 1.0 - out.tex_coord.y;
+    out.tex_coord = fullscreen_uv_from_clip(vertex.position);
     return out;
 }
 

@@ -222,6 +222,7 @@ impl Clustered {
         camera: &dyn Camera3d,
         width: u32,
         height: u32,
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) -> bool {
         let ctxt = Context::get();
         self.resize(width, height);
@@ -281,9 +282,10 @@ impl Clustered {
                     },
                 ],
             });
+            let build_ts = gpu.compute_scope("clustered");
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("clustered_build_pass"),
-                timestamp_writes: None,
+                timestamp_writes: build_ts,
             });
             pass.set_pipeline(&self.build_pipeline);
             pass.set_bind_group(0, &group, &[]);
@@ -323,9 +325,10 @@ impl Clustered {
                 },
             ],
         });
+        let cull_ts = gpu.compute_scope("clustered");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("clustered_cull_pass"),
-            timestamp_writes: None,
+            timestamp_writes: cull_ts,
         });
         pass.set_pipeline(&self.cull_pipeline);
         pass.set_bind_group(0, &group, &[]);

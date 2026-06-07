@@ -24,6 +24,10 @@ pub enum RenderPhase {
     Opaque,
     /// Transparent surfaces (alpha < 1), drawn into the OIT accumulation targets.
     Transparent,
+    /// Refractive (glass) surfaces, drawn into the resolved HDR scene after the
+    /// opaque pass so they can sample the scene behind them (screen-space
+    /// refraction). Single-sample; reads the transmission-background snapshot.
+    Transmission,
 }
 
 /// Context passed to materials during rendering.
@@ -199,6 +203,12 @@ pub trait Material3d {
     /// frame. The material samples it per pixel to darken ambient lighting.
     /// `None` disables it. Default no-op.
     fn set_ssao(&mut self, _ao: Option<&wgpu::TextureView>) {}
+
+    /// Supplies (or clears) the transmission background — the resolved opaque scene
+    /// color (with a blurred mip chain) that refractive (glass) objects sample to
+    /// refract the scene behind them. `None` falls back to a placeholder. No-op by
+    /// default (materials without refractive-transmission support).
+    fn set_transmission_background(&mut self, _bg: Option<&wgpu::TextureView>) {}
 
     /// Toggles reflection-probe *capture mode* for the next frame uniform: while
     /// on, the material renders with the fixed-light (non-clustered) path, since

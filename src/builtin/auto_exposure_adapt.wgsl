@@ -1,3 +1,4 @@
+import package::common::fullscreen_triangle_xy;
 // Auto-exposure adaptation: smoothly move the current exposure toward the target
 // implied by the metered average luminance (eye adaptation).
 //
@@ -29,13 +30,8 @@ struct VsOut {
 
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VsOut {
-    var corners = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
-    );
     var out: VsOut;
-    out.pos = vec4<f32>(corners[vid], 0.0, 1.0);
+    out.pos = vec4<f32>(fullscreen_triangle_xy(vid), 0.0, 1.0);
     return out;
 }
 

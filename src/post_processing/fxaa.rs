@@ -97,8 +97,13 @@ impl Fxaa {
             immediate_size: 0,
         });
 
-        let shader =
-            ctxt.create_shader_module(Some("fxaa_shader"), include_str!("../builtin/fxaa.wgsl"));
+        let shader = ctxt.create_shader_module(
+            Some("fxaa_shader"),
+            &crate::builtin::compile_shader_with_common(
+                "package::fxaa",
+                include_str!("../builtin/fxaa.wgsl"),
+            ),
+        );
 
         let vertex_buffer_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,

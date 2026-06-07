@@ -38,6 +38,14 @@ fn ms(d: Duration) -> f64 {
 pub struct RenderTimings {
     /// Which renderer produced these timings (`"Rasterizer"` or `"Path tracer"`).
     pub renderer: &'static str,
+    /// Wall-clock time since the previous frame, i.e. the true frame-to-frame
+    /// period (and hence FPS) — it includes everything the per-pass GPU timestamps
+    /// and `total` miss: vsync/present wait, event handling, and app logic between
+    /// frames. `Duration::ZERO` on the first frame (no previous one to diff). This
+    /// is the headline metric: GPU timestamps alone are misleading (e.g. they read
+    /// far below the frame period when vsync-capped, or over-count overlapping
+    /// passes), so always read the wall-clock frame time alongside them.
+    pub frame_wall: Duration,
     /// Total CPU wall-clock time of the whole `render_*` / `raytrace_3d` call.
     pub total: Duration,
     /// CPU wall-clock time spent in the queue `submit` call.
@@ -61,7 +69,21 @@ impl RenderTimings {
 
 impl fmt::Display for RenderTimings {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} — total {:.3} ms", self.renderer, ms(self.total))?;
+        // Headline: the true wall-clock frame period (+ FPS), the metric the GPU
+        // timestamps don't capture. Falls back to just the renderer name on the
+        // first frame, before a frame-to-frame delta exists.
+        if self.frame_wall > Duration::ZERO {
+            write!(
+                f,
+                "{} — frame {:.2} ms ({:.0} FPS)",
+                self.renderer,
+                ms(self.frame_wall),
+                1.0 / self.frame_wall.as_secs_f64()
+            )?;
+        } else {
+            write!(f, "{}", self.renderer)?;
+        }
+        write!(f, "\n  cpu render   {:>8.3} ms", ms(self.total))?;
         write!(f, "\n  cpu submit   {:>8.3} ms", ms(self.cpu_submit))?;
         write!(f, "\n  cpu present  {:>8.3} ms", ms(self.cpu_present))?;
         match &self.gpu_steps {
@@ -104,9 +126,10 @@ impl CpuTimer {
 }
 
 /// Maximum number of GPU timestamp scopes (begin/end query pairs) per frame.
-/// Passes beyond this are simply not timed. Shadow/denoise helpers reuse a single
-/// scope name across several passes (their times are summed), so this is ample.
-const MAX_SCOPES: u32 = 64;
+/// Passes beyond this are simply not timed. Many helpers reuse a single scope
+/// name across several passes (their times are summed) — e.g. a point light's
+/// six shadow faces, the bloom pyramid, the SSR mip chain — so this is ample.
+const MAX_SCOPES: u32 = 128;
 const QUERY_COUNT: u32 = MAX_SCOPES * 2;
 const BYTES: u64 = QUERY_COUNT as u64 * 8;
 

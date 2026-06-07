@@ -82,8 +82,13 @@ impl Cas {
             immediate_size: 0,
         });
 
-        let shader =
-            ctxt.create_shader_module(Some("cas_shader"), include_str!("../builtin/cas.wgsl"));
+        let shader = ctxt.create_shader_module(
+            Some("cas_shader"),
+            &crate::builtin::compile_shader_with_common(
+                "package::cas",
+                include_str!("../builtin/cas.wgsl"),
+            ),
+        );
 
         let vertex_buffer_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,

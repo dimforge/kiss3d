@@ -45,13 +45,13 @@ async fn main() {
 
     // A reflective sphere on the right: a planar reflector with a strong
     // normal-falloff.
-    let mut angled = scene.add_sphere(2.0);
+    let mut angled = scene.add_cylinder(1.5, 4.0);
     angled.set_position(Vec3::new(5.5, 2.5, 0.0));
-    angled.set_metallic(1.0);
+    angled.set_metallic(0.7);
     angled.set_roughness(0.08);
     angled.set_reflector(Some(Reflector::new()));
     angled.set_reflector_intensity(0.9);
-    angled.set_reflector_normal_falloff(2.0);
+    angled.set_reflector_normal_falloff(1.0);
     angled.set_reflector_normal(Vec3::new(-1.0, 0.0, 0.0));
 
     // A ring of colored shapes floating above the floor (animated below).

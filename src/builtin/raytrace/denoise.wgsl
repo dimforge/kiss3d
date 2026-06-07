@@ -1,3 +1,4 @@
+import package::common::luminance;
 // Edge-aware à-trous wavelet denoiser for the path tracer.
 //
 // One iteration of an SVGF-style à-trous filter: a 5x5 B-spline kernel is
@@ -43,9 +44,7 @@ struct DenoiseUniforms {
 
 const EPS: f32 = 1e-3;
 
-fn luminance(c: vec3<f32>) -> f32 {
-    return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
+
 
 // First-hit albedo guide at pixel `idx` (region 1 of the shared buffer).
 fn guide_albedo(idx: u32) -> vec3<f32> {

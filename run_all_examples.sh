@@ -47,7 +47,10 @@ EXAMPLES=(
     camera_modes
     skybox
     reflections
+    depth_of_field
+    transmission
     mirror
+    mirror_sphere
     parallax
     shadows
     transparency
