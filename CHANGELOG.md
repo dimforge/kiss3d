@@ -1,3 +1,66 @@
+# Unreleased
+
+## Breaking Changes
+
+- Removed the `hw_raytracer` cargo feature. The hardware ray-query backend is now selected automatically at runtime when the GPU supports it, otherwise the compute backend is used.
+- `Light` gained a public `layers: u32` field (lighting channels). Code that builds a `Light` with a struct literal must set it (defaults to `u32::MAX`); the `Light::point(..)` / `with_layers(..)` builders are unaffected.
+- The `egui` feature now also enables the `rfd` dependency (native file dialogs used by the inspector).
+- New dependencies: `gltf` 1.4 and `wesl` 0.4.
+
+## New Features
+
+### glTF, skinning & animation
+
+- Load glTF/GLB models with `SceneNode3d::add_gltf` / `add_gltf_from_memory` (or `loader::gltf::load` / `load_from_slice`), returning a `GltfModel` (a scene node plus an `AnimationPlayer` holding every clip in the file).
+- GPU vertex skinning (`Skin3d`) and morph targets (`Object3d::set_morph_weights`, up to 64 targets) — both run on the web backend too.
+- Keyframe animation playback: `AnimationPlayer`, `AnimationClip`, `AnimationChannel`, `Interpolation`.
+- Example: `gltf`.
+
+### Materials
+
+- Extended PBR StandardMaterial parameters on `Object3d`/`SceneNode3d`: `set_clearcoat`, `set_anisotropy`, `set_reflectance`, and volumetric `set_attenuation` / `set_thickness`.
+- `AlphaMode` (`Opaque` / `Mask` / `Blend` / `Premultiplied`) via `set_alpha_mode`.
+- Parallax-occlusion and relief mapping from a height map: `set_height_map` / `set_height_map_from_file`, `set_parallax_scale`, `set_parallax_layers`, `set_parallax_method` (`ParallaxMethod`).
+- Examples: `material_pbr`, `parallax`, `fog`, `transmission`.
+
+### Lighting & shadows
+
+- Clustered (forward+) light culling, lifting the previous fixed light cap; enabled automatically when the GPU exposes compute/storage, with a fixed-light fallback otherwise.
+- Lighting channels: per-light `Light::with_layers` / `Light.layers` and per-object `Object3d::set_light_layers`, to confine a light to a subset of objects.
+- Per-object shadow opt-out via `set_casts_shadows(false)`.
+- Configurable soft shadows: `Window::set_shadow_softness`.
+- Colored ambient light (`Window::set_ambient_color`) and distance fog (`Window::set_fog`, `light::Fog` / `FogMode`).
+- Example: `clustered_lights`.
+
+### Reflections & screen-space effects
+
+- Reflection probes (baked image or runtime cube capture), parallax-corrected: `Window::add_reflection_probe`, `capture_reflection_probe`, `set_reflection_probe_image`, `set_reflection_capture_layers`.
+- Screen-space reflections: `Window::set_ssr_enabled` / `ssr_settings_mut`, with per-object `Object3d::set_ssr(SsrMaterial)`.
+- Planar mirror reflectors integrated into the default PBR material: `SceneNode3d::add_reflector`, `Object3d::set_reflector` and `set_reflector_*`.
+- Screen-space ambient occlusion: `Window::set_ssao_enabled` / `ssao_settings_mut`.
+- Screen-space refractive transmission (glass): `Window::set_transmission_enabled` / `transmission_settings_mut`.
+- Examples: `reflections`, `mirror`, `mirror_sphere`.
+
+### Camera, exposure & post-processing
+
+- Orthographic 3D projection: `camera::Projection`, `OrbitCamera3d::set_projection` / `projection`.
+- Physical camera exposure: `camera::Exposure` (`from_physical` / `from_exposure`), applied with `Window::set_exposure_value`.
+- Equirectangular skybox + image-based lighting: `Window::set_skybox_from_file` / `set_skybox_from_memory` / `set_skybox_image` / `set_skybox_orientation` / `clear_skybox`.
+- Color grading and auto-exposure (eye adaptation) on the HDR resolve, via `Window::hdr_settings_mut` (`ColorGrading`, `auto_exposure*` fields).
+- Thin-lens depth of field: `Window::set_dof_enabled` / `dof_settings_mut` (`DofSettings`, `DepthOfFieldMode`).
+- MSAA: `Window::set_samples(NumSamples)`.
+- FXAA and CAS post-processing (`post_processing::Fxaa`, `Cas`) plus a pixel-inspection `Loupe` (`LoupeCorner`).
+- Render layers (per-object and per-camera masks): `Object3d::set_render_layers`, `OrbitCamera3d::set_render_layers`.
+- Runtime vsync toggle: `Window::set_vsync`.
+- Examples: `camera_modes`, `skybox`, `color_grading`, `depth_of_field`, `antialiasing`.
+
+### Tooling & internals
+
+- Built-in egui scene inspector: `window::Inspector` + `Window::draw_inspector` (toggle effects, edit materials/lights/cameras, switch between the rasterizer and path tracer). Example: `inspector`.
+- GPU render timings: `Window::render_timings` (`RenderTimings`).
+- Optional `rt_switcher` feature: drive both backends through `render_3d` for side-by-side rasterizer/ray-tracer comparison.
+- WGSL shaders refactored with WESL conditional compilation behind a pipeline cache, plus a shader-variant validity test.
+
 # v0.43.0
 
 ## Breaking Changes
