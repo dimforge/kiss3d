@@ -13,14 +13,8 @@ pub enum NumSamples {
     Zero = 0,
     /// One sample
     One = 1,
-    /// Two samples
-    Two = 2,
     /// Four samples
     Four = 4,
-    /// Eight samples
-    Eight = 8,
-    /// Sixteen samples
-    Sixteen = 16,
 }
 
 impl NumSamples {
@@ -30,10 +24,7 @@ impl NumSamples {
         match i {
             0 => Some(NumSamples::Zero),
             1 => Some(NumSamples::One),
-            2 => Some(NumSamples::Two),
             4 => Some(NumSamples::Four),
-            8 => Some(NumSamples::Eight),
-            16 => Some(NumSamples::Sixteen),
             _ => None,
         }
     }
@@ -136,6 +127,12 @@ impl Canvas {
     /// Gets the sample count for MSAA.
     pub fn sample_count(&self) -> u32 {
         self.canvas.sample_count()
+    }
+
+    /// Sets the MSAA sample count, recreating the render targets to match. Takes
+    /// effect on the next rendered frame.
+    pub fn set_samples(&mut self, samples: NumSamples) {
+        self.canvas.set_sample_count(samples as u32)
     }
 
     /// Gets the surface format.

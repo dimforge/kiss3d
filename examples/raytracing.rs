@@ -90,7 +90,7 @@ async fn main() {
     }
 
     while window
-        .render_raytraced(&mut scene, &mut camera, &mut raytracer)
+        .raytrace_3d(&mut scene, &mut camera, &mut raytracer)
         .await
     {
         window.draw_text(

@@ -4,7 +4,8 @@ use crate::light::{LightCollection, LightType, MAX_LIGHTS};
 use crate::post_processing::{OIT_ACCUM_FORMAT, OIT_REVEAL_FORMAT};
 use crate::resource::vertex_index::VERTEX_INDEX_FORMAT;
 use crate::resource::{
-    DynamicUniformBuffer, GpuData, GpuMesh3d, Material3d, RenderContext, Texture,
+    multisample_state, DynamicUniformBuffer, GpuData, GpuMesh3d, Material3d, PipelineCache,
+    RenderContext, Texture,
 };
 use crate::scene::{InstancesBuffer3d, ObjectData3d};
 use bytemuck::{Pod, Zeroable};
@@ -324,15 +325,15 @@ impl GpuData for ObjectMaterialGpuData {
 /// - Wireframe/points view uniforms (view, proj, viewport) are shared and written once per frame
 /// - This significantly reduces the number of `write_buffer` calls per frame
 pub struct ObjectMaterial {
-    /// Pipeline with backface culling enabled
-    pipeline_cull: wgpu::RenderPipeline,
-    /// Pipeline with backface culling disabled
-    pipeline_no_cull: wgpu::RenderPipeline,
+    /// Pipeline with backface culling enabled (lazily built per MSAA sample count)
+    pipeline_cull: PipelineCache,
+    /// Pipeline with backface culling disabled (lazily built per MSAA sample count)
+    pipeline_no_cull: PipelineCache,
     /// Weighted-blended OIT pipeline (backface culling), writing the accum +
     /// revealage targets with no depth write. Used in the transparent phase.
-    oit_pipeline_cull: wgpu::RenderPipeline,
+    oit_pipeline_cull: PipelineCache,
     /// Weighted-blended OIT pipeline (no culling).
-    oit_pipeline_no_cull: wgpu::RenderPipeline,
+    oit_pipeline_no_cull: PipelineCache,
     object_bind_group_layout: wgpu::BindGroupLayout,
     /// Combined material-texture bind group layout (albedo + PBR maps, group 2).
     texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -342,10 +343,10 @@ pub struct ObjectMaterial {
     default_ao_map: std::sync::Arc<crate::resource::Texture>,
     default_emissive_map: std::sync::Arc<crate::resource::Texture>,
     // Wireframe rendering resources
-    wireframe_pipeline: wgpu::RenderPipeline,
+    wireframe_pipeline: PipelineCache,
     wireframe_model_bind_group_layout: wgpu::BindGroupLayout,
     // Point rendering resources
-    points_pipeline: wgpu::RenderPipeline,
+    points_pipeline: PipelineCache,
     points_model_bind_group_layout: wgpu::BindGroupLayout,
 
     // === Dynamic uniform buffer system ===
@@ -389,6 +390,102 @@ struct DefaultShadowResources {
     _view: wgpu::TextureView,
     _sampler: wgpu::Sampler,
     _uniform: wgpu::Buffer,
+    _transmittance_atlas: wgpu::Texture,
+    _transmittance_view: wgpu::TextureView,
+    _transmittance_sampler: wgpu::Sampler,
+}
+
+/// The vertex buffer layouts shared by the opaque and OIT surface pipelines.
+///
+/// Returned by value (referencing `const` attribute arrays, hence `'static`) so it
+/// can be rebuilt cheaply inside the lazily-built, per-sample-count pipeline
+/// builders without borrowing locals.
+///
+/// We use separate buffers for instance data (positions, colors, deformations)
+/// instead of interleaving them, to avoid per-frame data conversion overhead.
+fn surface_vertex_buffer_layouts() -> [wgpu::VertexBufferLayout<'static>; 6] {
+    // Buffer 0: Vertex positions
+    const POSITIONS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 0,
+        format: wgpu::VertexFormat::Float32x3,
+    }];
+    // Buffer 1: Texture coordinates
+    const UVS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 1,
+        format: wgpu::VertexFormat::Float32x2,
+    }];
+    // Buffer 2: Normals
+    const NORMALS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 2,
+        format: wgpu::VertexFormat::Float32x3,
+    }];
+    // Buffer 3: Instance positions (Point3<f32>)
+    const INST_TRA: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 3,
+        format: wgpu::VertexFormat::Float32x3,
+    }];
+    // Buffer 4: Instance colors ([f32; 4])
+    const INST_COLOR: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 4,
+        format: wgpu::VertexFormat::Float32x4,
+    }];
+    // Buffer 5: Instance deformations (3x Vector3<f32> = 3 columns of a 3x3 matrix),
+    // stored as 3 consecutive vec3s per instance.
+    const INST_DEF: [wgpu::VertexAttribute; 3] = [
+        wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: 5,
+            format: wgpu::VertexFormat::Float32x3,
+        },
+        wgpu::VertexAttribute {
+            offset: 12, // 3 * sizeof(f32)
+            shader_location: 6,
+            format: wgpu::VertexFormat::Float32x3,
+        },
+        wgpu::VertexAttribute {
+            offset: 24, // 6 * sizeof(f32)
+            shader_location: 7,
+            format: wgpu::VertexFormat::Float32x3,
+        },
+    ];
+
+    [
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &POSITIONS,
+        },
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &UVS,
+        },
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &NORMALS,
+        },
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &INST_TRA,
+        },
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &INST_COLOR,
+        },
+        wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &INST_DEF,
+        },
+    ]
 }
 
 impl Default for ObjectMaterial {
@@ -495,221 +592,155 @@ impl ObjectMaterial {
         let shader =
             ctxt.create_shader_module(Some("object_material_shader"), include_str!("default.wgsl"));
 
-        // Vertex buffer layouts
-        // Note: We use separate buffers for instance data (positions, colors, deformations)
-        // instead of interleaving them, to avoid per-frame data conversion overhead.
-        let vertex_buffer_layouts = [
-            // Buffer 0: Vertex positions
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                }],
-            },
-            // Buffer 1: Texture coordinates
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                }],
-            },
-            // Buffer 2: Normals
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x3,
-                }],
-            },
-            // Buffer 3: Instance positions (Point3<f32>)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 3, // inst_tra
-                    format: wgpu::VertexFormat::Float32x3,
-                }],
-            },
-            // Buffer 4: Instance colors ([f32; 4])
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 4, // inst_color
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 5: Instance deformations (3x Vector3<f32> = 3 columns of 3x3 matrix)
-            // Stored as 3 consecutive vec3s per instance
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress, // 3 vec3s
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[
-                    // inst_def_0 (column 0)
-                    wgpu::VertexAttribute {
-                        offset: 0,
-                        shader_location: 5,
-                        format: wgpu::VertexFormat::Float32x3,
+        // Shared opaque-surface pipeline builder, parameterized by cull mode and MSAA
+        // sample count. Wrapped in `Rc` so the cull and no-cull `PipelineCache`s can
+        // share it; each builds its pipeline lazily on first use for a given sample
+        // count (the scene is rasterized into the optionally-multisampled HDR film).
+        let build_opaque = {
+            let pipeline_layout = pipeline_layout.clone();
+            let shader = shader.clone();
+            std::rc::Rc::new(move |cull_mode: Option<wgpu::Face>, label: &'static str, sample_count: u32| {
+                let ctxt = Context::get();
+                ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &surface_vertex_buffer_layouts(),
+                        compilation_options: Default::default(),
                     },
-                    // inst_def_1 (column 1)
-                    wgpu::VertexAttribute {
-                        offset: 12, // 3 * sizeof(f32)
-                        shader_location: 6,
-                        format: wgpu::VertexFormat::Float32x3,
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
                     },
-                    // inst_def_2 (column 2)
-                    wgpu::VertexAttribute {
-                        offset: 24, // 6 * sizeof(f32)
-                        shader_location: 7,
-                        format: wgpu::VertexFormat::Float32x3,
-                    },
-                ],
-            },
-        ];
-
-        // Helper to create a pipeline with specific cull mode
-        let create_pipeline = |cull_mode: Option<wgpu::Face>, label: &str| {
-            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &vertex_buffer_layouts,
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: Context::depth_format(),
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview_mask: None,
-                cache: None,
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: Context::depth_format(),
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: multisample_state(sample_count),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
 
-        let pipeline_cull =
-            create_pipeline(Some(wgpu::Face::Back), "object_material_pipeline_cull");
-        let pipeline_no_cull = create_pipeline(None, "object_material_pipeline_no_cull");
+        let pipeline_cull = PipelineCache::new({
+            let build = build_opaque.clone();
+            move |sc| build(Some(wgpu::Face::Back), "object_material_pipeline_cull", sc)
+        });
+        let pipeline_no_cull = PipelineCache::new({
+            let build = build_opaque.clone();
+            move |sc| build(None, "object_material_pipeline_no_cull", sc)
+        });
 
         // Weighted-blended OIT pipelines: same vertex stage and bind groups, but the
         // `fs_oit` entry point writes two targets — an additive premultiplied-weighted
         // color accumulator (Rgba16Float) and a multiplicative revealage (R16Float) —
-        // and depth-tests against the opaque depth without writing it.
-        let create_oit_pipeline = |cull_mode: Option<wgpu::Face>, label: &str| {
-            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &vertex_buffer_layouts,
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_oit"),
-                    targets: &[
-                        // accum: additive (One, One).
-                        Some(wgpu::ColorTargetState {
-                            format: OIT_ACCUM_FORMAT,
-                            blend: Some(wgpu::BlendState {
-                                color: wgpu::BlendComponent {
-                                    src_factor: wgpu::BlendFactor::One,
-                                    dst_factor: wgpu::BlendFactor::One,
-                                    operation: wgpu::BlendOperation::Add,
-                                },
-                                alpha: wgpu::BlendComponent {
-                                    src_factor: wgpu::BlendFactor::One,
-                                    dst_factor: wgpu::BlendFactor::One,
-                                    operation: wgpu::BlendOperation::Add,
-                                },
+        // and depth-tests against the opaque depth without writing it. Built lazily per
+        // sample count; the OIT geometry targets are multisampled to match the (MSAA)
+        // opaque depth buffer, then resolved before compositing.
+        let build_oit = {
+            let pipeline_layout = pipeline_layout.clone();
+            let shader = shader.clone();
+            std::rc::Rc::new(move |cull_mode: Option<wgpu::Face>, label: &'static str, sample_count: u32| {
+                let ctxt = Context::get();
+                ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some(label),
+                    layout: Some(&pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &surface_vertex_buffer_layouts(),
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_oit"),
+                        targets: &[
+                            // accum: additive (One, One).
+                            Some(wgpu::ColorTargetState {
+                                format: OIT_ACCUM_FORMAT,
+                                blend: Some(wgpu::BlendState {
+                                    color: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::One,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                    alpha: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::One,
+                                        dst_factor: wgpu::BlendFactor::One,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                }),
+                                write_mask: wgpu::ColorWrites::ALL,
                             }),
-                            write_mask: wgpu::ColorWrites::ALL,
-                        }),
-                        // revealage: multiplicative dst *= (1 - src).
-                        Some(wgpu::ColorTargetState {
-                            format: OIT_REVEAL_FORMAT,
-                            blend: Some(wgpu::BlendState {
-                                color: wgpu::BlendComponent {
-                                    src_factor: wgpu::BlendFactor::Zero,
-                                    dst_factor: wgpu::BlendFactor::OneMinusSrc,
-                                    operation: wgpu::BlendOperation::Add,
-                                },
-                                alpha: wgpu::BlendComponent::REPLACE,
+                            // revealage: multiplicative dst *= (1 - src).
+                            Some(wgpu::ColorTargetState {
+                                format: OIT_REVEAL_FORMAT,
+                                blend: Some(wgpu::BlendState {
+                                    color: wgpu::BlendComponent {
+                                        src_factor: wgpu::BlendFactor::Zero,
+                                        dst_factor: wgpu::BlendFactor::OneMinusSrc,
+                                        operation: wgpu::BlendOperation::Add,
+                                    },
+                                    alpha: wgpu::BlendComponent::REPLACE,
+                                }),
+                                write_mask: wgpu::ColorWrites::RED,
                             }),
-                            write_mask: wgpu::ColorWrites::RED,
-                        }),
-                    ],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: Context::depth_format(),
-                    // Test against opaque depth, but do not write (transparent
-                    // fragments must not occlude each other).
-                    depth_write_enabled: Some(false),
-                    depth_compare: Some(wgpu::CompareFunction::Less),
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview_mask: None,
-                cache: None,
+                        ],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode,
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: Context::depth_format(),
+                        // Test against opaque depth, but do not write (transparent
+                        // fragments must not occlude each other).
+                        depth_write_enabled: Some(false),
+                        depth_compare: Some(wgpu::CompareFunction::Less),
+                        stencil: wgpu::StencilState::default(),
+                        bias: wgpu::DepthBiasState::default(),
+                    }),
+                    multisample: multisample_state(sample_count),
+                    multiview_mask: None,
+                    cache: None,
+                })
             })
         };
-        let oit_pipeline_cull =
-            create_oit_pipeline(Some(wgpu::Face::Back), "object_material_oit_pipeline_cull");
-        let oit_pipeline_no_cull =
-            create_oit_pipeline(None, "object_material_oit_pipeline_no_cull");
+        let oit_pipeline_cull = PipelineCache::new({
+            let build = build_oit.clone();
+            move |sc| build(Some(wgpu::Face::Back), "object_material_oit_pipeline_cull", sc)
+        });
+        let oit_pipeline_no_cull = PipelineCache::new({
+            let build = build_oit.clone();
+            move |sc| build(None, "object_material_oit_pipeline_no_cull", sc)
+        });
 
         // Create wireframe shader and pipelines for lines/points
         // Note: _wireframe_shader, _wireframe_pipeline_layout, and _wireframe_vertex_buffer_layouts
@@ -849,118 +880,119 @@ impl ObjectMaterial {
             include_str!("wireframe_polyline3d.wgsl"),
         );
 
-        // Instance vertex buffer layouts for wireframe (matching InstancesBuffer)
-        let wireframe_instance_buffer_layouts = [
-            // Buffer 0: positions (Point3<f32>)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                }],
-            },
-            // Buffer 1: colors ([f32; 4]) - not used but needed for layout consistency
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 2: deformations - all 3 columns from same buffer with stride = 3*vec3
-            // Matrix3 is stored as 3 consecutive Vector3 columns (36 bytes total)
-            wgpu::VertexBufferLayout {
-                array_stride: (std::mem::size_of::<[f32; 3]>() * 3) as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[
-                    // Column 0 at offset 0
-                    wgpu::VertexAttribute {
+        // Wireframe pipeline, built lazily per MSAA sample count (lines render into
+        // the optionally-multisampled HDR film alongside surfaces).
+        let wireframe_pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            // Instance vertex buffer layouts for wireframe (matching InstancesBuffer)
+            let wireframe_instance_buffer_layouts = [
+                // Buffer 0: positions (Point3<f32>)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
                         offset: 0,
-                        shader_location: 2,
+                        shader_location: 0,
                         format: wgpu::VertexFormat::Float32x3,
-                    },
-                    // Column 1 at offset 12
-                    wgpu::VertexAttribute {
-                        offset: std::mem::size_of::<[f32; 3]>() as u64,
-                        shader_location: 3,
-                        format: wgpu::VertexFormat::Float32x3,
-                    },
-                    // Column 2 at offset 24
-                    wgpu::VertexAttribute {
-                        offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
-                        shader_location: 4,
-                        format: wgpu::VertexFormat::Float32x3,
-                    },
-                ],
-            },
-            // Buffer 3: lines_colors ([f32; 4])
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 4: lines_widths (f32)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<f32>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32,
-                }],
-            },
-        ];
+                    }],
+                },
+                // Buffer 1: colors ([f32; 4]) - not used but needed for layout consistency
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 1,
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                },
+                // Buffer 2: deformations - all 3 columns from same buffer with stride = 3*vec3
+                // Matrix3 is stored as 3 consecutive Vector3 columns (36 bytes total)
+                wgpu::VertexBufferLayout {
+                    array_stride: (std::mem::size_of::<[f32; 3]>() * 3) as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        // Column 0 at offset 0
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        // Column 1 at offset 12
+                        wgpu::VertexAttribute {
+                            offset: std::mem::size_of::<[f32; 3]>() as u64,
+                            shader_location: 3,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        // Column 2 at offset 24
+                        wgpu::VertexAttribute {
+                            offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
+                            shader_location: 4,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                    ],
+                },
+                // Buffer 3: lines_colors ([f32; 4])
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 5,
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                },
+                // Buffer 4: lines_widths (f32)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<f32>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 6,
+                        format: wgpu::VertexFormat::Float32,
+                    }],
+                },
+            ];
 
-        let wireframe_pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("wireframe_polyline_pipeline"),
-            layout: Some(&wireframe_polyline_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &wireframe_polyline_shader,
-                entry_point: Some("vs_main"),
-                buffers: &wireframe_instance_buffer_layouts,
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &wireframe_polyline_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Context::depth_format(),
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("wireframe_polyline_pipeline"),
+                layout: Some(&wireframe_polyline_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &wireframe_polyline_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &wireframe_instance_buffer_layouts,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &wireframe_polyline_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Context::depth_format(),
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // Create points bind group layouts (same view layout as wireframe, different model layout)
@@ -1023,114 +1055,115 @@ impl ObjectMaterial {
             include_str!("wireframe_points3d.wgsl"),
         );
 
-        // Instance vertex buffer layouts for points (similar to wireframe but with points_colors/sizes)
-        let points_instance_buffer_layouts = [
-            // Buffer 0: positions (Point3<f32>)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x3,
-                }],
-            },
-            // Buffer 1: colors ([f32; 4]) - not used but needed for layout consistency
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 2: deformations - all 3 columns from same buffer with stride = 3*vec3
-            wgpu::VertexBufferLayout {
-                array_stride: (std::mem::size_of::<[f32; 3]>() * 3) as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[
-                    wgpu::VertexAttribute {
+        // Points pipeline, built lazily per MSAA sample count (points render into
+        // the optionally-multisampled HDR film alongside surfaces).
+        let points_pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            // Instance vertex buffer layouts for points (similar to wireframe but with points_colors/sizes)
+            let points_instance_buffer_layouts = [
+                // Buffer 0: positions (Point3<f32>)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
                         offset: 0,
-                        shader_location: 2,
+                        shader_location: 0,
                         format: wgpu::VertexFormat::Float32x3,
-                    },
-                    wgpu::VertexAttribute {
-                        offset: std::mem::size_of::<[f32; 3]>() as u64,
-                        shader_location: 3,
-                        format: wgpu::VertexFormat::Float32x3,
-                    },
-                    wgpu::VertexAttribute {
-                        offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
-                        shader_location: 4,
-                        format: wgpu::VertexFormat::Float32x3,
-                    },
-                ],
-            },
-            // Buffer 3: points_colors ([f32; 4])
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 4: points_sizes (f32)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<f32>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 6,
-                    format: wgpu::VertexFormat::Float32,
-                }],
-            },
-        ];
+                    }],
+                },
+                // Buffer 1: colors ([f32; 4]) - not used but needed for layout consistency
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 1,
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                },
+                // Buffer 2: deformations - all 3 columns from same buffer with stride = 3*vec3
+                wgpu::VertexBufferLayout {
+                    array_stride: (std::mem::size_of::<[f32; 3]>() * 3) as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: std::mem::size_of::<[f32; 3]>() as u64,
+                            shader_location: 3,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                        wgpu::VertexAttribute {
+                            offset: (std::mem::size_of::<[f32; 3]>() * 2) as u64,
+                            shader_location: 4,
+                            format: wgpu::VertexFormat::Float32x3,
+                        },
+                    ],
+                },
+                // Buffer 3: points_colors ([f32; 4])
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 5,
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                },
+                // Buffer 4: points_sizes (f32)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<f32>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 6,
+                        format: wgpu::VertexFormat::Float32,
+                    }],
+                },
+            ];
 
-        let points_pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("wireframe_points_pipeline"),
-            layout: Some(&points_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &points_shader,
-                entry_point: Some("vs_main"),
-                buffers: &points_instance_buffer_layouts,
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &points_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Context::depth_format(),
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::LessEqual),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("wireframe_points_pipeline"),
+                layout: Some(&points_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &points_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &points_instance_buffer_layouts,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &points_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Context::depth_format(),
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // === Create shared dynamic buffer resources ===
@@ -1249,6 +1282,33 @@ impl ObjectMaterial {
             0,
             &vec![0u8; crate::builtin::shadow::shadow_uniforms_size() as usize],
         );
+        // Dummy colored transmittance atlas + filtering sampler. The zeroed shadow
+        // uniform sets `shadows_enabled == 0`, so the shader never actually samples
+        // these — they only need to exist to satisfy the bind group layout.
+        let dummy_transmittance_atlas = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("object_material_dummy_transmittance_atlas"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: crate::builtin::shadow::MAX_SHADOW_VIEWS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let dummy_transmittance_view =
+            dummy_transmittance_atlas.create_view(&wgpu::TextureViewDescriptor {
+                label: Some("object_material_dummy_transmittance_view"),
+                dimension: Some(wgpu::TextureViewDimension::D2Array),
+                ..Default::default()
+            });
+        let dummy_transmittance_sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("object_material_dummy_transmittance_sampler"),
+            ..Default::default()
+        });
         let default_shadow_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("object_material_default_shadow_bind_group"),
             layout: &shadow_bind_group_layout,
@@ -1265,6 +1325,14 @@ impl ObjectMaterial {
                     binding: 2,
                     resource: dummy_shadow_uniform.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&dummy_transmittance_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(&dummy_transmittance_sampler),
+                },
             ],
         });
         let default_shadow_resources = DefaultShadowResources {
@@ -1272,6 +1340,9 @@ impl ObjectMaterial {
             _view: dummy_atlas_view,
             _sampler: dummy_shadow_sampler,
             _uniform: dummy_shadow_uniform,
+            _transmittance_atlas: dummy_transmittance_atlas,
+            _transmittance_view: dummy_transmittance_view,
+            _transmittance_sampler: dummy_transmittance_sampler,
         };
 
         ObjectMaterial {
@@ -1859,8 +1930,9 @@ impl Material3d for ObjectMaterial {
                 (crate::resource::RenderPhase::Transparent, false) => &self.oit_pipeline_no_cull,
                 (crate::resource::RenderPhase::Opaque, true) => &self.pipeline_cull,
                 (crate::resource::RenderPhase::Opaque, false) => &self.pipeline_no_cull,
-            };
-            render_pass.set_pipeline(pipeline);
+            }
+            .get(context.sample_count);
+            render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
             // Use dynamic offset for object uniforms!
             render_pass.set_bind_group(1, object_bind_group, &[object_offset]);
@@ -1992,7 +2064,8 @@ impl Material3d for ObjectMaterial {
                 let wireframe_model_bind_group =
                     gpu_data.wireframe_model_bind_group.as_ref().unwrap();
 
-                render_pass.set_pipeline(&self.wireframe_pipeline);
+                let wireframe_pipeline = self.wireframe_pipeline.get(context.sample_count);
+                render_pass.set_pipeline(&wireframe_pipeline);
                 // Use shared view bind group (written once per frame)
                 render_pass.set_bind_group(0, &self.wireframe_view_bind_group, &[]);
                 render_pass.set_bind_group(1, wireframe_model_bind_group, &[]);
@@ -2102,7 +2175,8 @@ impl Material3d for ObjectMaterial {
 
                 let points_model_bind_group = gpu_data.points_model_bind_group.as_ref().unwrap();
 
-                render_pass.set_pipeline(&self.points_pipeline);
+                let points_pipeline = self.points_pipeline.get(context.sample_count);
+                render_pass.set_pipeline(&points_pipeline);
                 // Use shared view bind group (written once per frame)
                 render_pass.set_bind_group(0, &self.points_view_bind_group, &[]);
                 render_pass.set_bind_group(1, points_model_bind_group, &[]);

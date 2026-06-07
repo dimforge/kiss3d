@@ -12,8 +12,10 @@ use crate::color::{Color, BLACK};
 use crate::context::Context;
 use crate::event::{Key, Modifiers, WindowEvent};
 use crate::post_processing::{HdrPipeline, HdrSettings, Tonemap};
+use crate::renderer::timings::GpuTimer;
 use crate::renderer::{
     PointRenderer2d, PointRenderer3d, PolylineRenderer2d, PolylineRenderer3d, RayTracer,
+    RenderTimings,
 };
 use crate::resource::{
     FramebufferManager, MaterialManager2d, MeshManager2d, RenderTarget, Texture, TextureManager,
@@ -21,7 +23,7 @@ use crate::resource::{
 use crate::scene::SceneNode3d;
 use crate::text::TextRenderer;
 use crate::window::canvas::CanvasSetup;
-use crate::window::Canvas;
+use crate::window::{Canvas, NumSamples};
 use glamx::UVec2;
 use image::{GenericImage, Pixel};
 use winit::dpi::LogicalSize;
@@ -77,6 +79,11 @@ pub struct Window {
     pub(super) first_frame: bool,
     pub(super) close_key: Option<Key>,
     pub(super) close_modifiers: Option<Modifiers>,
+    /// Per-step timings of the most recently rendered frame, for the active
+    /// renderer. `None` until the first frame. See [`Window::render_timings`].
+    pub(super) last_timings: Option<RenderTimings>,
+    /// GPU timestamp-query timer (disabled if the device lacks `TIMESTAMP_QUERY`).
+    pub(super) gpu_timer: GpuTimer,
     #[cfg(feature = "egui")]
     pub(super) egui_context: EguiContext,
     pub(super) canvas: Canvas,
@@ -110,6 +117,30 @@ impl Window {
         UVec2::new(w, h)
     }
 
+    /// The current number of MSAA samples (`1` means multisampling is disabled).
+    #[inline]
+    pub fn samples(&self) -> u32 {
+        self.canvas.sample_count()
+    }
+
+    /// Sets the number of MSAA samples used for rendering, recreating the render
+    /// targets to match. The change takes effect on the next rendered frame.
+    ///
+    /// This is the runtime equivalent of [`CanvasSetup::samples`]; it lets you toggle
+    /// or change anti-aliasing after the window has been created.
+    ///
+    /// # Example
+    /// ```no_run
+    /// # use kiss3d::window::{Window, NumSamples};
+    /// # async fn f(window: &mut Window) {
+    /// window.set_samples(NumSamples::Four);
+    /// # }
+    /// ```
+    #[inline]
+    pub fn set_samples(&mut self, samples: NumSamples) {
+        self.canvas.set_samples(samples);
+    }
+
     /// Gets a reference to the underlying canvas.
     ///
     /// This provides access to low-level rendering features like:
@@ -127,6 +158,18 @@ impl Window {
         &mut self.canvas
     }
 
+    /// Timings of the most recently rendered frame.
+    ///
+    /// Returns `None` until the first frame has been rendered. The timings are
+    /// for whichever renderer ran last (rasterizer or path tracer): per-pass GPU
+    /// execution times from timestamp queries (when the device supports them),
+    /// plus CPU wall-clock for the submit/present calls and the whole frame. See
+    /// [`RenderTimings`]. The built-in inspector displays them.
+    #[inline]
+    pub fn render_timings(&self) -> Option<&RenderTimings> {
+        self.last_timings.as_ref()
+    }
+
     /// Renders one frame of a 3D scene with the GPU path tracer.
     ///
     /// This is the ray-traced counterpart of [`render_3d`](Self::render_3d). It
@@ -135,6 +178,10 @@ impl Window {
     /// [`RayTracer`] across frames so accumulation can converge; it restarts
     /// automatically when the camera moves, the window is resized, or the scene
     /// changes.
+    ///
+    /// If the path tracer is disabled (see [`RayTracer::set_enabled`]), this
+    /// renders the scene with the rasterizer instead, so the same render call
+    /// can switch between the two renderers without restructuring the loop.
     ///
     /// # Example
     /// ```no_run
@@ -148,18 +195,24 @@ impl Window {
     ///     let mut scene = SceneNode3d::empty();
     ///     let mut raytracer = RayTracer::new();
     ///
-    ///     while window.render_raytraced(&mut scene, &mut camera, &mut raytracer).await {}
+    ///     while window.raytrace_3d(&mut scene, &mut camera, &mut raytracer).await {}
     /// }
     /// ```
-    pub async fn render_raytraced(
+    pub async fn raytrace_3d(
         &mut self,
         scene: &mut SceneNode3d,
         camera: &mut impl Camera3d,
         raytracer: &mut RayTracer,
     ) -> bool {
+        // When the path tracer is disabled, render the scene with the rasterizer
+        // instead (`render_3d` handles events on its own).
+        if !raytracer.enabled() {
+            return self.render_3d(scene, camera).await;
+        }
+
         let mut default_cam2 = FixedView2d::default();
         self.handle_events(camera, &mut default_cam2);
-        self.render_raytraced_frame(scene, camera, raytracer).await
+        self.raytrace_3d_frame(scene, camera, raytracer).await
     }
 
     /// Sets the window title.
@@ -353,6 +406,20 @@ impl Window {
     /// Returns the current per-layer shadow atlas resolution.
     pub fn shadow_resolution(&self) -> u32 {
         self.shadow_mapper.resolution()
+    }
+
+    /// Sets the rasterizer shadow-edge softness (PCF blur).
+    ///
+    /// `1.0` (the default) is the standard penumbra; larger values blur the
+    /// shadow edges more, `0.0` gives hard edges. Has no effect on the path
+    /// tracer, whose shadow softness comes from each light's `radius`.
+    pub fn set_shadow_softness(&mut self, softness: f32) {
+        self.shadow_mapper.set_softness(softness);
+    }
+
+    /// Returns the current rasterizer shadow-edge softness (PCF blur).
+    pub fn shadow_softness(&self) -> f32 {
+        self.shadow_mapper.softness()
     }
 
     /// The current HDR finishing settings (exposure, tonemap operator, bloom).
@@ -579,6 +646,8 @@ impl Window {
             first_frame: true,
             close_key: Some(Key::Escape),
             close_modifiers: None,
+            last_timings: None,
+            gpu_timer: GpuTimer::new(),
             canvas,
             events: Rc::new(event_receive),
             unhandled_events: Rc::new(RefCell::new(Vec::new())),
@@ -632,6 +701,8 @@ impl Window {
             first_frame: true,
             close_key: None,
             close_modifiers: None,
+            last_timings: None,
+            gpu_timer: GpuTimer::new(),
             canvas,
             events: Rc::new(event_receive),
             unhandled_events: Rc::new(RefCell::new(Vec::new())),

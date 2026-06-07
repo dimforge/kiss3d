@@ -8,6 +8,7 @@ use crate::event::WindowEvent;
 use crate::light::LightCollection;
 use crate::post_processing::{PostProcessingContext, PostProcessingEffect};
 use crate::prelude::FixedView2d;
+use crate::renderer::timings::{CpuTimer, RenderTimings};
 use crate::renderer::{RayTracer, Renderer3d};
 use crate::resource::{
     MaterialManager2d, MaterialManager3d, RenderContext, RenderContext2d, RenderContext2dEncoder,
@@ -104,6 +105,11 @@ impl Window {
         mut renderer: Option<&mut dyn Renderer3d>,
         mut post_processing: Option<&mut dyn PostProcessingEffect>,
     ) -> bool {
+        // Frame timing: CPU wall-clock for the whole frame (and submit/present
+        // below) plus per-pass GPU timestamps recorded into the GPU timer.
+        let cpu = CpuTimer::start();
+        self.gpu_timer.begin_frame();
+
         // A visible window renders into its surface; a hidden window has no
         // presentable surface, so it renders into an offscreen texture that
         // `snap` and recording can still read back.
@@ -147,13 +153,12 @@ impl Window {
 
         // Resize the HDR film + the offscreen render targets if needed.
         //
-        // NOTE: the rasterizer's material/renderer pipelines are currently built
-        // single-sampled (their `MultisampleState.count` is 1), so the HDR film
-        // is single-sampled too. `sample_count` is still threaded through so that
-        // if MSAA pipelines are enabled later, `HdrPipeline` already supports an
-        // MSAA attachment + resolve (see `resolve_view` below).
-        let hdr_sample_count = 1;
-        self.hdr.resize(w, h, hdr_sample_count);
+        // The rasterizer's material/renderer pipelines are built per sample count (a
+        // lazy `PipelineCache` keyed by `context.sample_count`), so the HDR film is
+        // multisampled to match the canvas. The scene is rasterized into the MSAA HDR
+        // attachment and resolved into the single-sample HDR texture (see
+        // `resolve_view` below) before tonemapping.
+        self.hdr.resize(w, h, sample_count);
         self.post_process_render_target
             .resize(w, h, self.canvas.surface_format());
         if offscreen {
@@ -262,7 +267,7 @@ impl Window {
             // for the first pass; stereo passes reuse the same shadow maps.
             if let Some(scene) = scene.as_deref_mut() {
                 self.shadow_mapper
-                    .render(scene, &*camera, &lights, &mut encoder);
+                    .render(scene, &*camera, &lights, &mut encoder, &mut self.gpu_timer);
             }
 
             // Phase 3: Render - issue draw calls using a SINGLE render pass.
@@ -279,6 +284,7 @@ impl Window {
                 };
 
                 // Create one render pass for all 3D scene objects
+                let opaque_ts = self.gpu_timer.render_scope("opaque");
                 let mut wgpu_render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("scene_render_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -298,7 +304,7 @@ impl Window {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: opaque_ts,
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -359,20 +365,28 @@ impl Window {
         if let Some(scene) = scene {
             let oit_context = RenderContext {
                 surface_format: Context::render_format(),
-                sample_count: 1,
+                // The OIT geometry pass shares the (MSAA) opaque depth buffer, so its
+                // targets and pipelines must use the same sample count.
+                sample_count,
                 viewport_width: w,
                 viewport_height: h,
                 shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
                 phase: RenderPhase::Transparent,
             };
             {
+                // Under MSAA the geometry pass renders into the multisampled accum/
+                // revealage attachments and resolves into their single-sample copies,
+                // which `composite_oit` then samples.
+                let oit_accum_resolve = self.hdr.oit_accum_resolve_view();
+                let oit_reveal_resolve = self.hdr.oit_reveal_resolve_view();
+                let oit_ts = self.gpu_timer.render_scope("transparent");
                 let mut oit_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("oit_geometry_pass"),
                     color_attachments: &[
                         // accum: cleared to 0 (additive).
                         Some(wgpu::RenderPassColorAttachment {
                             view: self.hdr.oit_accum_view(),
-                            resolve_target: None,
+                            resolve_target: oit_accum_resolve,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                                 store: wgpu::StoreOp::Store,
@@ -382,7 +396,7 @@ impl Window {
                         // revealage: cleared to 1 (nothing occluded yet).
                         Some(wgpu::RenderPassColorAttachment {
                             view: self.hdr.oit_reveal_view(),
-                            resolve_target: None,
+                            resolve_target: oit_reveal_resolve,
                             ops: wgpu::Operations {
                                 load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
                                 store: wgpu::StoreOp::Store,
@@ -399,7 +413,7 @@ impl Window {
                         }),
                         stencil_ops: None,
                     }),
-                    timestamp_writes: None,
+                    timestamp_writes: oit_ts,
                     occlusion_query_set: None,
                     multiview_mask: None,
                 });
@@ -514,7 +528,8 @@ impl Window {
                 RenderTarget::Offscreen(o) => o.color_view.clone(),
                 RenderTarget::Screen => frame_view.clone(),
             };
-            self.hdr.resolve(&mut encoder, &pp_ldr_view);
+            self.hdr
+                .resolve(&mut encoder, &pp_ldr_view, &mut self.gpu_timer);
 
             // TODO: use the real time value instead of 0.016!
             p.update(0.016, w as f32, h as f32, znear, zfar);
@@ -526,7 +541,8 @@ impl Window {
 
             p.draw(&self.post_process_render_target, &mut pp_context);
         } else {
-            self.hdr.resolve(&mut encoder, &frame_view);
+            self.hdr
+                .resolve(&mut encoder, &frame_view, &mut self.gpu_timer);
         }
 
         // Render text
@@ -543,8 +559,13 @@ impl Window {
                 .render(w as f32, h as f32, &mut context_2d_encoder);
         }
 
-        // Submit the main command buffer
-        ctxt.submit(std::iter::once(encoder.finish()));
+        // Resolve the GPU timestamp queries into a readback buffer before submit.
+        self.gpu_timer.resolve(&mut encoder);
+
+        // Submit the main command buffer (CPU-timed) and kick off the async
+        // timestamp readback.
+        let (_, cpu_submit) = CpuTimer::time(|| ctxt.submit(std::iter::once(encoder.finish())));
+        self.gpu_timer.after_submit();
 
         // Render egui if enabled (uses its own command encoder and submits it)
         #[cfg(feature = "egui")]
@@ -580,9 +601,22 @@ impl Window {
 
         // Present the frame (visible windows only; a hidden window has no
         // presentable surface).
-        if let Some(frame) = frame {
-            self.canvas.present(frame);
-        }
+        let (_, cpu_present) = CpuTimer::time(|| {
+            if let Some(frame) = frame {
+                self.canvas.present(frame);
+            }
+        });
+
+        // Stored before the wasm frame-pacing wait below, so `total` reflects the
+        // render work and not the idle wait for the next animation frame.
+        self.last_timings = Some(RenderTimings {
+            renderer: "Rasterizer",
+            total: cpu.elapsed(),
+            cpu_submit,
+            cpu_present,
+            gpu_steps: self.gpu_timer.last(),
+        });
+
         #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsCast;
@@ -611,12 +645,14 @@ impl Window {
     /// [`RayTracer`] to dispatch the path-tracing pass into its HDR accumulation
     /// buffer and tonemap the result into the frame's output view. Text overlays
     /// are still rendered on top.
-    pub(super) async fn render_raytraced_frame(
+    pub(super) async fn raytrace_3d_frame(
         &mut self,
         scene: &mut SceneNode3d,
         camera: &mut dyn Camera3d,
         raytracer: &mut RayTracer,
     ) -> bool {
+        let cpu = CpuTimer::start();
+        self.gpu_timer.begin_frame();
         let offscreen = self.hidden;
 
         let frame = if offscreen {
@@ -675,6 +711,13 @@ impl Window {
         let mut lights = LightCollection::with_ambient(self.ambient_intensity);
         scene.data_mut().prepare(0, camera, &mut lights, w, h);
 
+        // Exposure and tonemap operator are shared with the rasterizer, so the
+        // path tracer finishes the image with the window's `HdrSettings`.
+        let hdr = self.hdr_settings();
+        let exposure = hdr.exposure;
+        let tonemap_operator = hdr.tonemap.as_u32();
+        // The path tracer records its own GPU phases (trace / denoise / tonemap)
+        // into the GPU timer.
         raytracer.render_frame(
             scene,
             camera,
@@ -684,6 +727,9 @@ impl Window {
             &frame_view,
             w,
             h,
+            exposure,
+            tonemap_operator,
+            &mut self.gpu_timer,
         );
 
         // Render text on top of the path-traced image.
@@ -700,7 +746,11 @@ impl Window {
                 .render(w as f32, h as f32, &mut context_2d_encoder);
         }
 
-        ctxt.submit(std::iter::once(encoder.finish()));
+        // Resolve GPU timestamps before submit, then submit (CPU-timed) and kick
+        // off the async readback.
+        self.gpu_timer.resolve(&mut encoder);
+        let (_, cpu_submit) = CpuTimer::time(|| ctxt.submit(std::iter::once(encoder.finish())));
+        self.gpu_timer.after_submit();
 
         // Render egui on top of the path-traced image (uses its own encoder).
         // The depth view is unused by egui, so the color view is passed twice.
@@ -732,9 +782,20 @@ impl Window {
         #[cfg(feature = "recording")]
         self.capture_frame_if_recording();
 
-        if let Some(frame) = frame {
-            self.canvas.present(frame);
-        }
+        let (_, cpu_present) = CpuTimer::time(|| {
+            if let Some(frame) = frame {
+                self.canvas.present(frame);
+            }
+        });
+
+        self.last_timings = Some(RenderTimings {
+            renderer: "Path tracer",
+            total: cpu.elapsed(),
+            cpu_submit,
+            cpu_present,
+            gpu_steps: self.gpu_timer.last(),
+        });
+
         #[cfg(target_arch = "wasm32")]
         {
             use wasm_bindgen::JsCast;

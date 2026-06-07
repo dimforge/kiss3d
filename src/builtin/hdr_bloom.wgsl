@@ -38,7 +38,7 @@ fn vs_main(@location(0) position: vec2<f32>) -> VsOut {
     return out;
 }
 
-// Soft-knee threshold curve (as used by Unreal/Call-of-Duty style bloom).
+// Soft-knee threshold curve (common in real-time bloom).
 fn prefilter(color: vec3<f32>) -> vec3<f32> {
     let brightness = max(color.r, max(color.g, color.b));
     let knee = max(u.knee, 1e-4);

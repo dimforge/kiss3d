@@ -35,16 +35,23 @@ use wgpu::ExperimentalFeatures;
 /// path tracer can use the hardware backend. Otherwise no extra features are
 /// requested and the portable compute backend is used.
 fn raytracing_features(adapter: &wgpu::Adapter) -> wgpu::Features {
-    #[allow(unused_mut)]
     let mut features = wgpu::Features::empty();
+    let supported = adapter.features();
+
+    // Per-pass GPU timestamp queries power the inspector's render timings. Only
+    // requested when the adapter supports it; otherwise GPU timing is disabled
+    // (and only the CPU submit/present/total timings are reported).
+    if supported.contains(wgpu::Features::TIMESTAMP_QUERY) {
+        features |= wgpu::Features::TIMESTAMP_QUERY;
+    }
+
     #[cfg(feature = "hw_raytracer")]
     {
-        let supported = adapter.features();
         if supported.contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
             features |= wgpu::Features::EXPERIMENTAL_RAY_QUERY;
         }
     }
-    let _ = adapter;
+
     features
 }
 
@@ -797,6 +804,46 @@ impl WgpuCanvas {
 
         self.readback_texture =
             Self::create_readback_texture(&ctxt.device, width, height, self.surface_config.format);
+    }
+
+    /// Changes the MSAA sample count, recreating the size-dependent attachments
+    /// (depth + MSAA color) to match.
+    ///
+    /// The swapchain is single-sample regardless, so it is left untouched. The HDR
+    /// film, OIT targets and the rasterization pipelines re-derive the new count on
+    /// the next frame (the pipelines are cached per sample count), so no other state
+    /// needs to be rebuilt here.
+    pub fn set_sample_count(&mut self, sample_count: u32) {
+        let sample_count = sample_count.max(1);
+        if self.sample_count == sample_count {
+            return;
+        }
+        self.sample_count = sample_count;
+
+        let ctxt = Context::get();
+        let width = self.surface_config.width.max(1);
+        let height = self.surface_config.height.max(1);
+
+        let (depth_texture, depth_view) =
+            Self::create_depth_texture(&ctxt.device, width, height, sample_count);
+        self.depth_texture = depth_texture;
+        self.depth_view = depth_view;
+
+        if sample_count > 1 {
+            let (msaa_texture, msaa_view) = Self::create_msaa_texture(
+                &ctxt.device,
+                width,
+                height,
+                self.surface_config.format,
+                sample_count,
+            );
+            self.msaa_texture = Some(msaa_texture);
+            self.msaa_view = Some(msaa_view);
+        } else {
+            // Drop the (now unused) multisampled color attachment.
+            self.msaa_texture = None;
+            self.msaa_view = None;
+        }
     }
 
     fn create_depth_texture(

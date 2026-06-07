@@ -15,6 +15,7 @@ pub use crate::resource::mesh2d::GpuMesh2d;
 pub use crate::resource::mesh3d::GpuMesh3d;
 pub use crate::resource::mesh_manager2d::MeshManager2d;
 pub use crate::resource::mesh_manager3d::MeshManager3d;
+pub use crate::resource::pipeline_cache::{multisample_state, PipelineCache};
 pub use crate::resource::texture_manager::{Texture, TextureManager, TextureWrapping};
 
 mod dynamic_buffer;
@@ -27,5 +28,6 @@ mod mesh2d;
 mod mesh3d;
 mod mesh_manager2d;
 mod mesh_manager3d;
+mod pipeline_cache;
 mod texture_manager;
 pub mod vertex_index;

@@ -98,7 +98,13 @@ struct ShadowUniforms {
     shadows_enabled: f32,
     texel_size: f32,
     depth_bias: f32,
-    _padding: f32,
+    // 1.0 when translucent casters tinted the colored transmittance atlas.
+    transmittance_enabled: f32,
+    // PCF kernel scale (shadow softness/blur): 1.0 = default, larger = softer.
+    softness: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
     // Far view-space distance of each directional cascade (0..num_cascades).
     cascade_splits: vec4<f32>,
 }
@@ -109,14 +115,38 @@ var t_shadow_atlas: texture_depth_2d_array;
 var s_shadow: sampler_comparison;
 @group(3) @binding(2)
 var<uniform> shadow: ShadowUniforms;
+// Colored transmittance atlas: RGB transmittance of translucent occluders in
+// front of the nearest opaque surface (white where nothing translucent occludes).
+@group(3) @binding(3)
+var t_shadow_transmittance: texture_2d_array<f32>;
+@group(3) @binding(4)
+var s_shadow_color: sampler;
 
-// PCF (5x5) comparison sample of one atlas layer at a shadow-map `uv` + depth.
-// Returns 1.0 = fully lit, 0.0 = fully shadowed. The comparison sampler does a
-// bilinear (2x2) hardware test per tap, so a 5x5 tap grid yields a smooth ~6-texel
-// penumbra that hides residual stair-stepping on shadow edges.
-// One hardware bilinear (2x2) comparison sample of an atlas layer.
-fn shadow_tap(layer: u32, uv: vec2<f32>, compare_depth: f32) -> f32 {
-    return textureSampleCompareLevel(t_shadow_atlas, s_shadow, uv, i32(layer), compare_depth);
+// Colored visibility of a light at a shadow texel: the opaque PCF visibility
+// (`vis`, in [0,1]) and the RGB transmittance of any translucent occluders.
+struct ShadowSample {
+    vis: f32,
+    transmit: vec3<f32>,
+}
+
+// Samples the colored transmittance atlas at `uv` of `layer` (white when no
+// translucent caster contributed this frame).
+fn sample_transmittance(layer: u32, uv: vec2<f32>) -> vec3<f32> {
+    if shadow.transmittance_enabled < 0.5 {
+        return vec3<f32>(1.0);
+    }
+    return textureSampleLevel(t_shadow_transmittance, s_shadow_color, uv, i32(layer), 0.0).rgb;
+}
+
+// One tap, with the receiver-plane depth bias applied: the compare depth follows
+// the receiver's own plane at the tap (`base_z + grad . (tap_uv - ref_uv)`), so a
+// wide kernel tests against the surface's actual depth there instead of the flat
+// center depth — eliminating self-shadow acne without flattening contacts.
+fn shadow_tap_rpdb(
+    layer: u32, tap_uv: vec2<f32>, ref_uv: vec2<f32>, base_z: f32, grad: vec2<f32>,
+) -> f32 {
+    let compare = base_z + dot(grad, tap_uv - ref_uv);
+    return textureSampleCompareLevel(t_shadow_atlas, s_shadow, tap_uv, i32(layer), compare);
 }
 
 // Castaño 2013 ("Shadow Mapping Summary Part 1") optimized PCF: a tent-weighted
@@ -124,7 +154,12 @@ fn shadow_tap(layer: u32, uv: vec2<f32>, compare_depth: f32) -> f32 {
 // offset so the GPU's 2x2 bilinear comparison, combined with the tent weights,
 // reproduces a smooth ~5x5 PCF using only 9 taps — smoother AND crisper than a
 // naive box PCF for the same cost. Returns visibility in [0,1].
-fn shadow_pcf(layer: u32, uv: vec2<f32>, compare_depth: f32) -> f32 {
+//
+// `base_z` is the receiver depth at `uv` (already nudged by the small constant
+// bias) and `grad = (dz/du, dz/dv)` is the receiver-plane depth gradient, so each
+// tap is compared against the plane depth at its own position (receiver-plane
+// depth bias). This is what keeps wide/soft kernels free of acne.
+fn shadow_pcf(layer: u32, uv: vec2<f32>, base_z: f32, grad: vec2<f32>) -> f32 {
     let map_size = vec2<f32>(textureDimensions(t_shadow_atlas));
     let inv_size = 1.0 / map_size;
 
@@ -133,6 +168,10 @@ fn shadow_pcf(layer: u32, uv: vec2<f32>, compare_depth: f32) -> f32 {
     let s = coord.x + 0.5 - base_uv.x;
     let t = coord.y + 0.5 - base_uv.y;
     base_uv = (base_uv - 0.5) * inv_size;
+
+    // `softness` scales the tap spacing about the kernel center: 1.0 is the
+    // default penumbra, larger blurs the edge, 0.0 collapses to a hard edge.
+    let spread = inv_size * shadow.softness;
 
     let uw0 = 4.0 - 3.0 * s;
     let uw1 = 7.0;
@@ -148,50 +187,118 @@ fn shadow_pcf(layer: u32, uv: vec2<f32>, compare_depth: f32) -> f32 {
     let v1 = (3.0 + t) / vw1;
     let v2 = t / vw2 + 2.0;
 
+    let p00 = base_uv + vec2<f32>(u0, v0) * spread;
+    let p10 = base_uv + vec2<f32>(u1, v0) * spread;
+    let p20 = base_uv + vec2<f32>(u2, v0) * spread;
+    let p01 = base_uv + vec2<f32>(u0, v1) * spread;
+    let p11 = base_uv + vec2<f32>(u1, v1) * spread;
+    let p21 = base_uv + vec2<f32>(u2, v1) * spread;
+    let p02 = base_uv + vec2<f32>(u0, v2) * spread;
+    let p12 = base_uv + vec2<f32>(u1, v2) * spread;
+    let p22 = base_uv + vec2<f32>(u2, v2) * spread;
+
     var sum = 0.0;
-    sum += uw0 * vw0 * shadow_tap(layer, base_uv + vec2<f32>(u0, v0) * inv_size, compare_depth);
-    sum += uw1 * vw0 * shadow_tap(layer, base_uv + vec2<f32>(u1, v0) * inv_size, compare_depth);
-    sum += uw2 * vw0 * shadow_tap(layer, base_uv + vec2<f32>(u2, v0) * inv_size, compare_depth);
+    sum += uw0 * vw0 * shadow_tap_rpdb(layer, p00, uv, base_z, grad);
+    sum += uw1 * vw0 * shadow_tap_rpdb(layer, p10, uv, base_z, grad);
+    sum += uw2 * vw0 * shadow_tap_rpdb(layer, p20, uv, base_z, grad);
 
-    sum += uw0 * vw1 * shadow_tap(layer, base_uv + vec2<f32>(u0, v1) * inv_size, compare_depth);
-    sum += uw1 * vw1 * shadow_tap(layer, base_uv + vec2<f32>(u1, v1) * inv_size, compare_depth);
-    sum += uw2 * vw1 * shadow_tap(layer, base_uv + vec2<f32>(u2, v1) * inv_size, compare_depth);
+    sum += uw0 * vw1 * shadow_tap_rpdb(layer, p01, uv, base_z, grad);
+    sum += uw1 * vw1 * shadow_tap_rpdb(layer, p11, uv, base_z, grad);
+    sum += uw2 * vw1 * shadow_tap_rpdb(layer, p21, uv, base_z, grad);
 
-    sum += uw0 * vw2 * shadow_tap(layer, base_uv + vec2<f32>(u0, v2) * inv_size, compare_depth);
-    sum += uw1 * vw2 * shadow_tap(layer, base_uv + vec2<f32>(u1, v2) * inv_size, compare_depth);
-    sum += uw2 * vw2 * shadow_tap(layer, base_uv + vec2<f32>(u2, v2) * inv_size, compare_depth);
+    sum += uw0 * vw2 * shadow_tap_rpdb(layer, p02, uv, base_z, grad);
+    sum += uw1 * vw2 * shadow_tap_rpdb(layer, p12, uv, base_z, grad);
+    sum += uw2 * vw2 * shadow_tap_rpdb(layer, p22, uv, base_z, grad);
 
     return sum * (1.0 / 144.0);
 }
 
-// Samples one atlas layer at a world position (project + bounds-check + PCF), used
-// by spot and point lights. Returns 1.0 (lit) when the fragment is out of the map.
-fn sample_shadow_layer(layer: u32, world_pos: vec3<f32>) -> f32 {
-    let light_clip = shadow.view_proj[layer] * vec4<f32>(world_pos, 1.0);
-    if light_clip.w <= 0.0 {
-        return 1.0;
-    }
-    let ndc = light_clip.xyz / light_clip.w;
-    let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
-    if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0 {
-        return 1.0;
-    }
-    return shadow_pcf(layer, uv, ndc.z - shadow.depth_bias);
+// Out-of-map default: fully lit, no tint.
+fn shadow_sample_lit() -> ShadowSample {
+    return ShadowSample(1.0, vec3<f32>(1.0));
 }
 
-// Projects `world_pos` into one cascade's atlas layer and samples it with PCF.
-// Returns 1.0 (fully lit) if the fragment falls outside that layer's map.
-fn sample_one_cascade(layer: u32, world_pos: vec3<f32>) -> f32 {
+// Receiver-plane depth gradient `(dz/du, dz/dv)` for `layer`: how the receiver's
+// light-space depth changes per unit of shadow-map UV, so PCF can bias each tap
+// onto the actual receiver plane (option 3).
+//
+// `dpos_dx/dpos_dy` are the screen-space derivatives of the world position
+// (taken once in uniform control flow, in `shade`). Projecting them through this
+// layer's `view_proj` gives the screen-space derivatives of `(uv, depth)`; we
+// then invert the 2x2 UV Jacobian to change basis from screen space to UV space.
+// Computing it from the world derivatives (rather than `dpdx` of the per-layer
+// uv) keeps it valid in non-uniform control flow and consistent across cascade /
+// cube-face seams. `det == 0` (degenerate, e.g. edge-on) falls back to no slope.
+fn receiver_plane_grad(
+    layer: u32, clip: vec4<f32>, ndc: vec3<f32>, dpos_dx: vec3<f32>, dpos_dy: vec3<f32>,
+) -> vec2<f32> {
+    let m = shadow.view_proj[layer];
+    // d(clip)/d(screen) = (columns 0..2 of view_proj) . d(world)/d(screen).
+    let dclip_dx = m[0] * dpos_dx.x + m[1] * dpos_dx.y + m[2] * dpos_dx.z;
+    let dclip_dy = m[0] * dpos_dy.x + m[1] * dpos_dy.y + m[2] * dpos_dy.z;
+
+    // Through the perspective divide: d(ndc) = (d(clip).xyz - ndc * d(clip).w) / w.
+    let inv_w = 1.0 / clip.w;
+    let dndc_dx = (dclip_dx.xyz - ndc * dclip_dx.w) * inv_w;
+    let dndc_dy = (dclip_dy.xyz - ndc * dclip_dy.w) * inv_w;
+
+    // uv = (ndc.x*0.5+0.5, -ndc.y*0.5+0.5); depth compared = ndc.z.
+    let du_dx = dndc_dx.x * 0.5;
+    let dv_dx = -dndc_dx.y * 0.5;
+    let du_dy = dndc_dy.x * 0.5;
+    let dv_dy = -dndc_dy.y * 0.5;
+
+    let det = du_dx * dv_dy - dv_dx * du_dy;
+    if abs(det) < 1e-12 {
+        return vec2<f32>(0.0);
+    }
+    let inv_det = 1.0 / det;
+    // Solve [du_dx dv_dx; du_dy dv_dy] * [dz/du; dz/dv] = [dz/dx; dz/dy].
+    let dz_du = (dv_dy * dndc_dx.z - dv_dx * dndc_dy.z) * inv_det;
+    let dz_dv = (du_dx * dndc_dy.z - du_dy * dndc_dx.z) * inv_det;
+
+    // Clamp the slope so a degenerate gradient (silhouette edge, grazing angle)
+    // can't over-bias into light leaking: cap the depth change to `MAX` per texel.
+    let res = f32(textureDimensions(t_shadow_atlas).x);
+    let per_texel = max(abs(dz_du), abs(dz_dv)) / res;
+    let grad = vec2<f32>(dz_du, dz_dv);
+    // Generous cap: only rein in truly degenerate gradients (near edge-on faces,
+    // silhouette spikes) that would over-bias into light leaking. Legitimate
+    // grazing slopes are large, so clamping too low reintroduces acne.
+    let max_per_texel = 0.5;
+    if per_texel > max_per_texel {
+        return grad * (max_per_texel / per_texel);
+    }
+    return grad;
+}
+
+// Samples one atlas layer at a world position (project + bounds-check + PCF +
+// transmittance), used by spot and point lights. Fully lit when out of the map.
+fn sample_shadow_layer(
+    layer: u32, world_pos: vec3<f32>, dpos_dx: vec3<f32>, dpos_dy: vec3<f32>,
+) -> ShadowSample {
     let light_clip = shadow.view_proj[layer] * vec4<f32>(world_pos, 1.0);
     if light_clip.w <= 0.0 {
-        return 1.0;
+        return shadow_sample_lit();
     }
     let ndc = light_clip.xyz / light_clip.w;
     let uv = vec2<f32>(ndc.x * 0.5 + 0.5, -ndc.y * 0.5 + 0.5);
     if uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0 || ndc.z > 1.0 || ndc.z < 0.0 {
-        return 1.0;
+        return shadow_sample_lit();
     }
-    return shadow_pcf(layer, uv, ndc.z - shadow.depth_bias);
+    let grad = receiver_plane_grad(layer, light_clip, ndc, dpos_dx, dpos_dy);
+    return ShadowSample(
+        shadow_pcf(layer, uv, ndc.z - shadow.depth_bias, grad),
+        sample_transmittance(layer, uv),
+    );
+}
+
+// Projects `world_pos` into one cascade's atlas layer and samples it.
+// Fully lit if the fragment falls outside that layer's map.
+fn sample_one_cascade(
+    layer: u32, world_pos: vec3<f32>, dpos_dx: vec3<f32>, dpos_dy: vec3<f32>,
+) -> ShadowSample {
+    return sample_shadow_layer(layer, world_pos, dpos_dx, dpos_dy);
 }
 
 // Cascaded shadow maps for a directional light: the `num_cascades` layers from
@@ -200,7 +307,8 @@ fn sample_one_cascade(layer: u32, world_pos: vec3<f32>) -> f32 {
 // before each boundary so the resolution change isn't a hard seam.
 fn sample_directional_cascades(
     base_view: u32, num_cascades: u32, view_depth: f32, world_pos: vec3<f32>,
-) -> f32 {
+    dpos_dx: vec3<f32>, dpos_dy: vec3<f32>,
+) -> ShadowSample {
     // Pick the first cascade whose far bound is beyond the fragment depth.
     var c = num_cascades - 1u;
     for (var i = 0u; i < num_cascades; i = i + 1u) {
@@ -210,16 +318,19 @@ fn sample_directional_cascades(
         }
     }
 
-    let s = sample_one_cascade(base_view + c, world_pos);
+    let s = sample_one_cascade(base_view + c, world_pos, dpos_dx, dpos_dy);
 
     // Blend into the next cascade across a band before this cascade's far split.
     if c + 1u < num_cascades {
         let split = shadow.cascade_splits[c];
         let band = split * 0.2;
         if view_depth > split - band {
-            let s_next = sample_one_cascade(base_view + c + 1u, world_pos);
+            let s_next = sample_one_cascade(base_view + c + 1u, world_pos, dpos_dx, dpos_dy);
             let t = clamp((view_depth - (split - band)) / band, 0.0, 1.0);
-            return mix(s, s_next, t);
+            return ShadowSample(
+                mix(s.vis, s_next.vis, t),
+                mix(s.transmit, s_next.transmit, t),
+            );
         }
     }
     return s;
@@ -238,28 +349,38 @@ fn point_cube_face(dir: vec3<f32>) -> u32 {
     }
 }
 
-// Returns the light visibility factor in [0,1] for light `light_index` at `world_pos`.
-fn compute_shadow(light_index: u32, world_pos: vec3<f32>) -> f32 {
+// Returns the colored light visibility for light `light_index` at `world_pos`:
+// the opaque-shadow visibility in [0,1] tinted by any translucent occluders.
+// `vec3(1.0)` means fully lit.
+fn compute_shadow(
+    light_index: u32, world_pos: vec3<f32>, dpos_dx: vec3<f32>, dpos_dy: vec3<f32>,
+) -> vec3<f32> {
     if shadow.shadows_enabled < 0.5 {
-        return 1.0;
+        return vec3<f32>(1.0);
     }
     let ls = shadow.lights[light_index];
     if ls.enabled < 0.5 {
-        return 1.0;
+        return vec3<f32>(1.0);
     }
 
+    var s: ShadowSample;
     if ls.light_type == LIGHT_TYPE_POINT {
         let face = point_cube_face(world_pos - ls.light_pos);
-        return sample_shadow_layer(ls.base_view + face, world_pos);
-    }
-    if ls.light_type == LIGHT_TYPE_DIRECTIONAL {
+        s = sample_shadow_layer(ls.base_view + face, world_pos, dpos_dx, dpos_dy);
+    } else if ls.light_type == LIGHT_TYPE_DIRECTIONAL {
         // Cascaded shadow maps: select/blend cascades by view-space depth (the
         // distance in front of the camera; view -z is forward).
         let view_depth = -(frame.view * vec4<f32>(world_pos, 1.0)).z;
-        return sample_directional_cascades(ls.base_view, ls.num_views, view_depth, world_pos);
+        s = sample_directional_cascades(
+            ls.base_view, ls.num_views, view_depth, world_pos, dpos_dx, dpos_dy,
+        );
+    } else {
+        // Spot lights use a single perspective view.
+        s = sample_shadow_layer(ls.base_view, world_pos, dpos_dx, dpos_dy);
     }
-    // Spot lights use a single perspective view.
-    return sample_shadow_layer(ls.base_view, world_pos);
+
+    // Opaque visibility scales the (colored) translucent transmittance.
+    return vec3<f32>(s.vis) * s.transmit;
 }
 // === END SHADOW MAPPING block ===
 
@@ -396,6 +517,12 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 // Shades the fragment, returning (linear HDR color, alpha). Shared by the opaque
 // pass (`fs_main`) and the weighted-blended OIT pass (`fs_oit`).
 fn shade(in: VertexOutput) -> vec4<f32> {
+    // Screen-space derivatives of the world position, taken here in uniform
+    // control flow (before any branching) so they are valid. The shadow code
+    // projects these per light to derive the receiver-plane depth bias.
+    let dpos_dx = dpdx(in.world_pos);
+    let dpos_dy = dpdy(in.world_pos);
+
     // Sample albedo texture and combine with vertex/object color
     let albedo_tex = textureSample(t_diffuse, s_diffuse, in.tex_coord);
     let base_color = in.vert_color * object.color;
@@ -535,7 +662,7 @@ fn shade(in: VertexOutput) -> vec4<f32> {
         let diffuse_wrap = max(NdotL_wrapped, 0.0);
 
         // === SHADOW MAPPING: attenuate this light by its shadow-map visibility ===
-        let shadow_factor = compute_shadow(i, in.world_pos);
+        let shadow_factor = compute_shadow(i, in.world_pos, dpos_dx, dpos_dy);
         // === END SHADOW MAPPING ===
 
         // Combine lighting with light color

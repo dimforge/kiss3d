@@ -91,7 +91,17 @@ struct ShadowUniforms {
     texel_size: f32,
     /// Depth bias applied when comparing, mitigating shadow acne.
     depth_bias: f32,
-    _padding: f32,
+    /// `1.0` when at least one translucent caster wrote into the colored
+    /// transmittance atlas this frame (so the lighting shader samples and tints
+    /// by it); `0.0` keeps the cheap all-opaque path (atlas left untouched).
+    transmittance_enabled: f32,
+    /// PCF kernel scale = shadow-edge softness/blur. `1.0` is the default ~5x5
+    /// penumbra; larger spreads the taps wider (softer), `0.0` collapses them to
+    /// a hard edge. Followed by padding to a 16-byte block.
+    softness: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
     /// Directional cascade boundaries: the far view-space distance of each cascade
     /// (`[0..num_cascades)`), so the shader can pick the cascade by fragment depth
     /// and blend across boundaries. Same for every directional light (camera-based).
@@ -114,11 +124,21 @@ struct ShadowViewUniforms {
 struct ShadowModelUniforms {
     transform: [[f32; 4]; 4],
     scale: [[f32; 4]; 3], // mat3x3 padded to mat3x4 for alignment
+    /// Base color (RGBA). Only read by the transmittance pass (to tint the
+    /// shadow by translucent occluders); the depth pass ignores it.
+    color: [f32; 4],
 }
 
 /// Aligned stride of the dynamic per-view/per-object buffers (256 satisfies the
 /// minimum uniform-buffer-offset alignment on all wgpu backends).
 const SHADOW_VIEW_STRIDE: u64 = 256;
+
+/// A caster whose color alpha is below this counts as translucent: it is kept out
+/// of the opaque depth map and instead tints the colored transmittance atlas.
+const OPAQUE_ALPHA_THRESHOLD: f32 = 0.999;
+
+/// Format of the colored transmittance atlas (RGB transmittance in `[0, 1]`).
+const TRANSMITTANCE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 
 /// A single shadow view scheduled for the depth pre-pass.
 struct ShadowView {
@@ -137,6 +157,9 @@ pub struct ShadowMapper {
     resolution: u32,
     /// Slope-scaled-ish constant depth bias used by the PCF comparison.
     depth_bias: f32,
+    /// Shadow-edge softness: scales the PCF tap spacing (`1.0` = default ~5x5
+    /// penumbra, larger = blurrier, `0.0` = hard edges).
+    softness: f32,
     /// Number of cascades a directional light splits its view frustum into
     /// (cascaded shadow maps). Clamped to `1..=MAX_CASCADES`.
     num_cascades: u32,
@@ -156,6 +179,18 @@ pub struct ShadowMapper {
     array_view: wgpu::TextureView,
     /// Comparison sampler used for hardware PCF.
     compare_sampler: wgpu::Sampler,
+    /// Colored transmittance atlas (`Rgba8Unorm`, 2D array): per shadow texel, the
+    /// accumulated RGB transmittance of translucent occluders in front of the
+    /// nearest opaque surface. White where nothing translucent occludes.
+    transmittance_atlas: wgpu::Texture,
+    /// One color view per transmittance-atlas layer, for the transmittance pass.
+    transmittance_layer_views: Vec<wgpu::TextureView>,
+    /// Array view of the transmittance atlas, sampled by the lighting shader.
+    transmittance_array_view: wgpu::TextureView,
+    /// Filtering sampler for the transmittance atlas (bilinear).
+    transmittance_sampler: wgpu::Sampler,
+    /// Pipeline that rasterizes translucent casters into the transmittance atlas.
+    transmittance_pipeline: wgpu::RenderPipeline,
     /// Frame-level shadow uniform buffer (matrices + metadata).
     uniform_buffer: wgpu::Buffer,
     /// Bind group layout for group 4 of the lighting pipeline.
@@ -189,6 +224,8 @@ impl ShadowMapper {
         let resolution = resolution.max(1);
 
         let (atlas, layer_views, array_view) = Self::create_atlas(&ctxt, resolution);
+        let (transmittance_atlas, transmittance_layer_views, transmittance_array_view) =
+            Self::create_transmittance_atlas(&ctxt, resolution);
 
         // Comparison sampler: hardware does the depth test and (with linear
         // filtering) bilinear PCF across the 2x2 neighborhood per tap.
@@ -201,6 +238,18 @@ impl ShadowMapper {
             min_filter: wgpu::FilterMode::Linear,
             mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
+
+        // Plain bilinear sampler for the colored transmittance atlas.
+        let transmittance_sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("shadow_transmittance_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
             ..Default::default()
         });
 
@@ -219,6 +268,8 @@ impl ShadowMapper {
             &array_view,
             &compare_sampler,
             &uniform_buffer,
+            &transmittance_array_view,
+            &transmittance_sampler,
         );
 
         // === Depth-only pre-pass pipeline ===
@@ -245,7 +296,9 @@ impl ShadowMapper {
                 label: Some("shadow_model_bind_group_layout"),
                 entries: &[wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    // The transmittance pass reads the per-object color in its
+                    // fragment stage, so the model uniform is visible to both.
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: true,
@@ -260,6 +313,11 @@ impl ShadowMapper {
 
         let depth_pipeline =
             Self::create_depth_pipeline(&ctxt, &view_bind_group_layout, &model_bind_group_layout);
+        let transmittance_pipeline = Self::create_transmittance_pipeline(
+            &ctxt,
+            &view_bind_group_layout,
+            &model_bind_group_layout,
+        );
 
         let view_capacity = MAX_SHADOW_VIEWS as u64;
         let view_uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
@@ -311,6 +369,7 @@ impl ShadowMapper {
             enabled: true,
             resolution,
             depth_bias: 0.0012,
+            softness: 1.0,
             num_cascades: 4,
             shadow_distance: f32::INFINITY,
             first_cascade_far_bound: 12.0,
@@ -318,6 +377,11 @@ impl ShadowMapper {
             layer_views,
             array_view,
             compare_sampler,
+            transmittance_atlas,
+            transmittance_layer_views,
+            transmittance_array_view,
+            transmittance_sampler,
+            transmittance_pipeline,
             uniform_buffer,
             bind_group_layout,
             bind_group,
@@ -373,12 +437,58 @@ impl ShadowMapper {
         (atlas, layer_views, array_view)
     }
 
+    /// Creates the colored transmittance atlas (color counterpart of the depth
+    /// atlas), returning the texture, one render view per layer, and the array
+    /// view sampled by the lighting shader.
+    fn create_transmittance_atlas(
+        ctxt: &Context,
+        resolution: u32,
+    ) -> (wgpu::Texture, Vec<wgpu::TextureView>, wgpu::TextureView) {
+        let atlas = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow_transmittance_atlas"),
+            size: wgpu::Extent3d {
+                width: resolution,
+                height: resolution,
+                depth_or_array_layers: MAX_SHADOW_VIEWS as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: TRANSMITTANCE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let layer_views = (0..MAX_SHADOW_VIEWS as u32)
+            .map(|layer| {
+                atlas.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("shadow_transmittance_layer"),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    base_array_layer: layer,
+                    array_layer_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        let array_view = atlas.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("shadow_transmittance_array_view"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        (atlas, layer_views, array_view)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn create_bind_group(
         ctxt: &Context,
         layout: &wgpu::BindGroupLayout,
         array_view: &wgpu::TextureView,
         sampler: &wgpu::Sampler,
         uniform_buffer: &wgpu::Buffer,
+        transmittance_view: &wgpu::TextureView,
+        transmittance_sampler: &wgpu::Sampler,
     ) -> wgpu::BindGroup {
         ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shadow_bind_group"),
@@ -395,6 +505,14 @@ impl ShadowMapper {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(transmittance_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(transmittance_sampler),
                 },
             ],
         })
@@ -513,6 +631,131 @@ impl ShadowMapper {
         })
     }
 
+    /// Builds the pipeline that rasterizes translucent casters into the colored
+    /// transmittance atlas: same geometry transform as the depth pass, but with a
+    /// fragment stage writing `1 - a*(1-rgb)`, multiplicative blending, and a
+    /// read-only depth test against the opaque depth atlas (so only occluders in
+    /// front of the nearest opaque surface tint the light).
+    fn create_transmittance_pipeline(
+        ctxt: &Context,
+        view_bind_group_layout: &wgpu::BindGroupLayout,
+        model_bind_group_layout: &wgpu::BindGroupLayout,
+    ) -> wgpu::RenderPipeline {
+        let shader = ctxt.create_shader_module(
+            Some("shadow_transmittance_shader"),
+            include_str!("shadow_transmittance.wgsl"),
+        );
+
+        let layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("shadow_transmittance_pipeline_layout"),
+            bind_group_layouts: &[Some(view_bind_group_layout), Some(model_bind_group_layout)],
+            immediate_size: 0,
+        });
+
+        // Same vertex streams as the depth pass: position (0), instance
+        // translation (1), instance deformation columns (2..4).
+        let vertex_buffer_layouts = [
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &[wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 0,
+                    format: wgpu::VertexFormat::Float32x3,
+                }],
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 3]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[wgpu::VertexAttribute {
+                    offset: 0,
+                    shader_location: 1,
+                    format: wgpu::VertexFormat::Float32x3,
+                }],
+            },
+            wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 2,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 12,
+                        shader_location: 3,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                    wgpu::VertexAttribute {
+                        offset: 24,
+                        shader_location: 4,
+                        format: wgpu::VertexFormat::Float32x3,
+                    },
+                ],
+            },
+        ];
+
+        // Multiplicative blend: result = src * dst. The atlas is cleared to white,
+        // so overlapping translucent occluders compose order-independently.
+        let mult_blend = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Dst,
+            dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        };
+
+        ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("shadow_transmittance_pipeline"),
+            layout: Some(&layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: &vertex_buffer_layouts,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: TRANSMITTANCE_FORMAT,
+                    blend: Some(wgpu::BlendState {
+                        color: mult_blend,
+                        alpha: mult_blend,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            // Read-only depth test against the opaque depth map: a translucent
+            // fragment tints only where it is in front of the nearest opaque
+            // surface. Depth writes are off so translucent occluders don't hide
+            // one another (their transmittances multiply commutatively).
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(false),
+                depth_compare: Some(wgpu::CompareFunction::Less),
+                stencil: wgpu::StencilState::default(),
+                bias: wgpu::DepthBiasState::default(),
+            }),
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        })
+    }
+
     /// The bind group layout consumed by the lighting pipeline as group 4.
     pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         &self.bind_group_layout
@@ -531,6 +774,18 @@ impl ShadowMapper {
     /// Enables or disables shadow mapping globally.
     pub fn set_enabled(&mut self, enabled: bool) {
         self.enabled = enabled;
+    }
+
+    /// The current shadow-edge softness (PCF kernel scale; `1.0` is the default).
+    pub fn softness(&self) -> f32 {
+        self.softness
+    }
+
+    /// Sets the shadow-edge softness: the PCF tap-spacing scale. `1.0` is the
+    /// default ~5x5 penumbra; larger values blur the shadow edges more, `0.0`
+    /// gives hard edges. Clamped to `>= 0`.
+    pub fn set_softness(&mut self, softness: f32) {
+        self.softness = softness.max(0.0);
     }
 
     /// The current shadow atlas per-layer resolution.
@@ -580,12 +835,19 @@ impl ShadowMapper {
         self.atlas = atlas;
         self.layer_views = layer_views;
         self.array_view = array_view;
+        let (t_atlas, t_layer_views, t_array_view) =
+            Self::create_transmittance_atlas(&ctxt, resolution);
+        self.transmittance_atlas = t_atlas;
+        self.transmittance_layer_views = t_layer_views;
+        self.transmittance_array_view = t_array_view;
         self.bind_group = Self::create_bind_group(
             &ctxt,
             &self.bind_group_layout,
             &self.array_view,
             &self.compare_sampler,
             &self.uniform_buffer,
+            &self.transmittance_array_view,
+            &self.transmittance_sampler,
         );
     }
 
@@ -598,12 +860,13 @@ impl ShadowMapper {
     /// When shadows are disabled or no light casts shadows this still writes a
     /// uniform with `shadows_enabled = 0`, so the lighting shader behaves exactly
     /// as if shadows were absent.
-    pub fn render(
+    pub(crate) fn render(
         &mut self,
         scene: &mut SceneNode3d,
         camera: &dyn Camera3d,
         lights: &LightCollection,
         encoder: &mut wgpu::CommandEncoder,
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
         let ctxt = Context::get();
 
@@ -613,7 +876,11 @@ impl ShadowMapper {
             shadows_enabled: 0.0,
             texel_size: 1.0 / self.resolution as f32,
             depth_bias: self.depth_bias,
-            _padding: 0.0,
+            transmittance_enabled: 0.0,
+            softness: self.softness,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
             cascade_splits: [f32::MAX; 4],
         };
 
@@ -741,7 +1008,9 @@ impl ShadowMapper {
         // must upload all model uniforms *before* opening any render pass, since
         // buffer writes can't be interleaved with an active pass.
         let mut models: Vec<ShadowModelUniforms> = Vec::new();
-        scene.data().collect_shadow_models(&mut |transform, scale| {
+        let mut has_transparent = false;
+        scene.data().collect_shadow_models(&mut |transform, scale, color| {
+            has_transparent |= color.a < OPAQUE_ALPHA_THRESHOLD;
             let scale_mat = glamx::Mat3::from_diagonal(scale).to_cols_array_2d();
             models.push(ShadowModelUniforms {
                 transform: transform.to_mat4().to_cols_array_2d(),
@@ -750,6 +1019,7 @@ impl ShadowMapper {
                     [scale_mat[1][0], scale_mat[1][1], scale_mat[1][2], 0.0],
                     [scale_mat[2][0], scale_mat[2][1], scale_mat[2][2], 0.0],
                 ],
+                color: [color.r, color.g, color.b, color.a],
             });
         });
 
@@ -786,36 +1056,91 @@ impl ShadowMapper {
         // Render scene depth into each scheduled atlas layer.
         for view in &views {
             let depth_view = &self.layer_views[view.layer as usize];
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shadow_depth_pass"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: depth_view,
-                    depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(1.0),
-                        store: wgpu::StoreOp::Store,
-                    }),
-                    stencil_ops: None,
-                }),
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            pass.set_pipeline(&self.depth_pipeline);
             let offset = (view.layer as u64 * SHADOW_VIEW_STRIDE) as u32;
-            pass.set_bind_group(0, &self.view_bind_group, &[offset]);
 
-            // Re-traverse the scene in collection order, binding each object's slot.
-            let mut object_index = 0u32;
-            scene.data_mut().render_depth_only(
-                &mut pass,
-                &self.model_bind_group,
-                SHADOW_VIEW_STRIDE as u32,
-                &mut object_index,
-            );
+            // Pass 1: opaque casters write depth (the binary-visibility map).
+            {
+                let depth_ts = gpu.render_scope("shadows");
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("shadow_depth_pass"),
+                    color_attachments: &[],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: depth_ts,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+
+                pass.set_pipeline(&self.depth_pipeline);
+                pass.set_bind_group(0, &self.view_bind_group, &[offset]);
+
+                // Re-traverse in collection order, binding each object's slot.
+                let mut object_index = 0u32;
+                scene.data_mut().render_shadow_casters(
+                    &mut pass,
+                    &self.model_bind_group,
+                    SHADOW_VIEW_STRIDE as u32,
+                    &mut object_index,
+                    false,
+                    OPAQUE_ALPHA_THRESHOLD,
+                );
+            }
+
+            // Pass 2: translucent casters accumulate colored transmittance, depth-
+            // tested (read-only) against the opaque depth just written. Skipped
+            // entirely when nothing translucent casts, leaving the all-opaque path
+            // untouched.
+            if has_transparent {
+                let transmittance_view = &self.transmittance_layer_views[view.layer as usize];
+                let transmittance_ts = gpu.render_scope("shadows");
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("shadow_transmittance_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: transmittance_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // White = fully transmitting; occluders multiply into it.
+                            load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: depth_view,
+                        // Read-only: keep the opaque depths, don't write.
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: transmittance_ts,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+
+                pass.set_pipeline(&self.transmittance_pipeline);
+                pass.set_bind_group(0, &self.view_bind_group, &[offset]);
+
+                let mut object_index = 0u32;
+                scene.data_mut().render_shadow_casters(
+                    &mut pass,
+                    &self.model_bind_group,
+                    SHADOW_VIEW_STRIDE as u32,
+                    &mut object_index,
+                    true,
+                    OPAQUE_ALPHA_THRESHOLD,
+                );
+            }
         }
 
+        uniforms.transmittance_enabled = if has_transparent { 1.0 } else { 0.0 };
         ctxt.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&uniforms));
     }
 
@@ -924,6 +1249,24 @@ pub fn shadow_bind_group_layout(ctxt: &Context) -> wgpu::BindGroupLayout {
                     has_dynamic_offset: false,
                     min_binding_size: None,
                 },
+                count: None,
+            },
+            // Colored transmittance atlas (2D array, filtered).
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            // Filtering sampler for the transmittance atlas.
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                 count: None,
             },
         ],

@@ -140,13 +140,19 @@ struct HdrTargets {
     scene_msaa_texture: Option<wgpu::Texture>,
     scene_msaa_view: Option<wgpu::TextureView>,
     bloom_mips: Vec<BloomMip>,
-    // Weighted-blended OIT targets (single-sample): premultiplied weighted color
-    // accumulator and revealage. The transparent geometry pass renders into these;
-    // `composite_oit` blends the result over the opaque HDR scene.
+    // Weighted-blended OIT targets: premultiplied weighted color accumulator and
+    // revealage. The transparent geometry pass renders into these; `composite_oit`
+    // samples them (always the single-sample copies) and blends the result over the
+    // opaque HDR scene. When MSAA is active, the geometry pass renders into the
+    // multisampled `*_msaa` attachments and resolves into the single-sample ones.
     oit_accum_texture: wgpu::Texture,
     oit_accum_view: wgpu::TextureView,
     oit_reveal_texture: wgpu::Texture,
     oit_reveal_view: wgpu::TextureView,
+    oit_accum_msaa_texture: Option<wgpu::Texture>,
+    oit_accum_msaa_view: Option<wgpu::TextureView>,
+    oit_reveal_msaa_texture: Option<wgpu::Texture>,
+    oit_reveal_msaa_view: Option<wgpu::TextureView>,
 }
 
 /// Owns the HDR scene target, bloom chain and resolve pipelines for the
@@ -172,12 +178,21 @@ pub struct HdrPipeline {
     // Bloom mip chain (single-sample HDR), smallest first index is mip 0 = half res.
     bloom_mips: Vec<BloomMip>,
 
-    // Weighted-blended OIT targets + composite pipeline.
+    // Weighted-blended OIT targets + composite pipeline. The `*_view`s are the
+    // single-sample targets the composite samples; the `*_msaa_view`s (present only
+    // under MSAA) are the multisampled render targets the geometry pass draws into
+    // and resolves from.
     _oit_accum_texture: wgpu::Texture,
     oit_accum_view: wgpu::TextureView,
     _oit_reveal_texture: wgpu::Texture,
     oit_reveal_view: wgpu::TextureView,
+    _oit_accum_msaa_texture: Option<wgpu::Texture>,
+    oit_accum_msaa_view: Option<wgpu::TextureView>,
+    _oit_reveal_msaa_texture: Option<wgpu::Texture>,
+    oit_reveal_msaa_view: Option<wgpu::TextureView>,
     oit_layout: wgpu::BindGroupLayout,
+    // Rebuilt whenever the sample count changes, since its `MultisampleState.count`
+    // must match the (MSAA) HDR scene attachment it composites into.
     oit_composite_pipeline: wgpu::RenderPipeline,
 
     sampler: wgpu::Sampler,
@@ -499,59 +514,7 @@ impl HdrPipeline {
                 },
             ],
         });
-        let oit_shader = ctxt.create_shader_module(
-            Some("hdr_oit_shader"),
-            include_str!("../builtin/hdr_oit.wgsl"),
-        );
-        let oit_pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("hdr_oit_pipeline_layout"),
-            bind_group_layouts: &[Some(&oit_layout)],
-            immediate_size: 0,
-        });
-        let oit_composite_pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("hdr_oit_composite_pipeline"),
-            layout: Some(&oit_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &oit_shader,
-                entry_point: Some("vs_main"),
-                buffers: std::slice::from_ref(&vertex_layout),
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &oit_shader,
-                entry_point: Some("fs_composite"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: HDR_FORMAT,
-                    blend: Some(wgpu::BlendState {
-                        color: wgpu::BlendComponent {
-                            src_factor: wgpu::BlendFactor::SrcAlpha,
-                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                            operation: wgpu::BlendOperation::Add,
-                        },
-                        alpha: wgpu::BlendComponent::REPLACE,
-                    }),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
-        });
+        let oit_composite_pipeline = Self::create_oit_composite_pipeline(&oit_layout, sample_count);
 
         let vertices = [
             QuadVertex {
@@ -600,6 +563,10 @@ impl HdrPipeline {
             oit_accum_view: targets.oit_accum_view,
             _oit_reveal_texture: targets.oit_reveal_texture,
             oit_reveal_view: targets.oit_reveal_view,
+            _oit_accum_msaa_texture: targets.oit_accum_msaa_texture,
+            oit_accum_msaa_view: targets.oit_accum_msaa_view,
+            _oit_reveal_msaa_texture: targets.oit_reveal_msaa_texture,
+            oit_reveal_msaa_view: targets.oit_reveal_msaa_view,
             oit_layout,
             oit_composite_pipeline,
             sampler,
@@ -658,6 +625,80 @@ impl HdrPipeline {
             },
         );
         tex
+    }
+
+    /// Builds the OIT composite pipeline for a given MSAA sample count.
+    ///
+    /// The composite blends the resolved transparent color over the opaque HDR scene
+    /// attachment, so its `MultisampleState.count` must match that attachment — hence
+    /// it is rebuilt whenever the sample count changes.
+    fn create_oit_composite_pipeline(
+        oit_layout: &wgpu::BindGroupLayout,
+        sample_count: u32,
+    ) -> wgpu::RenderPipeline {
+        let ctxt = Context::get();
+        let oit_shader = ctxt.create_shader_module(
+            Some("hdr_oit_shader"),
+            include_str!("../builtin/hdr_oit.wgsl"),
+        );
+        let oit_pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("hdr_oit_pipeline_layout"),
+            bind_group_layouts: &[Some(oit_layout)],
+            immediate_size: 0,
+        });
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            }],
+        };
+        ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("hdr_oit_composite_pipeline"),
+            layout: Some(&oit_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &oit_shader,
+                entry_point: Some("vs_main"),
+                buffers: std::slice::from_ref(&vertex_layout),
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &oit_shader,
+                entry_point: Some("fs_composite"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: HDR_FORMAT,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::REPLACE,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: sample_count.max(1),
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        })
     }
 
     /// (Re)creates the HDR scene target and bloom chain textures.
@@ -739,8 +780,10 @@ impl HdrPipeline {
             let _ = i;
         }
 
-        // Weighted-blended OIT targets (single-sample, full resolution).
-        let make_oit = |label: &str, format: wgpu::TextureFormat| {
+        // Weighted-blended OIT targets. The single-sample copies are always present
+        // (the composite samples them); under MSAA they double as the geometry pass's
+        // resolve destinations.
+        let make_oit = |label: &str, format: wgpu::TextureFormat, samples: u32| {
             let tex = ctxt.create_texture(&wgpu::TextureDescriptor {
                 label: Some(label),
                 size: wgpu::Extent3d {
@@ -749,18 +792,31 @@ impl HdrPipeline {
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
-                sample_count: 1,
+                sample_count: samples,
                 dimension: wgpu::TextureDimension::D2,
                 format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                // The MSAA attachments are only ever rendered into and resolved, never
+                // sampled, so they don't need TEXTURE_BINDING.
+                usage: if samples > 1 {
+                    wgpu::TextureUsages::RENDER_ATTACHMENT
+                } else {
+                    wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING
+                },
                 view_formats: &[],
             });
             let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
             (tex, view)
         };
-        let (oit_accum_texture, oit_accum_view) = make_oit("hdr_oit_accum", OIT_ACCUM_FORMAT);
-        let (oit_reveal_texture, oit_reveal_view) = make_oit("hdr_oit_reveal", OIT_REVEAL_FORMAT);
+        let (oit_accum_texture, oit_accum_view) = make_oit("hdr_oit_accum", OIT_ACCUM_FORMAT, 1);
+        let (oit_reveal_texture, oit_reveal_view) = make_oit("hdr_oit_reveal", OIT_REVEAL_FORMAT, 1);
+        let (oit_accum_msaa_texture, oit_accum_msaa_view, oit_reveal_msaa_texture, oit_reveal_msaa_view) =
+            if sample_count > 1 {
+                let (at, av) = make_oit("hdr_oit_accum_msaa", OIT_ACCUM_FORMAT, sample_count);
+                let (rt, rv) = make_oit("hdr_oit_reveal_msaa", OIT_REVEAL_FORMAT, sample_count);
+                (Some(at), Some(av), Some(rt), Some(rv))
+            } else {
+                (None, None, None, None)
+            };
 
         HdrTargets {
             scene_texture,
@@ -772,6 +828,10 @@ impl HdrPipeline {
             oit_accum_view,
             oit_reveal_texture,
             oit_reveal_view,
+            oit_accum_msaa_texture,
+            oit_accum_msaa_view,
+            oit_reveal_msaa_texture,
+            oit_reveal_msaa_view,
         }
     }
 
@@ -783,6 +843,12 @@ impl HdrPipeline {
         if self.width == width && self.height == height && self.sample_count == sample_count {
             return;
         }
+        // The composite pipeline's sample count is baked in, so rebuild it when the
+        // sample count changes (cheap, and only happens on MSAA toggle / first frame).
+        if self.sample_count != sample_count {
+            self.oit_composite_pipeline =
+                Self::create_oit_composite_pipeline(&self.oit_layout, sample_count);
+        }
         let targets = Self::create_targets(width, height, sample_count);
         self._scene_texture = targets.scene_texture;
         self.scene_view = targets.scene_view;
@@ -793,6 +859,10 @@ impl HdrPipeline {
         self.oit_accum_view = targets.oit_accum_view;
         self._oit_reveal_texture = targets.oit_reveal_texture;
         self.oit_reveal_view = targets.oit_reveal_view;
+        self._oit_accum_msaa_texture = targets.oit_accum_msaa_texture;
+        self.oit_accum_msaa_view = targets.oit_accum_msaa_view;
+        self._oit_reveal_msaa_texture = targets.oit_reveal_msaa_texture;
+        self.oit_reveal_msaa_view = targets.oit_reveal_msaa_view;
         self.width = width;
         self.height = height;
         self.sample_count = sample_count;
@@ -814,22 +884,37 @@ impl HdrPipeline {
         }
     }
 
-    /// The weighted-blended OIT accumulation target (transparent geometry pass,
-    /// color attachment 0). Clear to transparent black before rendering.
+    /// The OIT accumulation attachment the transparent geometry pass renders into
+    /// (color attachment 0): the multisampled target under MSAA, the single-sample
+    /// one otherwise. Clear to transparent black before rendering.
     pub fn oit_accum_view(&self) -> &wgpu::TextureView {
-        &self.oit_accum_view
+        self.oit_accum_msaa_view.as_ref().unwrap_or(&self.oit_accum_view)
     }
 
-    /// The weighted-blended OIT revealage target (transparent geometry pass, color
-    /// attachment 1). Clear to white (1.0) before rendering.
+    /// The OIT revealage attachment the transparent geometry pass renders into (color
+    /// attachment 1): the multisampled target under MSAA, the single-sample one
+    /// otherwise. Clear to white (1.0) before rendering.
     pub fn oit_reveal_view(&self) -> &wgpu::TextureView {
-        &self.oit_reveal_view
+        self.oit_reveal_msaa_view.as_ref().unwrap_or(&self.oit_reveal_view)
+    }
+
+    /// MSAA resolve target for the OIT accumulation attachment (the single-sample
+    /// accum texture), or `None` when MSAA is disabled.
+    pub fn oit_accum_resolve_view(&self) -> Option<&wgpu::TextureView> {
+        self.oit_accum_msaa_view.as_ref().map(|_| &self.oit_accum_view)
+    }
+
+    /// MSAA resolve target for the OIT revealage attachment (the single-sample reveal
+    /// texture), or `None` when MSAA is disabled.
+    pub fn oit_reveal_resolve_view(&self) -> Option<&wgpu::TextureView> {
+        self.oit_reveal_msaa_view.as_ref().map(|_| &self.oit_reveal_view)
     }
 
     /// Composites the transparent OIT result over the opaque HDR scene. Run after
     /// the transparent geometry pass and before [`resolve`](Self::resolve).
     pub fn composite_oit(&self, encoder: &mut wgpu::CommandEncoder) {
         let ctxt = Context::get();
+        // Sample the single-sample (resolved, under MSAA) OIT targets.
         let bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("hdr_oit_composite_bind_group"),
             layout: &self.oit_layout,
@@ -847,8 +932,11 @@ impl HdrPipeline {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("hdr_oit_composite_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                // Blend over the (single-sample) opaque HDR scene.
-                view: &self.scene_view,
+                // Blend over the opaque HDR scene attachment (the MSAA attachment when
+                // multisampling is on — the composite pipeline matches its sample
+                // count — else the single-sample HDR texture). The scene's MSAA
+                // resolve happens afterwards in `window/rendering.rs`.
+                view: self.scene_render_view(),
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
@@ -1006,7 +1094,12 @@ impl HdrPipeline {
     /// The scene must already have been rendered into `scene_render_view` (and,
     /// if MSAA is active, resolved into the single-sample scene texture by the
     /// scene render pass's `resolve_target`).
-    pub fn resolve(&self, encoder: &mut wgpu::CommandEncoder, output_view: &wgpu::TextureView) {
+    pub(crate) fn resolve(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        output_view: &wgpu::TextureView,
+        gpu: &mut crate::renderer::timings::GpuTimer,
+    ) {
         let ctxt = Context::get();
 
         let bloom_enabled = self.settings.bloom_enabled && self.settings.bloom_intensity > 0.0;
@@ -1068,6 +1161,7 @@ impl HdrPipeline {
             ],
         });
 
+        let tonemap_ts = gpu.render_scope("tonemap");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("hdr_tonemap_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1080,7 +1174,7 @@ impl HdrPipeline {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: tonemap_ts,
             occlusion_query_set: None,
             multiview_mask: None,
         });

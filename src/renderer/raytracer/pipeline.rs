@@ -238,6 +238,7 @@ impl PathTracePipeline {
         env: &Environment,
         width: u32,
         height: u32,
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
         let ctxt = Context::get();
 
@@ -295,9 +296,10 @@ impl PathTracePipeline {
             ],
         });
 
+        let trace_ts = gpu.compute_scope("trace");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("rt_path_trace_pass"),
-            timestamp_writes: None,
+            timestamp_writes: trace_ts,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group0, &[]);
@@ -321,6 +323,7 @@ impl PathTracePipeline {
         env: &Environment,
         width: u32,
         height: u32,
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
         let ctxt = Context::get();
 
@@ -387,9 +390,10 @@ impl PathTracePipeline {
             ],
         });
 
+        let trace_ts = gpu.compute_scope("trace");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("rt_path_trace_pass_hw"),
-            timestamp_writes: None,
+            timestamp_writes: trace_ts,
         });
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, &group0, &[]);

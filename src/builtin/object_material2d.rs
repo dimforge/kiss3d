@@ -2,7 +2,8 @@ use crate::camera::Camera2d;
 use crate::context::Context;
 use crate::resource::vertex_index::VERTEX_INDEX_FORMAT;
 use crate::resource::{
-    DynamicUniformBuffer, GpuData, GpuMesh2d, Material2d, RenderContext2d, Texture,
+    multisample_state, DynamicUniformBuffer, GpuData, GpuMesh2d, Material2d, PipelineCache,
+    RenderContext2d, Texture,
 };
 use crate::scene::{InstancesBuffer2d, ObjectData2d};
 use bytemuck::{Pod, Zeroable};
@@ -297,15 +298,15 @@ impl GpuData for ObjectMaterial2dGpuData {
 /// - Object uniforms are accumulated in a dynamic buffer and flushed once
 /// - This significantly reduces the number of `write_buffer` calls per frame
 pub struct ObjectMaterial2d {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: PipelineCache,
     object_bind_group_layout: wgpu::BindGroupLayout,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     // Wireframe pipeline and layouts
-    wireframe_pipeline: wgpu::RenderPipeline,
+    wireframe_pipeline: PipelineCache,
     wireframe_view_bind_group_layout: wgpu::BindGroupLayout,
     wireframe_model_bind_group_layout: wgpu::BindGroupLayout,
     // Points pipeline and layouts
-    points_pipeline: wgpu::RenderPipeline,
+    points_pipeline: PipelineCache,
     points_view_bind_group_layout: wgpu::BindGroupLayout,
     points_model_bind_group_layout: wgpu::BindGroupLayout,
 
@@ -406,107 +407,108 @@ impl ObjectMaterial2d {
             include_str!("object2d.wgsl"),
         );
 
-        // Vertex buffer layouts
-        // Note: We use separate buffers for instance data (positions, colors, deformations)
-        // instead of interleaving them, to avoid per-frame data conversion overhead.
-        let vertex_buffer_layouts = [
-            // Buffer 0: Vertex positions (vec2)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
-                }],
-            },
-            // Buffer 1: Texture coordinates (vec2)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Vertex,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x2,
-                }],
-            },
-            // Buffer 2: Instance positions (Point2<f32>)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 2, // inst_tra
-                    format: wgpu::VertexFormat::Float32x2,
-                }],
-            },
-            // Buffer 3: Instance colors ([f32; 4])
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 3, // inst_color
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 4: Instance deformations (2x Vector2<f32> = 2 columns of 2x2 matrix)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress, // 2 vec2s
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[
-                    // inst_def_0 (column 0)
-                    wgpu::VertexAttribute {
+        // Main 2D surface pipeline, built lazily per MSAA sample count (2D content
+        // renders into the optionally-multisampled HDR film).
+        let pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            // Vertex buffer layouts
+            // Note: We use separate buffers for instance data (positions, colors, deformations)
+            // instead of interleaving them, to avoid per-frame data conversion overhead.
+            let vertex_buffer_layouts = [
+                // Buffer 0: Vertex positions (vec2)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
                         offset: 0,
-                        shader_location: 4,
+                        shader_location: 0,
                         format: wgpu::VertexFormat::Float32x2,
-                    },
-                    // inst_def_1 (column 1)
-                    wgpu::VertexAttribute {
-                        offset: 8, // 2 * sizeof(f32)
-                        shader_location: 5,
+                    }],
+                },
+                // Buffer 1: Texture coordinates (vec2)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 1,
                         format: wgpu::VertexFormat::Float32x2,
-                    },
-                ],
-            },
-        ];
+                    }],
+                },
+                // Buffer 2: Instance positions (Point2<f32>)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 2, // inst_tra
+                        format: wgpu::VertexFormat::Float32x2,
+                    }],
+                },
+                // Buffer 3: Instance colors ([f32; 4])
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 3, // inst_color
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                },
+                // Buffer 4: Instance deformations (2x Vector2<f32> = 2 columns of 2x2 matrix)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress, // 2 vec2s
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        // inst_def_0 (column 0)
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 4,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                        // inst_def_1 (column 1)
+                        wgpu::VertexAttribute {
+                            offset: 8, // 2 * sizeof(f32)
+                            shader_location: 5,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                    ],
+                },
+            ];
 
-        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("planar_material_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &vertex_buffer_layouts,
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None, // 2D objects typically don't need culling
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None, // 2D rendering typically doesn't use depth
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("planar_material_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &vertex_buffer_layouts,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None, // 2D objects typically don't need culling
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None, // 2D rendering typically doesn't use depth
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // Create wireframe bind group layouts
@@ -570,105 +572,105 @@ impl ObjectMaterial2d {
             include_str!("wireframe_polyline2d.wgsl"),
         );
 
-        // Wireframe instance vertex buffer layouts
-        let wireframe_instance_buffer_layouts = [
-            // Buffer 0: positions (Point2<f32>)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
-                }],
-            },
-            // Buffer 1: colors ([f32; 4]) - not used for wireframe but needed for consistency
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 2: deformations - both columns from same buffer with stride = 2*vec2
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress, // 2 vec2s = 16 bytes
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[
-                    // Column 0 at offset 0
-                    wgpu::VertexAttribute {
+        // Wireframe pipeline, built lazily per MSAA sample count.
+        let wireframe_pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            // Wireframe instance vertex buffer layouts
+            let wireframe_instance_buffer_layouts = [
+                // Buffer 0: positions (Point2<f32>)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
                         offset: 0,
-                        shader_location: 2,
+                        shader_location: 0,
                         format: wgpu::VertexFormat::Float32x2,
-                    },
-                    // Column 1 at offset 8
-                    wgpu::VertexAttribute {
-                        offset: 8,
-                        shader_location: 3,
-                        format: wgpu::VertexFormat::Float32x2,
-                    },
-                ],
-            },
-            // Buffer 3: lines_colors ([f32; 4])
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 4,
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 4: lines_widths (f32)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<f32>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32,
-                }],
-            },
-        ];
+                    }],
+                },
+                // Buffer 1: colors ([f32; 4]) - not used for wireframe but needed for consistency
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 1,
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                },
+                // Buffer 2: deformations - both columns from same buffer with stride = 2*vec2
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress, // 2 vec2s = 16 bytes
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        // Column 0 at offset 0
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                        // Column 1 at offset 8
+                        wgpu::VertexAttribute {
+                            offset: 8,
+                            shader_location: 3,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                    ],
+                },
+                // Buffer 3: lines_colors ([f32; 4])
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 4,
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                },
+                // Buffer 4: lines_widths (f32)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<f32>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 5,
+                        format: wgpu::VertexFormat::Float32,
+                    }],
+                },
+            ];
 
-        let wireframe_pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("planar_wireframe_pipeline"),
-            layout: Some(&wireframe_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &wireframe_shader,
-                entry_point: Some("vs_main"),
-                buffers: &wireframe_instance_buffer_layouts,
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &wireframe_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("planar_wireframe_pipeline"),
+                layout: Some(&wireframe_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &wireframe_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &wireframe_instance_buffer_layouts,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &wireframe_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // Create points bind group layouts (same view layout as wireframe)
@@ -731,105 +733,105 @@ impl ObjectMaterial2d {
             include_str!("wireframe_points2d.wgsl"),
         );
 
-        // Points instance vertex buffer layouts (same as wireframe but with points_colors/sizes)
-        let points_instance_buffer_layouts = [
-            // Buffer 0: positions (Point2<f32>)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
-                }],
-            },
-            // Buffer 1: colors ([f32; 4]) - not used for points but needed for consistency
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 2: deformations - both columns from same buffer with stride = 2*vec2
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[
-                    // Column 0 at offset 0
-                    wgpu::VertexAttribute {
+        // Points pipeline, built lazily per MSAA sample count.
+        let points_pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            // Points instance vertex buffer layouts (same as wireframe but with points_colors/sizes)
+            let points_instance_buffer_layouts = [
+                // Buffer 0: positions (Point2<f32>)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 2]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
                         offset: 0,
-                        shader_location: 2,
+                        shader_location: 0,
                         format: wgpu::VertexFormat::Float32x2,
-                    },
-                    // Column 1 at offset 8
-                    wgpu::VertexAttribute {
-                        offset: 8,
-                        shader_location: 3,
-                        format: wgpu::VertexFormat::Float32x2,
-                    },
-                ],
-            },
-            // Buffer 3: points_colors ([f32; 4])
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 4,
-                    format: wgpu::VertexFormat::Float32x4,
-                }],
-            },
-            // Buffer 4: points_sizes (f32)
-            wgpu::VertexBufferLayout {
-                array_stride: std::mem::size_of::<f32>() as wgpu::BufferAddress,
-                step_mode: wgpu::VertexStepMode::Instance,
-                attributes: &[wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 5,
-                    format: wgpu::VertexFormat::Float32,
-                }],
-            },
-        ];
+                    }],
+                },
+                // Buffer 1: colors ([f32; 4]) - not used for points but needed for consistency
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 1,
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                },
+                // Buffer 2: deformations - both columns from same buffer with stride = 2*vec2
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[
+                        // Column 0 at offset 0
+                        wgpu::VertexAttribute {
+                            offset: 0,
+                            shader_location: 2,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                        // Column 1 at offset 8
+                        wgpu::VertexAttribute {
+                            offset: 8,
+                            shader_location: 3,
+                            format: wgpu::VertexFormat::Float32x2,
+                        },
+                    ],
+                },
+                // Buffer 3: points_colors ([f32; 4])
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 4,
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                },
+                // Buffer 4: points_sizes (f32)
+                wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<f32>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 5,
+                        format: wgpu::VertexFormat::Float32,
+                    }],
+                },
+            ];
 
-        let points_pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("planar_points_pipeline"),
-            layout: Some(&points_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &points_shader,
-                entry_point: Some("vs_main"),
-                buffers: &points_instance_buffer_layouts,
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &points_shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("planar_points_pipeline"),
+                layout: Some(&points_pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &points_shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &points_instance_buffer_layouts,
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &points_shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // === Create shared dynamic buffer resources ===
@@ -1346,7 +1348,7 @@ impl Material2d for ObjectMaterial2d {
         instances: &mut InstancesBuffer2d,
         gpu_data: &mut dyn GpuData,
         render_pass: &mut wgpu::RenderPass<'_>,
-        _context: &RenderContext2d,
+        context: &RenderContext2d,
     ) {
         // Downcast gpu_data to our specific type
         let gpu_data = gpu_data
@@ -1427,7 +1429,8 @@ impl Material2d for ObjectMaterial2d {
             };
             let object_bind_group = self.object_bind_group.as_ref().unwrap();
 
-            render_pass.set_pipeline(&self.pipeline);
+            let pipeline = self.pipeline.get(context.sample_count);
+            render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
             // Use dynamic offset for object uniforms!
             render_pass.set_bind_group(1, object_bind_group, &[object_offset]);
@@ -1458,7 +1461,8 @@ impl Material2d for ObjectMaterial2d {
                 None => return,
             };
 
-            render_pass.set_pipeline(&self.wireframe_pipeline);
+            let wireframe_pipeline = self.wireframe_pipeline.get(context.sample_count);
+            render_pass.set_pipeline(&wireframe_pipeline);
             render_pass.set_bind_group(0, wireframe_view_bind_group, &[]);
             render_pass.set_bind_group(1, wireframe_model_bind_group, &[]);
 
@@ -1485,7 +1489,8 @@ impl Material2d for ObjectMaterial2d {
                 None => return,
             };
 
-            render_pass.set_pipeline(&self.points_pipeline);
+            let points_pipeline = self.points_pipeline.get(context.sample_count);
+            render_pass.set_pipeline(&points_pipeline);
             render_pass.set_bind_group(0, points_view_bind_group, &[]);
             render_pass.set_bind_group(1, points_model_bind_group, &[]);
 

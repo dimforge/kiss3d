@@ -221,6 +221,7 @@ impl Tonemap {
         output_view: &wgpu::TextureView,
         dst_width: u32,
         dst_height: u32,
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
         let ctxt = Context::get();
 
@@ -261,6 +262,7 @@ impl Tonemap {
             ],
         });
 
+        let tonemap_ts = gpu.render_scope("tonemap");
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("rt_tonemap_render_pass"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -273,7 +275,7 @@ impl Tonemap {
                 depth_slice: None,
             })],
             depth_stencil_attachment: None,
-            timestamp_writes: None,
+            timestamp_writes: tonemap_ts,
             occlusion_query_set: None,
             multiview_mask: None,
         });

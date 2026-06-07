@@ -5,7 +5,7 @@
 use crate::camera::Camera2d;
 use crate::color::Color;
 use crate::context::Context;
-use crate::resource::RenderContext2dEncoder;
+use crate::resource::{multisample_state, PipelineCache, RenderContext2dEncoder};
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat3, Pose2, Vec2};
 
@@ -85,7 +85,7 @@ impl Polyline2d {
 
 /// Structure which manages the display of 2D polylines with configurable width.
 pub struct PolylineRenderer2d {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: PipelineCache,
     view_bind_group_layout: wgpu::BindGroupLayout,
     view_uniform_buffer: wgpu::Buffer,
     segment_buffer: wgpu::Buffer,
@@ -133,74 +133,75 @@ impl PolylineRenderer2d {
             include_str!("../builtin/polyline2d.wgsl"),
         );
 
-        // Vertex buffer layout - each instance is a line segment with material data
-        let vertex_buffer_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<LineSegment2D>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &[
-                // point_a (vec2)
-                wgpu::VertexAttribute {
-                    offset: 0,
-                    shader_location: 0,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                // width (f32)
-                wgpu::VertexAttribute {
-                    offset: 8,
-                    shader_location: 1,
-                    format: wgpu::VertexFormat::Float32,
-                },
-                // point_b (vec2) - offset 16 (after point_a[2] + width + _pad1)
-                wgpu::VertexAttribute {
-                    offset: 16,
-                    shader_location: 2,
-                    format: wgpu::VertexFormat::Float32x2,
-                },
-                // color (vec4) - offset 32 (after point_b[2] + _pad2[2])
-                wgpu::VertexAttribute {
-                    offset: 32,
-                    shader_location: 3,
-                    format: wgpu::VertexFormat::Float32x4,
-                },
-            ],
-        };
+        // Built lazily per MSAA sample count: 2D polylines render into the
+        // (optionally multisampled) HDR film.
+        let pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            // Vertex buffer layout - each instance is a line segment with material data
+            let vertex_buffer_layout = wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<LineSegment2D>() as wgpu::BufferAddress,
+                step_mode: wgpu::VertexStepMode::Instance,
+                attributes: &[
+                    // point_a (vec2)
+                    wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 0,
+                        format: wgpu::VertexFormat::Float32x2,
+                    },
+                    // width (f32)
+                    wgpu::VertexAttribute {
+                        offset: 8,
+                        shader_location: 1,
+                        format: wgpu::VertexFormat::Float32,
+                    },
+                    // point_b (vec2) - offset 16 (after point_a[2] + width + _pad1)
+                    wgpu::VertexAttribute {
+                        offset: 16,
+                        shader_location: 2,
+                        format: wgpu::VertexFormat::Float32x2,
+                    },
+                    // color (vec4) - offset 32 (after point_b[2] + _pad2[2])
+                    wgpu::VertexAttribute {
+                        offset: 32,
+                        shader_location: 3,
+                        format: wgpu::VertexFormat::Float32x4,
+                    },
+                ],
+            };
 
-        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("planar_polyline_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[vertex_buffer_layout],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None, // 2D rendering doesn't use depth
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("planar_polyline_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[vertex_buffer_layout],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None, // 2D rendering doesn't use depth
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // Create view uniform buffer
@@ -319,6 +320,8 @@ impl PolylineRenderer2d {
         // Create bind group
         let view_bind_group = self.create_view_bind_group();
 
+        let pipeline = self.pipeline.get(context.sample_count);
+
         // Create render pass (no depth for 2D)
         {
             let mut render_pass = context
@@ -340,7 +343,7 @@ impl PolylineRenderer2d {
                     multiview_mask: None,
                 });
 
-            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, &view_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.segment_buffer.slice(..));
 

@@ -93,15 +93,16 @@ async fn main() {
     let mut pathtrace = false;
 
     loop {
+        // Exposure and tonemap live on the window's HDR settings and drive both
+        // the rasterizer and the path tracer.
+        window.set_tonemap(tonemap);
+        window.set_exposure(exposure);
+
         let still_open = if pathtrace {
-            raytracer.set_tonemap(tonemap);
-            raytracer.set_exposure(exposure);
             window
-                .render_raytraced(&mut scene, &mut camera, &mut raytracer)
+                .raytrace_3d(&mut scene, &mut camera, &mut raytracer)
                 .await
         } else {
-            window.set_tonemap(tonemap);
-            window.set_exposure(exposure);
             window.set_bloom_enabled(bloom);
             window.render_3d(&mut scene, &mut camera).await
         };

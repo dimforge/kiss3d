@@ -3,7 +3,7 @@
 //! The path tracer renders the existing scene graph (meshes, PBR materials,
 //! lights, camera) by Monte-Carlo path tracing on the GPU, accumulating samples
 //! across frames for a noise-free, physically-based image. It is driven through
-//! [`Window::render_raytraced`](crate::window::Window::render_raytraced).
+//! [`Window::raytrace_3d`](crate::window::Window::raytrace_3d).
 //!
 //! Two backends share the same shading kernel:
 //! - **Compute** (always available): traverses a CPU-built BVH in a compute
@@ -53,7 +53,7 @@ pub enum RayBackend {
 /// Construct one with [`RayTracer::new`] after a [`Window`](crate::window::Window)
 /// exists (the GPU context must be initialized), keep it alive across frames so
 /// accumulation can progress, and pass it to
-/// [`Window::render_raytraced`](crate::window::Window::render_raytraced).
+/// [`Window::raytrace_3d`](crate::window::Window::raytrace_3d).
 pub struct RayTracer {
     backend: RayBackend,
     pipeline: PathTracePipeline,
@@ -64,10 +64,6 @@ pub struct RayTracer {
     sample_index: u32,
     max_bounces: u32,
     samples_per_frame: u32,
-    exposure: f32,
-    /// Tonemap operator applied by the final pass (shared with the rasterizer's
-    /// set of operators). Defaults to Khronos PBR Neutral, matching the rasterizer.
-    tonemap_op: crate::post_processing::Tonemap,
     interactive_scale: f32,
     /// Thin-lens aperture radius (0 = pinhole). See [`RayTracer::set_aperture`].
     lens_radius: f32,
@@ -88,6 +84,10 @@ pub struct RayTracer {
     denoise_enabled: bool,
     /// Number of à-trous iterations when denoising is enabled.
     denoise_iterations: u32,
+    /// Whether path tracing is active. When `false`,
+    /// [`Window::raytrace_3d`](crate::window::Window::raytrace_3d)
+    /// falls back to the rasterizer instead of tracing. Enabled by default.
+    enabled: bool,
 }
 
 /// Caps `(width, height)` to at most `max_pixels` while preserving aspect ratio.
@@ -103,6 +103,36 @@ fn capped_resolution(width: u32, height: u32, max_pixels: u64) -> (u32, u32) {
     let rw = ((width as f64 * scale).floor() as u32).max(1);
     let rh = ((height as f64 * scale).floor() as u32).max(1);
     (rw, rh)
+}
+
+/// Number of à-trous denoiser iterations to run given the configured maximum and
+/// how many samples have accumulated into the current image.
+///
+/// Path-traced noise falls off with the sample count, so full-strength filtering
+/// is only worthwhile for the first handful of samples; beyond that the
+/// iteration count tapers (log-linearly in the sample count) and, once the image
+/// is effectively converged, drops to `0` so the denoiser is skipped entirely.
+/// `sample_index` resets on any camera/scene/resolution change, so a fresh,
+/// noisy image always gets full-strength filtering again.
+fn effective_denoise_iterations(max_iterations: u32, samples: u32) -> u32 {
+    if max_iterations == 0 {
+        return 0;
+    }
+    /// At or below this sample count the image is still noisy: full strength.
+    const FULL: u32 = 16;
+    /// At or above this sample count it is effectively converged: skip it.
+    const CONVERGED: u32 = 512;
+
+    if samples <= FULL {
+        return max_iterations;
+    }
+    if samples >= CONVERGED {
+        return 0;
+    }
+    // Taper from `max_iterations` (at FULL samples) down towards 0 (at CONVERGED).
+    let t = (samples as f32 / FULL as f32).log2() / (CONVERGED as f32 / FULL as f32).log2();
+    let iterations = (max_iterations as f32 * (1.0 - t)).ceil() as u32;
+    iterations.max(1)
 }
 
 impl RayTracer {
@@ -137,8 +167,6 @@ impl RayTracer {
             sample_index: 0,
             max_bounces: 8,
             samples_per_frame: 1,
-            exposure: 1.0,
-            tonemap_op: crate::post_processing::Tonemap::default(),
             interactive_scale: 0.5,
             lens_radius: 0.0,
             focus_distance: 1.0,
@@ -150,6 +178,7 @@ impl RayTracer {
             max_pixels,
             denoise_enabled: false,
             denoise_iterations: 5,
+            enabled: true,
         }
     }
 
@@ -171,24 +200,31 @@ impl RayTracer {
         self.backend
     }
 
+    /// Whether path tracing is active (enabled by default).
+    ///
+    /// See [`set_enabled`](Self::set_enabled).
+    pub fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Enables or disables path tracing.
+    ///
+    /// When disabled, [`Window::raytrace_3d`](crate::window::Window::raytrace_3d)
+    /// renders the scene with the rasterizer instead of tracing it (the same
+    /// output as [`Window::render_3d`](crate::window::Window::render_3d)), while
+    /// keeping this `RayTracer` and its accumulated samples around so tracing can
+    /// resume when re-enabled. Useful for cheaply A/B-ing the two renderers
+    /// without restructuring the render loop. Does not reset accumulation.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
     /// Sets the maximum path length (number of bounces). Resets accumulation.
     pub fn set_max_bounces(&mut self, bounces: u32) {
         if self.max_bounces != bounces {
             self.max_bounces = bounces.max(1);
             self.dirty = true;
         }
-    }
-
-    /// Sets the tonemap exposure multiplier. Does not reset accumulation.
-    pub fn set_exposure(&mut self, exposure: f32) {
-        self.exposure = exposure;
-    }
-
-    /// Sets the tonemap operator applied to the final image (the same operators
-    /// as the rasterizer; see [`Tonemap`](crate::post_processing::Tonemap)).
-    /// Does not reset accumulation.
-    pub fn set_tonemap(&mut self, tonemap: crate::post_processing::Tonemap) {
-        self.tonemap_op = tonemap;
     }
 
     /// Enables or disables the edge-aware à-trous denoiser (default off).
@@ -346,7 +382,7 @@ impl RayTracer {
     /// Renders one path-traced frame: refreshes the GPU scene, decides whether to
     /// restart accumulation, dispatches the tracer, and tonemaps to `output_view`.
     ///
-    /// Called by `Window::render_raytraced`; `lights` must already be populated
+    /// Called by `Window::raytrace_3d`; `lights` must already be populated
     /// (which also propagates the scene's world transforms).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn render_frame(
@@ -359,6 +395,14 @@ impl RayTracer {
         output_view: &wgpu::TextureView,
         width: u32,
         height: u32,
+        // Exposure and tonemap operator are shared with the rasterizer's
+        // `HdrSettings` (passed in by `Window::raytrace_3d_frame`) so both
+        // renderers display with the same finishing.
+        exposure: f32,
+        tonemap_operator: u32,
+        // Records the path tracer's GPU phases (trace / denoise / tonemap) via
+        // per-pass timestamp queries; see `RenderTimings`.
+        gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
         // Detect what changed this frame. A moving camera *or* a moving/changed
         // scene both invalidate the accumulated image — there is no longer a
@@ -441,6 +485,7 @@ impl RayTracer {
                     &self.environment,
                     render_width,
                     render_height,
+                    gpu,
                 );
             }
             #[cfg(feature = "hw_raytracer")]
@@ -452,6 +497,7 @@ impl RayTracer {
                     &self.environment,
                     render_width,
                     render_height,
+                    gpu,
                 );
             }
         }
@@ -459,9 +505,22 @@ impl RayTracer {
         // Run the edge-aware denoiser (operating on the accumulation/guide
         // buffers at the traced resolution) and tonemap its output; otherwise
         // tonemap the raw accumulation directly, preserving the original path.
-        let radiance = if self.denoise_enabled {
+        //
+        // The number of à-trous iterations is scaled down as the image
+        // converges: Monte-Carlo noise shrinks with the sample count, so heavy
+        // filtering is only needed for the first few samples. Once effectively
+        // converged the denoiser is skipped entirely and the raw accumulation is
+        // displayed — saving several full-resolution compute passes per frame on
+        // a static, converged view. `sample_index` is still the pre-frame count
+        // here (it is advanced below), so add this frame's `spp`.
+        let effective_iterations = if self.denoise_enabled {
+            effective_denoise_iterations(self.denoise_iterations, self.sample_index + spp)
+        } else {
+            0
+        };
+        let radiance = if effective_iterations > 0 {
             self.denoise
-                .run(encoder, &self.accum, self.denoise_iterations)
+                .run(encoder, &self.accum, effective_iterations, gpu)
         } else {
             &self.accum.buffer
         };
@@ -470,11 +529,12 @@ impl RayTracer {
             encoder,
             &self.accum,
             radiance,
-            self.exposure,
-            self.tonemap_op.as_u32(),
+            exposure,
+            tonemap_operator,
             output_view,
             width,
             height,
+            gpu,
         );
 
         self.sample_index += spp;

@@ -73,7 +73,7 @@ async fn main() {
     raytracer.set_denoise_iterations(5);
 
     while window
-        .render_raytraced(&mut scene, &mut camera, &mut raytracer)
+        .raytrace_3d(&mut scene, &mut camera, &mut raytracer)
         .await
     {}
 }

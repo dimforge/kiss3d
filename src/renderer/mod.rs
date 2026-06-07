@@ -8,6 +8,7 @@ pub use self::polyline_renderer2d::{Polyline2d, PolylineRenderer2d};
 pub use self::polyline_renderer3d::{Polyline3d, PolylineRenderer3d};
 pub use self::raytracer::{RayBackend, RayTracer};
 pub use self::renderer::Renderer3d;
+pub use self::timings::RenderTimings;
 
 #[cfg(feature = "egui")]
 mod egui_renderer;
@@ -17,3 +18,4 @@ pub mod polyline_renderer2d;
 pub mod polyline_renderer3d;
 pub mod raytracer;
 mod renderer;
+pub mod timings;

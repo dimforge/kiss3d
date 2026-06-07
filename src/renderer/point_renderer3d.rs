@@ -4,7 +4,7 @@ use crate::camera::Camera3d;
 use crate::color::Color;
 use crate::context::Context;
 use crate::renderer::Renderer3d;
-use crate::resource::RenderContext;
+use crate::resource::{multisample_state, PipelineCache, RenderContext};
 use bytemuck::{Pod, Zeroable};
 use glamx::Vec3;
 
@@ -30,7 +30,7 @@ struct FrameUniforms {
 
 /// Structure which manages the display of short-living points.
 pub struct PointRenderer3d {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: PipelineCache,
     bind_group_layout: wgpu::BindGroupLayout,
     frame_uniform_buffer: wgpu::Buffer,
     point_storage_buffer: wgpu::Buffer,
@@ -90,49 +90,50 @@ impl PointRenderer3d {
             include_str!("../builtin/points3d.wgsl"),
         );
 
-        // No vertex buffers - using storage buffer and vertex_index
-        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("point_renderer_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: Context::depth_format(),
-                depth_write_enabled: Some(true),
-                depth_compare: Some(wgpu::CompareFunction::Less),
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+        // No vertex buffers - using storage buffer and vertex_index. Built lazily
+        // per MSAA sample count: points render into the (optionally multisampled)
+        // HDR film.
+        let pipeline = PipelineCache::new(move |sample_count| {
+            let ctxt = Context::get();
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("point_renderer_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: Context::depth_format(),
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::Less),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: multisample_state(sample_count),
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // Create uniform buffer
@@ -258,7 +259,8 @@ impl Renderer3d for PointRenderer3d {
         // Create bind group
         let bind_group = self.create_bind_group();
 
-        render_pass.set_pipeline(&self.pipeline);
+        let pipeline = self.pipeline.get(context.sample_count);
+        render_pass.set_pipeline(&pipeline);
         render_pass.set_bind_group(0, &bind_group, &[]);
 
         // Draw 6 vertices per point (2 triangles forming a quad)

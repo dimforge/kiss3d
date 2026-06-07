@@ -76,6 +76,21 @@ impl SceneNodeData3d {
         self.object.is_some()
     }
 
+    /// Whether this node has a [`Light`] attached.
+    #[inline]
+    pub fn has_light(&self) -> bool {
+        self.light.is_some()
+    }
+
+    /// The direct children of this node.
+    ///
+    /// Useful for walking the scene graph (e.g. to build a tree view). The
+    /// returned handles are cheap `Rc` clones of the children when collected.
+    #[inline]
+    pub fn children(&self) -> &[SceneNode3d] {
+        &self.children
+    }
+
     /// Whether this node has no parent.
     #[inline]
     pub fn is_root(&self) -> bool {
@@ -233,11 +248,11 @@ impl SceneNodeData3d {
     ///
     /// [`render_depth_only`]: Self::render_depth_only
     #[doc(hidden)]
-    pub fn collect_shadow_models(&self, f: &mut dyn FnMut(Pose3, Vec3)) {
+    pub fn collect_shadow_models(&self, f: &mut dyn FnMut(Pose3, Vec3, Color)) {
         if self.visible {
             if let Some(ref o) = self.object {
                 if o.casts_shadows() {
-                    f(self.world_transform, self.world_scale);
+                    f(self.world_transform, self.world_scale, o.data().color());
                 }
             }
             for c in self.children.iter() {
@@ -340,18 +355,24 @@ impl SceneNodeData3d {
         }
     }
 
-    /// Draws every shadow-casting object's depth into the active shadow pass.
+    /// Draws shadow-casting objects' geometry into the active shadow pass,
+    /// filtered by opacity: `only_transparent == false` draws the opaque casters
+    /// (depth pre-pass), `true` draws the transparent ones (colored transmittance
+    /// pass). An object counts as transparent when its color alpha is below
+    /// `alpha_threshold`.
     ///
-    /// `object_index` is incremented for each drawn object and used to compute the
-    /// per-object model uniform offset; it must match the order used by
-    /// [`collect_shadow_models`](Self::collect_shadow_models).
+    /// `object_index` is incremented for **every** caster regardless of the
+    /// filter, so each object keeps the same per-object model-uniform slot as
+    /// [`collect_shadow_models`](Self::collect_shadow_models) assigned it.
     #[doc(hidden)]
-    pub fn render_depth_only(
+    pub fn render_shadow_casters(
         &mut self,
         render_pass: &mut wgpu::RenderPass<'_>,
         model_bind_group: &wgpu::BindGroup,
         model_stride: u32,
         object_index: &mut u32,
+        only_transparent: bool,
+        alpha_threshold: f32,
     ) {
         if !self.visible {
             return;
@@ -359,15 +380,26 @@ impl SceneNodeData3d {
 
         if let Some(ref mut o) = self.object {
             if o.casts_shadows() {
-                let offset = *object_index * model_stride;
-                o.render_depth_only(render_pass, model_bind_group, offset);
+                let transparent = o.data().color().a < alpha_threshold;
+                if transparent == only_transparent {
+                    let offset = *object_index * model_stride;
+                    o.render_depth_only(render_pass, model_bind_group, offset);
+                }
+                // Increment for every caster so slots stay aligned across both passes.
                 *object_index += 1;
             }
         }
 
         for c in self.children.iter_mut() {
             let mut bc = c.data_mut();
-            bc.render_depth_only(render_pass, model_bind_group, model_stride, object_index);
+            bc.render_shadow_casters(
+                render_pass,
+                model_bind_group,
+                model_stride,
+                object_index,
+                only_transparent,
+                alpha_threshold,
+            );
         }
     }
 
@@ -763,6 +795,23 @@ impl SceneNode3d {
     /// A `RefMut` guard to the `SceneNodeData`
     pub fn data_mut(&mut self) -> RefMut<'_, SceneNodeData3d> {
         self.data.borrow_mut()
+    }
+
+    /// A stable, process-unique identifier for this node, derived from the
+    /// address of its shared data.
+    ///
+    /// Two handles to the same node return the same id; the id stays valid for
+    /// as long as the node is alive. Useful as a key for per-node UI state (e.g.
+    /// the built-in inspector's scene tree).
+    #[inline]
+    pub fn ptr_id(&self) -> u64 {
+        Rc::as_ptr(&self.data) as *const () as u64
+    }
+
+    /// Whether `self` and `other` are handles to the same underlying node.
+    #[inline]
+    pub fn same_node(&self, other: &SceneNode3d) -> bool {
+        Rc::ptr_eq(&self.data, &other.data)
     }
 
     /*

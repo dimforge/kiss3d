@@ -16,6 +16,7 @@ use kiss3d::prelude::*;
 #[kiss3d::main]
 async fn main() {
     let mut window = Window::new("Kiss3d: order-independent transparency").await;
+    window.set_samples(NumSamples::Four);
     window.set_background_color(Color::new(0.1, 0.11, 0.14, 1.0));
     window.set_ambient(0.5);
 

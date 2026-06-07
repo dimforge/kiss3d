@@ -95,14 +95,14 @@ impl OffscreenSurface {
     ///
     /// Call repeatedly with the same [`RayTracer`] to accumulate samples (the
     /// camera is static off-screen, so accumulation only restarts on the first
-    /// frame). See [`Window::render_raytraced`].
-    pub async fn render_raytraced(
+    /// frame). See [`Window::raytrace_3d`].
+    pub async fn raytrace_3d(
         &mut self,
         scene: &mut SceneNode3d,
         camera: &mut impl Camera3d,
         raytracer: &mut RayTracer,
     ) {
-        let _ = self.window.render_raytraced(scene, camera, raytracer).await;
+        let _ = self.window.raytrace_3d(scene, camera, raytracer).await;
     }
 
     /// Path-traces a 3D scene for `samples` accumulated frames and returns the
@@ -115,7 +115,7 @@ impl OffscreenSurface {
         samples: u32,
     ) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
         for _ in 0..samples.max(1) {
-            self.render_raytraced(scene, camera, raytracer).await;
+            self.raytrace_3d(scene, camera, raytracer).await;
         }
         self.snap_image()
     }

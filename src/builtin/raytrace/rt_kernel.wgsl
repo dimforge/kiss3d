@@ -288,9 +288,15 @@ fn sample_analytic_light(light: RtLight, p: vec3<f32>, rng: ptr<function, u32>) 
     let dist2 = dot(d, d);
     ls.dist = sqrt(dist2);
     ls.wi = d / ls.dist;
-    let atten = 1.0 / max(dist2, 1e-4);
-    let win = pow(clamp(1.0 - pow(ls.dist / max(light.attenuation_radius, 1e-3), 4.0), 0.0, 1.0), 2.0);
-    ls.radiance = light.color * light.intensity * atten * win;
+    // Match the rasterizer's `calculate_point_attenuation`: a smooth window that
+    // reaches zero at `attenuation_radius`, with NO inverse-square term. kiss3d's
+    // light `intensity` is defined by that artistic model (the rasterizer is the
+    // reference), so using physical 1/d² falloff here would make the same point
+    // light look ~orders of magnitude dimmer under the path tracer.
+    let nd = ls.dist / max(light.attenuation_radius, 1e-3);
+    let win = clamp(1.0 - nd * nd, 0.0, 1.0);
+    let atten = win * win;
+    ls.radiance = light.color * light.intensity * atten;
     if (light.light_type == 2u) {
         let cd = dot(normalize(light.direction), -ls.wi);
         let sp = clamp((cd - light.outer_cone_cos) / max(light.inner_cone_cos - light.outer_cone_cos, 1e-3), 0.0, 1.0);
