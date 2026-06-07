@@ -10,7 +10,8 @@
 //! Run: `cargo run --example mirror`.
 
 use kiss3d::prelude::*;
-use std::f32::consts::{FRAC_PI_2, FRAC_PI_4};
+use std::f32::consts::FRAC_PI_2;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 #[kiss3d::main]
@@ -21,38 +22,44 @@ async fn main() {
 
     window.set_ambient(0.2);
     scene.add_light(Light::directional(Vec3::new(-0.4, -0.9, -0.3)).with_intensity(2.5));
+    #[cfg(not(target_arch = "wasm32"))]
     window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
+    #[cfg(target_arch = "wasm32")]
+    window.set_skybox_from_memory(include_bytes!("media/skybox.png"));
 
     // Horizontal floor mirror at y = 0: rotate the local-XY quad so its +Z normal
     // points up (+Y). The reflection is integrated into the PBR material, so the
     // floor keeps a dark tinted base color + glossy roughness with the reflection
     // blended on top (a partial, glossy mirror rather than a perfect one).
-    let mut floor = scene.add_reflector(16.0, 16.0);
-    floor.set_rotation(Quat::from_axis_angle(Vec3::X, -FRAC_PI_2));
-    floor.set_color(Color::new(0.06, 0.06, 0.08, 1.0));
-    floor.set_metallic(1.0);
-    floor.set_roughness(0.12);
-    floor.set_reflector_intensity(0.9);
+    scene
+        .add_reflector(16.0, 16.0)
+        .set_rotation(Quat::from_axis_angle(Vec3::X, -FRAC_PI_2))
+        .set_color(Color::new(0.06, 0.06, 0.08, 1.0))
+        .set_metallic(1.0)
+        .set_roughness(0.12)
+        .set_reflector_intensity(0.9);
 
     // Vertical wall mirror across the back, facing +Z (no rotation needed: the quad
     // already lies in XY with its normal along +Z). A near-white smooth surface →
     // close to a perfect mirror.
-    let mut wall = scene.add_reflector(10.0, 5.0);
-    wall.set_position(Vec3::new(0.0, 2.5, -5.0));
-    wall.set_color(Color::new(0.85, 0.88, 0.95, 1.0));
-    wall.set_metallic(1.0);
-    wall.set_roughness(0.05);
+    scene
+        .add_reflector(10.0, 5.0)
+        .set_position(Vec3::new(0.0, 2.5, -5.0))
+        .set_color(Color::new(0.85, 0.88, 0.95, 1.0))
+        .set_metallic(1.0)
+        .set_roughness(0.05);
 
     // A reflective sphere on the right: a planar reflector with a strong
     // normal-falloff.
-    let mut angled = scene.add_cylinder(1.5, 4.0);
-    angled.set_position(Vec3::new(5.5, 2.5, 0.0));
-    angled.set_metallic(0.7);
-    angled.set_roughness(0.08);
-    angled.set_reflector(Some(Reflector::new()));
-    angled.set_reflector_intensity(0.9);
-    angled.set_reflector_normal_falloff(1.0);
-    angled.set_reflector_normal(Vec3::new(-1.0, 0.0, 0.0));
+    scene
+        .add_cylinder(1.5, 4.0)
+        .set_position(Vec3::new(5.5, 2.5, 0.0))
+        .set_metallic(0.7)
+        .set_roughness(0.08)
+        .set_reflector(Some(Reflector::new()))
+        .set_reflector_intensity(0.9)
+        .set_reflector_normal_falloff(1.0)
+        .set_reflector_normal(Vec3::new(-1.0, 0.0, 0.0));
 
     // A ring of colored shapes floating above the floor (animated below).
     let palette = [
@@ -69,9 +76,7 @@ async fn main() {
         } else {
             scene.add_cube(1.1, 1.1, 1.1)
         };
-        s.set_color(*color);
-        s.set_metallic(0.2);
-        s.set_roughness(0.4);
+        s.set_color(*color).set_metallic(0.2).set_roughness(0.4);
         let base_angle = i as f32 / palette.len() as f32 * std::f32::consts::TAU;
         shapes.push((s, base_angle));
     }

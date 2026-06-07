@@ -30,6 +30,7 @@ struct FxaaUniforms {
 /// ```no_run
 /// # use kiss3d::prelude::*;
 /// # use kiss3d::post_processing::Fxaa;
+/// # #[kiss3d::main]
 /// # async fn main() {
 /// # let mut window = Window::new("Example").await;
 /// # let mut scene = SceneNode3d::empty();

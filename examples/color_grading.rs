@@ -30,10 +30,11 @@ async fn main() {
     let colors = [RED, Color::new(1.0, 0.6, 0.0, 1.0), YELLOW, LIME, BLUE];
     for (i, &col) in colors.iter().enumerate() {
         let x = (i as f32 - 2.0) * 1.8;
-        let mut s = scene.add_sphere(0.7);
-        s.translate(Vec3::new(x, 0.0, 0.0));
-        s.set_color(col);
-        s.set_roughness(0.4);
+        scene
+            .add_sphere(0.7)
+            .translate(Vec3::new(x, 0.0, 0.0))
+            .set_color(col)
+            .set_roughness(0.4);
     }
     scene
         .add_cube(14.0, 0.2, 6.0)

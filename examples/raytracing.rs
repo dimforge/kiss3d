@@ -76,7 +76,7 @@ async fn main() {
     // shadows the camera can actually see (a centered overhead light would hide
     // them straight underneath). Kept below the ceiling so it isn't occluded.
     scene
-        .add_light(Light::point(40.0).with_intensity(16.0))
+        .add_light(Light::point(40.0).with_intensity(1.0))
         .set_position(Vec3::new(-1.8, 3.6, -1.5));
 
     let mut raytracer = RayTracer::new();

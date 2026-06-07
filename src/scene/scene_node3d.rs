@@ -1341,6 +1341,20 @@ impl SceneNode3d {
         model
     }
 
+    /// Loads a glTF/GLB model from an in-memory byte slice and adds it as a child.
+    ///
+    /// Like [`add_gltf`](Self::add_gltf) but reads from memory instead of a path —
+    /// pass an `include_bytes!`-embedded, self-contained `.glb` to run on targets
+    /// without a filesystem (e.g. wasm). Returns the [`GltfModel`] (its animation
+    /// `player` is stopped initially).
+    pub fn add_gltf_from_memory(&mut self, bytes: &[u8], scale: Vec3) -> GltfModel {
+        let mut model =
+            crate::loader::gltf::load_from_slice(bytes).expect("Failed to load the glTF/GLB data.");
+        model.root.set_local_scale(scale.x, scale.y, scale.z);
+        self.add_child(model.root.clone());
+        model
+    }
+
     /// Returns a weak handle to this node's shared data. Used by the glTF loader
     /// to let a [`crate::scene::Skin3d`] reference its skeleton's joint nodes
     /// without keeping them (or the scene graph) alive.
@@ -1384,9 +1398,12 @@ impl SceneNode3d {
                 // Write the palette back under a short exclusive borrow.
                 let mut data = node.data.borrow_mut();
                 if let Some(skin) = data.object.as_mut().and_then(|o| o.data_mut().skin_mut()) {
-                    let n = skin.palette.len().min(joint_world.len());
-                    for j in 0..n {
-                        skin.palette[j] = joint_world[j] * skin.inverse_bind[j];
+                    for (slot, (jw, ibm)) in skin
+                        .palette
+                        .iter_mut()
+                        .zip(joint_world.iter().zip(skin.inverse_bind.iter()))
+                    {
+                        *slot = *jw * *ibm;
                     }
                     // Upload once here so the color, prepass, and shadow passes all
                     // read the same fresh palette buffer this frame.
@@ -1395,9 +1412,9 @@ impl SceneNode3d {
             }
 
             // 2. Refresh the per-object deform GPU state (skin flag + morph weights +
-            //    deform bind group) now that the palette is current. Native-only:
-            //    the deform pipelines (and their 5th bind group) don't exist on web.
-            #[cfg(not(target_arch = "wasm32"))]
+            //    deform bind group) now that the palette is current. Runs on all
+            //    targets: the deform group is now group 3 (shadows moved into the view
+            //    group), so it fits within WebGPU's 4-bind-group cap on web too.
             {
                 let mut data = node.data.borrow_mut();
                 if let Some(obj) = data.object.as_mut() {

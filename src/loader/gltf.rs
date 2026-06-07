@@ -42,7 +42,26 @@ struct PrimInfo {
 /// [`AnimationPlayer::play`](crate::scene::AnimationPlayer::play) to start one.
 pub fn load(path: &Path) -> Result<GltfModel, gltf::Error> {
     let (doc, buffers, images) = gltf::import(path)?;
-    let prefix = path.to_string_lossy().into_owned();
+    build_model(doc, buffers, images, &path.to_string_lossy())
+}
+
+/// Loads a glTF/GLB from an in-memory byte slice — e.g. an `include_bytes!`-embedded,
+/// self-contained `.glb` — for targets without a filesystem such as wasm. See
+/// [`load`] and [`SceneNode3d::add_gltf_from_memory`](crate::scene::SceneNode3d::add_gltf_from_memory).
+pub fn load_from_slice(bytes: &[u8]) -> Result<GltfModel, gltf::Error> {
+    let (doc, buffers, images) = gltf::import_slice(bytes)?;
+    build_model(doc, buffers, images, "gltf_mem")
+}
+
+/// Builds a [`GltfModel`] from already-imported glTF data. `prefix` namespaces the
+/// mesh/texture cache keys so separately loaded files don't collide.
+fn build_model(
+    doc: gltf::Document,
+    buffers: Vec<gltf::buffer::Data>,
+    images: Vec<gltf::image::Data>,
+    prefix: &str,
+) -> Result<GltfModel, gltf::Error> {
+    let prefix = prefix.to_owned();
 
     // Decode every image once into an `image::DynamicImage`; textures are then
     // created on demand per (image, color-space) pair.

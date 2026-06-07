@@ -53,12 +53,31 @@ pub struct RenderContext {
     /// mirror render, whose reflected projection flips triangle winding (so normal
     /// back-face culling would render closed objects inside-out).
     pub force_no_cull: bool,
-    /// Shadow bind group (group 4) supplied by the window's shadow mapper.
+    /// Shadow-map GPU resources supplied by the window's shadow mapper, folded into
+    /// the object material's view (group 0) bind group.
     ///
-    /// When `None`, materials fall back to their own neutral "no shadows" bind
-    /// group so rendering stays correct when shadows are disabled. Cloning a
-    /// `wgpu::BindGroup` is cheap (it is a reference-counted handle).
-    pub shadow_bind_group: Option<wgpu::BindGroup>,
+    /// When `None`, materials fall back to their own neutral "no shadows" resources
+    /// so rendering stays correct when shadows are disabled. Cloning the handles is
+    /// cheap (they are reference-counted).
+    pub shadow: Option<ShadowResources>,
+}
+
+/// The shadow mapper's GPU resources, handed to the object material so it can bind
+/// them as part of its view (group 0) bind group — rather than a separate group, so
+/// the per-object deform group fits within WebGPU's 4-bind-group cap. All fields are
+/// cheap-to-clone reference-counted wgpu handles.
+#[derive(Clone)]
+pub struct ShadowResources {
+    /// Depth atlas array view (sampled for comparison).
+    pub atlas: wgpu::TextureView,
+    /// Comparison sampler for hardware PCF.
+    pub compare_sampler: wgpu::Sampler,
+    /// Shadow uniforms buffer.
+    pub uniform: wgpu::Buffer,
+    /// Colored-transmittance atlas array view.
+    pub transmittance: wgpu::TextureView,
+    /// Filtering sampler for the transmittance atlas.
+    pub transmittance_sampler: wgpu::Sampler,
 }
 
 /// The environment-lighting (IBL) resources a window supplies to materials each

@@ -1,4 +1,5 @@
 use kiss3d::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::time::Instant;
 
@@ -10,21 +11,28 @@ async fn main() {
     scene
         .add_light(Light::point(100.0))
         .set_position(Vec3::new(0.0, 10.0, -10.0));
-    let tex_path = Path::new("./examples/media/checkerboard.png");
 
     // Show two spheres that are scaled up and down, one without mipmaps and one
-    // without mipmaps.
+    // with mipmaps. The checkerboard is read from the path on native and embedded
+    // into the binary on wasm (no filesystem).
     TextureManager::get_global_manager(|tm| tm.set_generate_mipmaps(false));
-    let mut q1 = scene
-        .add_sphere(1.0)
-        .set_texture_from_file(tex_path, "no-mipmaps")
-        .translate(Vec3::new(0.3, 0.0, 0.0));
+    let mut q1 = scene.add_sphere(1.0);
+    #[cfg(not(target_arch = "wasm32"))]
+    q1.set_texture_from_file(Path::new("./examples/media/checkerboard.png"), "no-mipmaps");
+    #[cfg(target_arch = "wasm32")]
+    q1.set_texture_from_memory(include_bytes!("media/checkerboard.png"), "no-mipmaps");
+    q1.translate(Vec3::new(0.3, 0.0, 0.0));
 
     TextureManager::get_global_manager(|tm| tm.set_generate_mipmaps(true));
-    let mut q2 = scene
-        .add_sphere(1.0)
-        .set_texture_from_file(tex_path, "with-mipmaps")
-        .translate(Vec3::new(-0.3, 0.0, 0.0));
+    let mut q2 = scene.add_sphere(1.0);
+    #[cfg(not(target_arch = "wasm32"))]
+    q2.set_texture_from_file(
+        Path::new("./examples/media/checkerboard.png"),
+        "with-mipmaps",
+    );
+    #[cfg(target_arch = "wasm32")]
+    q2.set_texture_from_memory(include_bytes!("media/checkerboard.png"), "with-mipmaps");
+    q2.translate(Vec3::new(-0.3, 0.0, 0.0));
 
     let start = Instant::now();
     while window.render_3d(&mut scene, &mut camera).await {

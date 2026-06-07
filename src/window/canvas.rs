@@ -9,8 +9,6 @@ use winit::window::WindowAttributes;
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum NumSamples {
-    /// Multisampling disabled.
-    Zero = 0,
     /// One sample
     One = 1,
     /// Four samples
@@ -22,7 +20,6 @@ impl NumSamples {
     /// Returns `None` if `i` is invalid.
     pub fn from_u32(i: u32) -> Option<NumSamples> {
         match i {
-            0 => Some(NumSamples::Zero),
             1 => Some(NumSamples::One),
             4 => Some(NumSamples::Four),
             _ => None,

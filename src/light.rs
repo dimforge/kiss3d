@@ -246,10 +246,11 @@ pub struct CollectedLight {
 /// The common distance-fog falloff modes:
 /// a `Linear` ramp between two distances, or physically-motivated `Exponential`
 /// / `ExponentialSquared` density curves.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum FogMode {
     /// Fog disabled.
+    #[default]
     Off,
     /// Linear ramp: no fog before `start`, full fog past `end` (both view-space
     /// distances in world units).
@@ -259,12 +260,6 @@ pub enum FogMode {
     /// Exponential-squared falloff `1 - exp(-(density * distance)^2)`; denser, with
     /// a sharper onset.
     ExponentialSquared { density: f32 },
-}
-
-impl Default for FogMode {
-    fn default() -> Self {
-        FogMode::Off
-    }
 }
 
 /// Distance fog applied to the rendered scene during shading.

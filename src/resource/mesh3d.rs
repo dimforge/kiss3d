@@ -39,7 +39,7 @@ pub struct GpuMesh3d {
 /// These are uploaded as read-only **storage** buffers (not vertex attributes) and
 /// indexed by `@builtin(vertex_index)` in the deform vertex shader, so the deformed
 /// pipeline reuses the plain vertex layout and a morph-only mesh never needs dummy
-/// joint/weight vertex buffers. See [`crate::builtin::object_material`].
+/// joint/weight vertex buffers. See [`ObjectMaterial`](crate::builtin::ObjectMaterial).
 #[derive(Clone)]
 pub struct SkinVertexData {
     joints: Arc<RwLock<GPUVec<[u32; 4]>>>,
@@ -72,7 +72,7 @@ impl SkinVertexData {
 /// `@builtin(vertex_index)` in the deform vertex shader, which adds
 /// `Σ weightᵢ · deltaᵢ` to the base position/normal before skinning. Deltas are
 /// stored as `[f32; 4]` (xyz used, w padding) to match WGSL `array<vec4<f32>>`
-/// alignment. Drives the GPU morph path; see [`crate::builtin::object_material`].
+/// alignment. Drives the GPU morph path; see [`ObjectMaterial`](crate::builtin::ObjectMaterial).
 #[derive(Clone)]
 pub struct MorphTargets {
     num_targets: usize,

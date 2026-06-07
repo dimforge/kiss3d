@@ -14,21 +14,16 @@ pub use self::sidescroll2d::PanZoomCamera2d;
 /// Provides the two standard projections: a
 /// perspective frustum, or a parallel orthographic box useful for CAD-style
 /// inspection where parallel lines must stay parallel.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum Projection {
     /// Perspective projection driven by the camera's field of view.
+    #[default]
     Perspective,
     /// Orthographic (parallel) projection. `scale` is reserved for future
     /// per-camera control; the built-in `OrbitCamera3d` derives the orthographic
     /// half-height from its orbit distance so zooming keeps working.
     Orthographic,
-}
-
-impl Default for Projection {
-    fn default() -> Self {
-        Projection::Perspective
-    }
 }
 
 /// Physically-based camera exposure, expressed as an EV100 value.

@@ -128,6 +128,10 @@ pub struct Window {
     pub(super) canvas: Canvas,
     #[cfg(feature = "recording")]
     pub(super) recording: Option<RecordingState>,
+    // NOTE: the boolean is used to avoid borrowcheker issues with
+    //       the event-based switching.
+    #[cfg(feature = "rt_switcher")]
+    pub(super) raytracer: (Option<RayTracer>, bool),
 }
 
 impl Window {
@@ -215,6 +219,16 @@ impl Window {
         &mut self.canvas
     }
 
+    #[cfg(feature = "rt_switcher")]
+    pub fn raytracer_mut(&mut self) -> Option<&mut RayTracer> {
+        self.raytracer.0.as_mut()
+    }
+
+    #[cfg(feature = "rt_switcher")]
+    pub fn set_raytracer(&mut self, rt: Option<RayTracer>) {
+        self.raytracer.0 = rt;
+    }
+
     /// Timings of the most recently rendered frame.
     ///
     /// Returns `None` until the first frame has been rendered. The timings are
@@ -258,15 +272,9 @@ impl Window {
     pub async fn raytrace_3d(
         &mut self,
         scene: &mut SceneNode3d,
-        camera: &mut impl Camera3d,
+        camera: &mut dyn Camera3d,
         raytracer: &mut RayTracer,
     ) -> bool {
-        // When the path tracer is disabled, render the scene with the rasterizer
-        // instead (`render_3d` handles events on its own).
-        if !raytracer.enabled() {
-            return self.render_3d(scene, camera).await;
-        }
-
         let mut default_cam2 = FixedView2d::default();
         self.handle_events(camera, &mut default_cam2);
         self.raytrace_3d_frame(scene, camera, raytracer).await
@@ -456,13 +464,14 @@ impl Window {
     /// Sets the distance fog applied to the rasterized scene.
     ///
     /// Pass a [`Fog`](crate::light::Fog) describing the falloff curve and color,
-    /// or [`Fog::default()`] (mode [`FogMode::Off`](crate::light::FogMode::Off))
+    /// or [`Fog::default()`](crate::light::Fog::default) (mode [`FogMode::Off`](crate::light::FogMode::Off))
     /// to disable fog. Fog blends shaded fragments toward the fog color by their
     /// view-space distance from the camera.
     ///
     /// # Example
     /// ```no_run
     /// # use kiss3d::prelude::*;
+    /// # #[kiss3d::main]
     /// # async fn main() {
     /// # let mut window = Window::new("Example").await;
     /// window.set_fog(Fog::exponential(Color::new(0.6, 0.7, 0.8, 1.0), 0.02));
@@ -493,6 +502,7 @@ impl Window {
     /// ```no_run
     /// # use kiss3d::prelude::*;
     /// # use std::path::Path;
+    /// # #[kiss3d::main]
     /// # async fn main() {
     /// # let mut window = Window::new("Example").await;
     /// window.set_skybox_from_file(Path::new("assets/sky.hdr"));
@@ -500,6 +510,19 @@ impl Window {
     /// ```
     pub fn set_skybox_from_file(&mut self, path: &Path) -> bool {
         self.skybox.set_from_file(path)
+    }
+
+    /// Sets the rasterizer skybox from an encoded equirectangular image held in
+    /// memory (e.g. `include_bytes!`-embedded for wasm). Returns `false` if the
+    /// bytes can't be decoded.
+    pub fn set_skybox_from_memory(&mut self, bytes: &[u8]) -> bool {
+        match image::load_from_memory(bytes) {
+            Ok(img) => {
+                self.skybox.set_image(&img);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     /// Sets the rasterizer skybox from an already-decoded equirectangular image.
@@ -762,6 +785,7 @@ impl Window {
     /// # Example
     /// ```no_run
     /// # use kiss3d::prelude::*;
+    /// # #[kiss3d::main]
     /// # async fn main() {
     /// # let mut window = Window::new("Example").await;
     /// // f/8, 1/125 s, ISO 100
@@ -1005,6 +1029,8 @@ impl Window {
             framebuffer_manager,
             #[cfg(feature = "recording")]
             recording: None,
+            #[cfg(feature = "rt_switcher")]
+            raytracer: (None, false),
         };
 
         if hide {
@@ -1079,6 +1105,8 @@ impl Window {
             framebuffer_manager,
             #[cfg(feature = "recording")]
             recording: None,
+            #[cfg(feature = "rt_switcher")]
+            raytracer: (None, false),
         }
     }
 }

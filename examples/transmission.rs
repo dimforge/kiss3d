@@ -24,15 +24,20 @@ async fn main() {
 #[kiss3d::main]
 async fn main() {
     use kiss3d::prelude::*;
+    #[cfg(not(target_arch = "wasm32"))]
     use std::path::Path;
 
     let mut window = Window::new("Kiss3d: transmission").await;
+    window.set_background_color(WHITE);
     let mut camera = OrbitCamera3d::new(Vec3::new(0.0, 1.5, 9.0), Vec3::new(0.0, 0.5, 0.0));
     let mut scene = SceneNode3d::empty();
 
     // The skybox is the image-based light source and what the metals reflect; the
     // glass refracts both it and the colored objects placed in front of it.
+    #[cfg(not(target_arch = "wasm32"))]
     window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
+    #[cfg(target_arch = "wasm32")]
+    window.set_skybox_from_memory(include_bytes!("media/skybox.png"));
     window.set_ambient(0.0);
     scene.add_light(Light::directional(Vec3::new(-0.4, -0.8, -0.5)).with_intensity(2.5));
     scene
@@ -54,27 +59,30 @@ async fn main() {
         let t = i as f32 / (rainbow.len() as f32 - 1.0);
         let x = (t - 0.5) * 9.0;
         let y = 0.4 + (t * std::f32::consts::PI).sin() * 2.2; // arc
-        let mut s = scene.add_sphere(0.7);
-        s.translate(Vec3::new(x, y, -4.5));
-        s.set_color(*c);
-        s.set_roughness(0.35);
+        scene
+            .add_sphere(0.7)
+            .translate(Vec3::new(x, y, -4.5))
+            .set_color(*c)
+            .set_roughness(0.35);
     }
     // A back row of metals for richer reflections seen through the glass.
     for i in 0..6 {
         let x = (i as f32 - 2.5) * 1.9;
-        let mut s = scene.add_sphere(0.6);
-        s.translate(Vec3::new(x, -1.6, -6.5));
-        s.set_color(Color::new(0.80, 0.80, 0.85, 1.0));
-        s.set_metallic(1.0);
-        s.set_roughness(0.1 + 0.14 * i as f32);
+        scene
+            .add_sphere(0.6)
+            .translate(Vec3::new(x, -1.6, -6.5))
+            .set_color(Color::new(0.80, 0.80, 0.85, 1.0))
+            .set_metallic(1.0)
+            .set_roughness(0.1 + 0.14 * i as f32);
     }
     // Emissive accent orbs — magnified into sharp bright points through the glass.
     for (x, y) in [(-3.5f32, 2.6f32), (3.2, 2.9), (0.0, -2.4)] {
-        let mut o = scene.add_sphere(0.22);
-        o.translate(Vec3::new(x, y, -3.5));
-        o.set_color(WHITE);
-        o.set_emissive(Color::new(3.0, 2.6, 2.0, 1.0));
-        o.set_casts_shadows(false);
+        scene
+            .add_sphere(0.22)
+            .translate(Vec3::new(x, y, -3.5))
+            .set_color(WHITE)
+            .set_emissive(Color::new(3.0, 2.6, 2.0, 1.0))
+            .set_casts_shadows(false);
     }
 
     // --- Foreground glass shapes, driven by the sliders and spinning in place. ---
@@ -84,7 +92,7 @@ async fn main() {
     // the opaque scene refracts); raising "transmission steps" reveals each layer of
     // glass-through-glass. Each shape carries its own volume tint so the effect reads.
     let glass_tints = [
-        [0.85f32, 0.92, 1.0], // front sphere: near-clear
+        [0.85f32, 0.92, 1.0],  // front sphere: near-clear
         [0.95f32, 0.35, 0.30], // middle cube: red
         [0.35f32, 0.85, 0.45], // back capsule: green
     ];
@@ -95,14 +103,15 @@ async fn main() {
         // front sphere covers them (it refracts only the opaque scene); raising
         // "transmission steps" makes the colored glass show THROUGH the front sphere,
         // one layer at a time.
-        let mut s = scene.add_sphere(1.2);
-        s.translate(Vec3::new(0.0, 0.5, 2.8));
+        let s = scene.add_sphere(1.2).translate(Vec3::new(0.0, 0.5, 2.8));
         glass.push(s);
-        let mut c = scene.add_cube(1.2, 1.2, 1.2);
-        c.translate(Vec3::new(1.4, 0.5, 0.6));
+        let c = scene
+            .add_cube(1.2, 1.2, 1.2)
+            .translate(Vec3::new(1.4, 0.5, 0.6));
         glass.push(c);
-        let mut cap = scene.add_capsule(0.5, 1.2);
-        cap.translate(Vec3::new(-1.4, 0.4, 0.6));
+        let cap = scene
+            .add_capsule(0.5, 1.2)
+            .translate(Vec3::new(-1.4, 0.4, 0.6));
         glass.push(cap);
     }
 
@@ -131,14 +140,18 @@ async fn main() {
 
         // Apply the current material to every glass shape (each keeps its own tint).
         for (i, s) in glass.iter_mut().enumerate() {
-            s.set_color(Color::new(color[0], color[1], color[2], 1.0));
-            s.set_transmission(transmission);
-            s.set_roughness(roughness);
-            s.set_metallic(metallic);
-            s.set_reflectance(reflectance);
-            s.set_ior(ior);
-            s.set_thickness(thickness);
-            let distance = if tinted { atten_distance } else { f32::INFINITY };
+            s.set_color(Color::new(color[0], color[1], color[2], 1.0))
+                .set_transmission(transmission)
+                .set_roughness(roughness)
+                .set_metallic(metallic)
+                .set_reflectance(reflectance)
+                .set_ior(ior)
+                .set_thickness(thickness);
+            let distance = if tinted {
+                atten_distance
+            } else {
+                f32::INFINITY
+            };
             let tint = glass_tints[i];
             s.set_attenuation(Color::new(tint[0], tint[1], tint[2], 1.0), distance);
             if spin {

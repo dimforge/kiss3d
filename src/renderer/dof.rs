@@ -219,6 +219,11 @@ impl Dof {
         &mut self.settings
     }
 
+    /// The current DoF settings.
+    pub fn settings(&self) -> &DofSettings {
+        &self.settings
+    }
+
     /// Runs DoF: computes per-pixel color+CoC from `scene_view` and `viewpos`,
     /// builds a mip chain, then gathers the blurred result back into `scene_view`.
     /// `proj` is the (pass-0) projection matrix; `background_depth` is the depth

@@ -35,6 +35,11 @@ path = "src/lib.rs"
 egui = ["dep:egui", "dep:egui-wgpu", "dep:rfd"]
 recording = ["dep:ffmpeg-the-third"]
 serde = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde"]
+# If enabled, switching between the ray-tracer and the rasterizer is possible while kipping
+# only the `.render_3d` call (instead of having to manually switch between `.render_3d` and
+# `.raytrace_3d`. This is mainly for debugging and experiments comparing the rasterizer and
+# the raytracer.
+rt_switcher = []
 
 [dependencies]
 bitflags     = "2"

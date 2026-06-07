@@ -12,7 +12,6 @@ EXAMPLES=(
     primitives
     primitives_scale
     primitives2d
-    multi_light
     clustered_lights
     wireframe
     lines
@@ -80,7 +79,7 @@ echo ""
 
 for example in "${EXAMPLES[@]}"; do
     echo "=== Running: $example ==="
-    cargo run --release --example "$example" --features egui
+    cargo run --release --example "$example" --features egui,rt_switcher
     echo ""
 done
 

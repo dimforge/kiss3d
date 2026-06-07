@@ -75,6 +75,10 @@ pub struct RayTracer {
     /// Environment Y-rotation in radians and its luminance scale.
     env_rotation: f32,
     env_intensity: f32,
+    /// Signature of the environment used last frame (present flag, rotation,
+    /// intensity, skybox generation), so accumulation restarts when the effective
+    /// environment changes — including the window skybox the tracer falls back to.
+    last_env: EnvSignature,
     last_camera: [f32; 16],
     dirty: bool,
     /// Maximum number of pixels the accumulation buffer may hold, derived from
@@ -89,6 +93,18 @@ pub struct RayTracer {
     /// [`Window::raytrace_3d`](crate::window::Window::raytrace_3d)
     /// falls back to the rasterizer instead of tracing. Enabled by default.
     enabled: bool,
+}
+
+/// A compact fingerprint of the environment the kernel sampled, used to detect
+/// changes (skybox load/clear/rotation) that must restart accumulation.
+#[derive(Clone, Copy, PartialEq)]
+struct EnvSignature {
+    present: bool,
+    rotation: f32,
+    intensity: f32,
+    /// Skybox generation counter when sourcing from the window skybox; `0` when
+    /// using the tracer's own environment.
+    skybox_gen: u64,
 }
 
 /// Caps `(width, height)` to at most `max_pixels` while preserving aspect ratio.
@@ -136,6 +152,14 @@ fn effective_denoise_iterations(max_iterations: u32, samples: u32) -> u32 {
     iterations.max(1)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RayTracerPreset {
+    Low,
+    Medium,
+    High,
+    Ultra,
+}
+
 impl RayTracer {
     /// Creates a new path tracer, selecting the best available backend: the
     /// hardware ray-query backend when the GPU supports it, otherwise the
@@ -147,13 +171,43 @@ impl RayTracer {
         Self::with_backend(Self::pick_backend())
     }
 
+    pub fn preset(preset: RayTracerPreset) -> RayTracer {
+        let mut rt = Self::new();
+
+        match preset {
+            RayTracerPreset::Low => {
+                rt.interactive_scale = 0.4;
+                rt.samples_per_frame = 1;
+                rt.max_bounces = 4;
+            }
+            RayTracerPreset::Medium => {
+                rt.interactive_scale = 0.5;
+                rt.samples_per_frame = 2;
+                rt.max_bounces = 8;
+            }
+            RayTracerPreset::High => {
+                rt.interactive_scale = 0.75;
+                rt.samples_per_frame = 4;
+                rt.max_bounces = 8;
+            }
+            RayTracerPreset::Ultra => {
+                rt.interactive_scale = 1.0;
+                rt.samples_per_frame = 8;
+                rt.max_bounces = 12;
+            }
+        }
+
+        rt
+    }
+
     /// Creates a new path tracer that is enabled or not.
     ///
     /// If it is marked as disabled, it will use the raster pipeline instead of path tracing.
     pub fn with_enabled(enabled: bool) -> RayTracer {
-        let mut result = Self::default();
-        result.enabled = enabled;
-        result
+        RayTracer {
+            enabled,
+            ..Self::default()
+        }
     }
 
     /// Creates a path tracer using a specific intersection backend.
@@ -183,6 +237,12 @@ impl RayTracer {
             environment: Environment::fallback(),
             env_rotation: 0.0,
             env_intensity: 1.0,
+            last_env: EnvSignature {
+                present: false,
+                rotation: f32::NAN,
+                intensity: f32::NAN,
+                skybox_gen: u64::MAX,
+            },
             last_camera: [f32::NAN; 16],
             dirty: true,
             max_pixels,
@@ -319,9 +379,11 @@ impl RayTracer {
 
     /// Loads an equirectangular HDR/LDR environment map for image-based lighting.
     ///
-    /// Escaped rays and the background sample this map instead of the procedural
-    /// sky. Returns `false` (and keeps the previous environment) if the file
-    /// cannot be decoded. Resets accumulation.
+    /// Escaped rays and the background sample this map. An environment set here
+    /// takes precedence over the window's skybox; without one the tracer falls
+    /// back to the skybox (if any), and otherwise to the flat background color.
+    /// Returns `false` (and keeps the previous environment) if the file cannot be
+    /// decoded. Resets accumulation.
     pub fn set_environment_from_file(&mut self, path: &Path) -> bool {
         match Environment::from_file(path) {
             Some(env) => {
@@ -340,7 +402,8 @@ impl RayTracer {
         self.dirty = true;
     }
 
-    /// Clears the environment map, reverting to the procedural gradient sky.
+    /// Clears the tracer's own environment map. Subsequent frames fall back to the
+    /// window's skybox if one is set, otherwise the flat background color.
     /// Resets accumulation.
     pub fn clear_environment(&mut self) {
         self.environment = Environment::fallback();
@@ -401,6 +464,12 @@ impl RayTracer {
         camera: &mut dyn Camera3d,
         lights: &LightCollection,
         background: crate::color::Color,
+        // The window's skybox, used as the environment for escaped rays and the
+        // background when this tracer has no environment of its own set. Carries
+        // `(equirect map, Y-rotation radians, luminance scale, generation)`; the
+        // generation changes when the skybox image is replaced, restarting
+        // accumulation. `None` when no skybox is set.
+        skybox: Option<(&Environment, f32, f32, u64)>,
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
         width: u32,
@@ -421,9 +490,14 @@ impl RayTracer {
         let camera_moved = cam != self.last_camera;
         self.last_camera = cam;
 
+        // Render-layer mask: the path tracer only gathers objects the camera draws
+        // (object.render_layers & camera mask != 0), matching the rasterizer. Folded
+        // into the change hash below, so toggling the mask rebuilds + restarts.
+        let render_layers = camera.render_layers();
+
         // Cheap content hash (no vertex arrays built); the expensive `gather` only
         // runs on an actual change.
-        let hash = scene_data::scene_hash(scene, lights);
+        let hash = scene_data::scene_hash(scene, lights, render_layers);
         let scene_changed = self.gpu_scene.as_ref().is_none_or(|g| g.hash != hash);
 
         // While anything is in motion the image is restarting every frame anyway,
@@ -436,9 +510,51 @@ impl RayTracer {
         let sh = ((height as f32 * scale).round() as u32).max(1);
         let (render_width, render_height) = capped_resolution(sw, sh, self.max_pixels);
 
+        // Choose the environment the kernel samples for escaped rays and the
+        // background. The tracer's own explicitly-set environment takes
+        // precedence; otherwise it falls back to the window's skybox, so a single
+        // skybox lights both the rasterizer and the path tracer. With neither, the
+        // black fallback leaves `has_env` clear and the flat background is used.
+        let (env, env_rotation, env_intensity, env_present, skybox_gen) =
+            if self.environment.present {
+                (
+                    &self.environment,
+                    self.env_rotation,
+                    self.env_intensity,
+                    true,
+                    0,
+                )
+            } else if let Some((sky_env, sky_rot, sky_int, sky_gen)) = skybox {
+                (sky_env, sky_rot, sky_int, true, sky_gen)
+            } else {
+                (
+                    &self.environment,
+                    self.env_rotation,
+                    self.env_intensity,
+                    false,
+                    0,
+                )
+            };
+
         let mut reset = camera_moved;
+
+        // Restart accumulation if the effective environment changed (skybox
+        // loaded/cleared/rotated, or a switch between skybox and own environment).
+        // Changes to the tracer's own environment already set `dirty` via the
+        // setters; this additionally catches the skybox source.
+        let env_sig = EnvSignature {
+            present: env_present,
+            rotation: env_rotation,
+            intensity: env_intensity,
+            skybox_gen,
+        };
+        if env_sig != self.last_env {
+            self.last_env = env_sig;
+            reset = true;
+        }
+
         if scene_changed {
-            let rt_scene = scene_data::gather(scene, lights);
+            let rt_scene = scene_data::gather(scene, lights, render_layers);
             self.gpu_scene = Some(GpuScene::build(&rt_scene, self.backend));
             reset = true;
         }
@@ -459,15 +575,9 @@ impl RayTracer {
         let gpu_scene = self.gpu_scene.as_ref().expect("gpu scene just ensured");
         let spp = self.samples_per_frame.max(1);
 
-        let env_present = self.environment.present;
         let uniforms = FrameUniforms {
             inv_view_proj: camera.inverse_transformation().to_cols_array_2d(),
-            env_rotation: [
-                self.env_rotation.cos(),
-                self.env_rotation.sin(),
-                self.env_intensity,
-                0.0,
-            ],
+            env_rotation: [env_rotation.cos(), env_rotation.sin(), env_intensity, 0.0],
             cam_eye: camera.eye().to_array(),
             width: render_width,
             height: render_height,
@@ -492,6 +602,20 @@ impl RayTracer {
                 background.b,
                 if gpu_scene.has_translucent { 1.0 } else { 0.0 },
             ],
+            ambient_color: [
+                lights.ambient_color.r,
+                lights.ambient_color.g,
+                lights.ambient_color.b,
+                1.0,
+            ],
+            fog_color: [
+                lights.fog.color.r,
+                lights.fog.color.g,
+                lights.fog.color.b,
+                lights.fog.color.a,
+            ],
+            fog_params: lights.fog.params(),
+            flags: [gpu_scene.has_non_shadow_caster as u32, 0, 0, 0],
         };
         self.pipeline.write_uniforms(&uniforms);
 
@@ -501,7 +625,7 @@ impl RayTracer {
                     encoder,
                     gpu_scene,
                     &self.accum,
-                    &self.environment,
+                    env,
                     render_width,
                     render_height,
                     gpu,
@@ -512,7 +636,7 @@ impl RayTracer {
                     encoder,
                     gpu_scene,
                     &self.accum,
-                    &self.environment,
+                    env,
                     render_width,
                     render_height,
                     gpu,

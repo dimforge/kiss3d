@@ -46,9 +46,10 @@ async fn main() {
             0.0,
             z,
         ));
-        let mut floor = scene.add_cube(6.0, 0.1, 1.4);
-        floor.translate(Vec3::new(0.0, -0.85, z));
-        floor.set_color(Color::new(c, c, c, 1.0));
+        scene
+            .add_cube(6.0, 0.1, 1.4)
+            .translate(Vec3::new(0.0, -0.85, z))
+            .set_color(Color::new(c, c, c, 1.0));
     }
 
     // UI state.

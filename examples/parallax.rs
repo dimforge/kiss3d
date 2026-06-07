@@ -28,9 +28,20 @@ use kiss3d::resource::Texture;
 #[cfg(feature = "egui")]
 use kiss3d::scene::ParallaxMethod;
 #[cfg(feature = "egui")]
-use std::path::Path;
-#[cfg(feature = "egui")]
 use std::sync::Arc;
+
+/// An asset's encoded bytes: embedded into the binary on wasm (no filesystem),
+/// read from the path at runtime on native.
+#[cfg(feature = "egui")]
+macro_rules! asset_bytes {
+    ($rel:literal) => {{
+        #[cfg(target_arch = "wasm32")]
+        let bytes = include_bytes!(concat!("media/", $rel)).to_vec();
+        #[cfg(not(target_arch = "wasm32"))]
+        let bytes = std::fs::read(concat!("examples/media/", $rel)).unwrap();
+        bytes
+    }};
+}
 
 /// Loads a texture from a file. `srgb` selects sRGB color vs. linear data
 /// (normal/height maps must be linear and are loaded without sRGB decoding).
@@ -45,9 +56,9 @@ use std::sync::Arc;
 /// instead of wrapping the whole pattern back in, which would look like an
 /// infinitely repeating "portal" on the relief walls.
 #[cfg(feature = "egui")]
-fn load(path: &str, srgb: bool, invert: bool, flip_green: bool) -> Arc<Texture> {
-    let mut img = image::open(Path::new(path))
-        .unwrap_or_else(|e| panic!("failed to load {}: {}", path, e))
+fn load(data: &[u8], srgb: bool, invert: bool, flip_green: bool) -> Arc<Texture> {
+    let mut img = image::load_from_memory(data)
+        .unwrap_or_else(|e| panic!("failed to decode parallax texture: {}", e))
         .to_rgba8();
     if invert || flip_green {
         for p in img.pixels_mut() {
@@ -89,26 +100,30 @@ async fn main() {
     let mut window = Window::new("Kiss3d: parallax").await;
     window.set_background_color(Color::new(0.13, 0.13, 0.17, 1.0));
     window.set_ambient(0.3);
+    #[cfg(not(target_arch = "wasm32"))]
     window.set_skybox_from_file(std::path::Path::new("./examples/media/skybox.png"));
+    #[cfg(target_arch = "wasm32")]
+    window.set_skybox_from_memory(include_bytes!("media/skybox.png"));
 
     let mut camera = OrbitCamera3d::new(Vec3::new(1.5, 1.5, 1.5), Vec3::ZERO);
     let mut scene = SceneNode3d::empty();
 
     let maps = (
-        load("examples/media/parallax/cube_color.png", true, false, false),
+        load(&asset_bytes!("parallax/cube_color.png"), true, false, false),
         load(
-            "examples/media/parallax/cube_normal.png",
+            &asset_bytes!("parallax/cube_normal.png"),
             false,
             false,
             true,
         ),
-        load("examples/media/parallax/cube_depth.png", false, true, false),
+        load(&asset_bytes!("parallax/cube_depth.png"), false, true, false),
     );
 
     let light_pos = Vec3::new(2.0, 1.0, -1.1);
     // Keep the light node so the UI slider can update its intensity each frame.
-    let mut light = scene.add_light(Light::point(60.0).with_intensity(5.0));
-    light.set_position(light_pos);
+    let mut light = scene
+        .add_light(Light::point(60.0).with_intensity(5.0))
+        .set_position(light_pos);
     // A small emissive sphere marks the light. It must NOT cast shadows: sitting
     // exactly on the light, it would otherwise enclose it and shadow the whole
     // scene (leaving only ambient — making the light look like it does nothing).
@@ -125,15 +140,17 @@ async fn main() {
     apply(&mut cube, &maps);
     bricks.push(cube.clone());
 
-    let mut ground = scene.add_cube(10.0, 0.1, 10.0);
-    ground.translate(Vec3::new(0.0, -1.0, 0.0));
+    let mut ground = scene
+        .add_cube(10.0, 0.1, 10.0)
+        .translate(Vec3::new(0.0, -1.0, 0.0));
     apply(&mut ground, &maps);
     bricks.push(ground);
 
     let mut background = Vec::new();
     for (dx, dz) in [(45.0, 0.0), (-45.0, 0.0), (0.0, 45.0), (0.0, -45.0)] {
-        let mut c = scene.add_cube(40.0, 40.0, 40.0);
-        c.translate(Vec3::new(dx, 0.0, dz));
+        let mut c = scene
+            .add_cube(40.0, 40.0, 40.0)
+            .translate(Vec3::new(dx, 0.0, dz));
         apply(&mut c, &maps);
         bricks.push(c.clone());
         background.push(c);

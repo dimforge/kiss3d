@@ -507,10 +507,13 @@ pub struct ObjectMaterial {
     // === Dynamic uniform buffer system ===
     /// Shared frame uniform buffer (view, projection, light)
     frame_uniform_buffer: wgpu::Buffer,
-    /// Shared bind group for frame uniforms (+ the IBL environment at bindings 1/2)
-    frame_bind_group: wgpu::BindGroup,
+    /// Group-0 (view) bind group: frame uniforms + IBL + the shadow bindings
+    /// (10-14). Built lazily per pass by `ensure_frame_shadow_group` from the frame
+    /// resources and the pass's shadow resources (or the neutral dummies), and reset
+    /// to `None` whenever those inputs change (frame resources or a new pass).
+    frame_shadow_group: Option<wgpu::BindGroup>,
     /// Frame bind group layout, kept so the group can be rebuilt when the IBL
-    /// environment or SSAO texture changes.
+    /// environment, SSAO texture, or shadow resources change.
     frame_bind_group_layout: wgpu::BindGroupLayout,
     /// Whether this material uses the clustered forward+ pipeline variant (group 0
     /// has storage bindings 4/5/6 and the fragment shader has the clustered loop).
@@ -595,13 +598,12 @@ pub struct ObjectMaterial {
     /// Shared points view bind group
     points_view_bind_group: wgpu::BindGroup,
 
-    // === Shadow mapping (group 4) ===
-    /// Neutral fallback bind group used when no shadow mapper is supplied (or when
-    /// shadows are disabled). It points at a 1x1 dummy atlas with a uniform whose
-    /// `shadows_enabled` flag is `0`, so the shader skips all shadow sampling.
-    default_shadow_bind_group: wgpu::BindGroup,
-    /// Keeps the dummy atlas/sampler/buffer alive for `default_shadow_bind_group`.
-    _default_shadow_resources: DefaultShadowResources,
+    // === Shadow mapping (folded into the view/frame group, bindings 10-14) ===
+    /// Neutral fallback shadow resources used when no shadow mapper is supplied (or
+    /// shadows are disabled): a 1x1 dummy atlas with a uniform whose `shadows_enabled`
+    /// flag is `0`, so the shader skips all shadow sampling. Folded into the group-0
+    /// bind group by `ensure_frame_shadow_group` when the pass has no shadow.
+    default_shadow_resources: DefaultShadowResources,
 }
 
 /// Builds an opaque-surface or OIT pipeline from a compiled module:
@@ -940,6 +942,52 @@ impl ObjectMaterial {
             ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
             count: None,
         });
+        // Shadow bindings (10-14) live in the view/frame group rather than a
+        // dedicated one, so the per-object deform group fits within WebGPU's
+        // 4-bind-group cap (see `default.wgsl`). Mirrors the standalone shadow layout
+        // built by `ShadowMapper`.
+        frame_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 10,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Depth,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        });
+        frame_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 11,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+            count: None,
+        });
+        frame_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 12,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        });
+        frame_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 13,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            },
+            count: None,
+        });
+        frame_entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 14,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        });
         let frame_bind_group_layout =
             ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("object_material_frame_bind_group_layout"),
@@ -1172,19 +1220,15 @@ impl ObjectMaterial {
             ..Default::default()
         });
 
-        // Shadow bind group layout (group 3). Structurally identical to the one the
-        // window's `ShadowMapper` builds, so its bind group is compatible here.
-        let shadow_bind_group_layout = crate::builtin::shadow::shadow_bind_group_layout(&ctxt);
-
-        // Four bind groups total (frame, object, textures, shadow) — WebGPU caps
-        // `maxBindGroups` at 4, so this must not grow.
+        // Three bind groups for the plain pipeline: frame (which now also holds the
+        // shadow bindings, 10-14), object, and textures. The deform variant adds a
+        // 4th (deform) group. WebGPU caps `maxBindGroups` at 4, so this must not grow.
         let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("object_material_pipeline_layout"),
             bind_group_layouts: &[
                 Some(&frame_bind_group_layout),
                 Some(&object_bind_group_layout),
                 Some(&texture_bind_group_layout),
-                Some(&shadow_bind_group_layout),
             ],
             immediate_size: 0,
         });
@@ -1419,15 +1463,14 @@ impl ObjectMaterial {
                 })
             },
         );
-        // Deform pipeline layout (native only). The deform bind group is a 5th bind
-        // group, which exceeds WebGPU/WebGL2's 4-group cap, so on web (or any adapter
-        // without a free group) skinned/morphed objects fall back to the plain path
-        // and render in their base rest shape. The actual deform pipelines are built
-        // lazily per `(features, sample_count)` by `surface_pipeline`, using this
-        // layout and the `deform`-featured module. The deform bind-group layout is the
-        // shared one from `builtin::deform`, so the per-object bind group also works
-        // in the shadow pipelines.
-        #[cfg(not(target_arch = "wasm32"))]
+        // Deform pipeline layout: the per-object deform bind group is group 3 (the
+        // slot the shadow group used to occupy before shadows moved into the frame
+        // group), so the total stays within WebGPU's 4-bind-group cap on EVERY target
+        // (including web). The deform pipelines are built lazily per
+        // `(features, sample_count)` by `surface_pipeline`, using this layout and the
+        // `deform`-featured module. The deform bind-group layout is the shared one
+        // from `builtin::deform`, so the per-object bind group also works in the
+        // shadow pipelines (which place it at their own group index).
         let deform_pipeline_layout = {
             let deform_bind_group_layout = crate::builtin::deform::deform_bind_group_layout();
             Some(
@@ -1437,15 +1480,12 @@ impl ObjectMaterial {
                         Some(&frame_bind_group_layout),
                         Some(&object_bind_group_layout),
                         Some(&texture_bind_group_layout),
-                        Some(&shadow_bind_group_layout),
                         Some(&deform_bind_group_layout),
                     ],
                     immediate_size: 0,
                 }),
             )
         };
-        #[cfg(target_arch = "wasm32")]
-        let deform_pipeline_layout: Option<wgpu::PipelineLayout> = None;
 
         // Create wireframe shader and pipelines for lines/points
         // Note: _wireframe_shader, _wireframe_pipeline_layout, and _wireframe_vertex_buffer_layouts
@@ -1881,58 +1921,9 @@ impl ObjectMaterial {
             mapped_at_creation: false,
         });
 
-        // Create frame bind group
-        let mut frame_group_entries = vec![
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame_uniform_buffer.as_entire_binding(),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::TextureView(&ibl_fallback_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::Sampler(&ibl_fallback_sampler),
-            },
-            wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(&ao_fallback_view),
-            },
-        ];
-        if clustered {
-            frame_group_entries.push(wgpu::BindGroupEntry {
-                binding: 4,
-                resource: clustered_lights_buf.as_entire_binding(),
-            });
-            frame_group_entries.push(wgpu::BindGroupEntry {
-                binding: 5,
-                resource: cluster_grid_buf.as_entire_binding(),
-            });
-            frame_group_entries.push(wgpu::BindGroupEntry {
-                binding: 6,
-                resource: cluster_index_buf.as_entire_binding(),
-            });
-        }
-        frame_group_entries.push(wgpu::BindGroupEntry {
-            binding: 7,
-            resource: wgpu::BindingResource::TextureView(&probe_fallback_view),
-        });
-        // Transmission background: 1x1 black fallback (reusing the IBL fallback) until
-        // a glass-bearing frame hands over the snapshot via `set_transmission_background`.
-        frame_group_entries.push(wgpu::BindGroupEntry {
-            binding: 8,
-            resource: wgpu::BindingResource::TextureView(&ibl_fallback_view),
-        });
-        frame_group_entries.push(wgpu::BindGroupEntry {
-            binding: 9,
-            resource: wgpu::BindingResource::Sampler(&bg_sampler),
-        });
-        let frame_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shared_frame_bind_group"),
-            layout: &frame_bind_group_layout,
-            entries: &frame_group_entries,
-        });
+        // The group-0 (view) bind group — frame resources + shadow bindings 10-14 —
+        // is built lazily by `ensure_frame_shadow_group` on the first draw of each
+        // pass (it needs the pass's shadow resources, supplied via `RenderContext`).
 
         // Dynamic buffer for object uniforms
         let object_uniform_buffer =
@@ -2057,32 +2048,9 @@ impl ObjectMaterial {
             label: Some("object_material_dummy_transmittance_sampler"),
             ..Default::default()
         });
-        let default_shadow_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("object_material_default_shadow_bind_group"),
-            layout: &shadow_bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&dummy_atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&dummy_shadow_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: dummy_shadow_uniform.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&dummy_transmittance_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::Sampler(&dummy_transmittance_sampler),
-                },
-            ],
-        });
+        // The neutral shadow resources are folded into the group-0 bind group (by
+        // `ensure_frame_shadow_group`) whenever a pass has no shadow mapper, so no
+        // standalone shadow bind group is built here.
         let default_shadow_resources = DefaultShadowResources {
             _atlas: dummy_atlas,
             _view: dummy_atlas_view,
@@ -2114,7 +2082,7 @@ impl ObjectMaterial {
             points_pipeline,
             points_model_bind_group_layout,
             frame_uniform_buffer,
-            frame_bind_group,
+            frame_shadow_group: None,
             frame_bind_group_layout,
             clustered,
             clustered_lights_buf,
@@ -2157,8 +2125,7 @@ impl ObjectMaterial {
             wireframe_view_bind_group,
             points_view_uniform_buffer,
             points_view_bind_group,
-            default_shadow_bind_group,
-            _default_shadow_resources: default_shadow_resources,
+            default_shadow_resources,
         }
     }
 
@@ -2312,8 +2279,17 @@ impl ObjectMaterial {
     /// bindings 0/1 followed by the four PBR maps at 2/3, 4/5, 6/7, 8/9.
     /// Rebuilds the shared frame bind group (group 0) from the current per-view
     /// resources: the frame uniform, the IBL environment, and the SSAO texture.
+    /// Invalidates the cached group-0 (view + shadow) bind group so it is rebuilt on
+    /// the next draw. Called when a frame resource (IBL / SSAO / reflection probe /
+    /// transmission background) or the clustered buffers change.
     fn rebuild_frame_bind_group(&mut self) {
-        let ctxt = Context::get();
+        self.frame_shadow_group = None;
+    }
+
+    /// The view bind-group entries for bindings 0-9 (frame uniform, IBL, SSAO,
+    /// optional clustered buffers, probe array, transmission background). The shadow
+    /// bindings (10-14) are appended by [`ensure_frame_shadow_group`].
+    fn frame_bind_entries(&self) -> Vec<wgpu::BindGroupEntry<'_>> {
         let mut entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -2358,11 +2334,64 @@ impl ObjectMaterial {
             binding: 9,
             resource: wgpu::BindingResource::Sampler(&self.bg_sampler),
         });
-        self.frame_bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shared_frame_bind_group"),
-            layout: &self.frame_bind_group_layout,
-            entries: &entries,
-        });
+        entries
+    }
+
+    /// Builds (when not already cached) the group-0 bind group: the frame entries
+    /// (0-9) plus the shadow bindings (10-14) from `shadow` — or the neutral dummy
+    /// resources when a pass has no shadow mapper. Cached until invalidated by
+    /// [`rebuild_frame_bind_group`] or a new pass (`begin_frame`).
+    fn ensure_frame_shadow_group(&mut self, shadow: Option<&crate::resource::ShadowResources>) {
+        if self.frame_shadow_group.is_some() {
+            return;
+        }
+        let ctxt = Context::get();
+        let group = {
+            let d = &self.default_shadow_resources;
+            let (atlas, comp, unif, trans, trans_s) = match shadow {
+                Some(s) => (
+                    &s.atlas,
+                    &s.compare_sampler,
+                    &s.uniform,
+                    &s.transmittance,
+                    &s.transmittance_sampler,
+                ),
+                None => (
+                    &d._view,
+                    &d._sampler,
+                    &d._uniform,
+                    &d._transmittance_view,
+                    &d._transmittance_sampler,
+                ),
+            };
+            let mut entries = self.frame_bind_entries();
+            entries.push(wgpu::BindGroupEntry {
+                binding: 10,
+                resource: wgpu::BindingResource::TextureView(atlas),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::Sampler(comp),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 12,
+                resource: unif.as_entire_binding(),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 13,
+                resource: wgpu::BindingResource::TextureView(trans),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 14,
+                resource: wgpu::BindingResource::Sampler(trans_s),
+            });
+            ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("object_material_view_shadow_bind_group"),
+                layout: &self.frame_bind_group_layout,
+                entries: &entries,
+            })
+        };
+        self.frame_shadow_group = Some(group);
     }
 
     fn create_texture_bind_group(
@@ -2481,6 +2510,8 @@ impl ObjectMaterial {
         self.frame_counter
             .set(self.frame_counter.get().wrapping_add(1));
         self.object_uniform_buffer.clear();
+        // The group-0 (view+shadow) group is rebuilt with this pass's shadow.
+        self.frame_shadow_group = None;
     }
 
     /// Flushes the accumulated object uniforms to the GPU.
@@ -2520,6 +2551,8 @@ impl Material3d for ObjectMaterial {
         self.frame_counter
             .set(self.frame_counter.get().wrapping_add(1));
         self.object_uniform_buffer.clear();
+        // The group-0 (view+shadow) group is rebuilt with this pass's shadow.
+        self.frame_shadow_group = None;
     }
 
     fn prepare(
@@ -2957,7 +2990,7 @@ impl Material3d for ObjectMaterial {
 
     /// Binds the transmission background (the resolved opaque scene color + its
     /// blurred mip chain) sampled by refractive (glass) objects, or `None` to fall
-    /// back to the 1x1 placeholder. Mirrors [`set_ssao`].
+    /// back to the 1x1 placeholder. Mirrors [`Self::set_ssao`].
     fn set_transmission_background(&mut self, bg: Option<&wgpu::TextureView>) {
         match bg {
             // Always rebind when a background is supplied: the snapshot texture is
@@ -3212,14 +3245,15 @@ impl Material3d for ObjectMaterial {
             let use_deform =
                 self.deform_pipeline_layout.is_some() && data.deform_bind_group().is_some();
 
-            let texture_bind_group = gpu_data.texture_bind_group.as_ref().unwrap();
-            let object_bind_group = self.object_bind_group.as_ref().unwrap();
+            // Shadows are active this frame iff the window supplied real shadow
+            // resources (else the neutral dummies are used and the `shadows` feature
+            // strips out). Build the group-0 (view + shadow) bind group for this pass
+            // BEFORE taking any immutable borrow of `self` below (it needs `&mut`).
+            let shadows_active = context.shadow.is_some();
+            self.ensure_frame_shadow_group(context.shadow.as_ref());
 
             // Select the specialized pipeline: which entry/targets (opaque vs. OIT vs.
-            // prepass, cull vs. no-cull) and which WESL feature variant. Shadows are
-            // active this frame iff the window bound a real shadow group (else the
-            // neutral one is used and the `shadows` feature strips out).
-            let shadows_active = context.shadow_bind_group.is_some();
+            // prepass, cull vs. no-cull) and which WESL feature variant.
             let kind = match (context.phase, cull) {
                 (crate::resource::RenderPhase::Prepass, _) => PipelineKind::Prepass,
                 (crate::resource::RenderPhase::Transparent, true) => PipelineKind::OitCull,
@@ -3238,27 +3272,26 @@ impl Material3d for ObjectMaterial {
                 features = features.prepass_key();
             }
             let pipeline = self.surface_pipeline(features, context.sample_count, kind);
+
+            let texture_bind_group = gpu_data.texture_bind_group.as_ref().unwrap();
+            let object_bind_group = self.object_bind_group.as_ref().unwrap();
+            let view_bind_group = self.frame_shadow_group.as_ref().unwrap();
+
             render_pass.set_pipeline(&pipeline);
-            render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            // Group 0: view (frame uniforms + IBL + shadow atlas/uniforms at 10-14).
+            render_pass.set_bind_group(0, view_bind_group, &[]);
             // Use dynamic offset for object uniforms!
             render_pass.set_bind_group(1, object_bind_group, &[object_offset]);
             // Group 2: combined material textures (albedo + PBR maps).
             render_pass.set_bind_group(2, texture_bind_group, &[]);
-            // Group 3: shadow atlas + comparison sampler + shadow uniforms. Use the
-            // window's shadow mapper bind group when present, else the neutral one.
-            let shadow_bind_group = context
-                .shadow_bind_group
-                .as_ref()
-                .unwrap_or(&self.default_shadow_bind_group);
-            render_pass.set_bind_group(3, shadow_bind_group, &[]);
-            // Group 4: per-object deform data (joint palette + skin streams + morph
+            // Group 3: per-object deform data (joint palette + skin streams + morph
             // deltas + control uniform), deform pipeline only.
             if use_deform {
-                render_pass.set_bind_group(4, data.deform_bind_group().unwrap(), &[]);
+                render_pass.set_bind_group(3, data.deform_bind_group().unwrap(), &[]);
             }
 
             // Set vertex buffers for mesh data. The deform pipeline uses the same
-            // layout — deform data is read from group-4 storage buffers by index.
+            // layout — deform data is read from group-3 storage buffers by index.
             render_pass.set_vertex_buffer(0, coords_buf.slice(..));
             render_pass.set_vertex_buffer(1, uvs_buf.slice(..));
             render_pass.set_vertex_buffer(2, normals_buf.slice(..));

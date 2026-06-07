@@ -31,6 +31,10 @@ pub struct Skybox {
     ibl_env: Option<EnvironmentMap>,
     rotation: f32,
     intensity: f32,
+    /// Bumped whenever the environment image is replaced or cleared, so the path
+    /// tracer (which samples the same skybox) can detect the change and restart
+    /// accumulation. Orientation changes are tracked separately by value.
+    generation: u64,
     layout: wgpu::BindGroupLayout,
     pipeline: PipelineCache,
     uniform: wgpu::Buffer,
@@ -150,6 +154,7 @@ impl Skybox {
             ibl_env: None,
             rotation: 0.0,
             intensity: 1.0,
+            generation: 0,
             layout,
             pipeline,
             uniform,
@@ -177,12 +182,26 @@ impl Skybox {
     pub fn set_image(&mut self, image: &image::DynamicImage) {
         self.environment = Environment::from_image(image);
         self.ibl_env = Some(EnvironmentMap::from_image(image));
+        self.generation += 1;
     }
 
     /// Clears the skybox (subsequent frames render no background or IBL).
     pub fn clear(&mut self) {
         self.environment = Environment::fallback();
         self.ibl_env = None;
+        self.generation += 1;
+    }
+
+    /// The GPU-resident equirectangular environment, shared with the path tracer
+    /// so a skybox set on the window also lights the ray-traced view.
+    pub(crate) fn environment(&self) -> &Environment {
+        &self.environment
+    }
+
+    /// A counter that changes whenever the environment image is replaced or
+    /// cleared; the path tracer uses it to restart accumulation on a new skybox.
+    pub(crate) fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// The mip-chained environment map used for image-based lighting, if set.

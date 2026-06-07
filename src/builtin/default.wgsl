@@ -336,17 +336,20 @@ struct ShadowUniforms {
     cascade_splits: vec4<f32>,
 }
 
-@group(3) @binding(0)
+// Shadow bindings live in the view/frame group (group 0, bindings 10-14) rather
+// than a dedicated group, so the per-object deform group fits within WebGPU's
+// 4-bind-group cap (deform is group 3).
+@group(0) @binding(10)
 var t_shadow_atlas: texture_depth_2d_array;
-@group(3) @binding(1)
+@group(0) @binding(11)
 var s_shadow: sampler_comparison;
-@group(3) @binding(2)
+@group(0) @binding(12)
 var<uniform> shadow: ShadowUniforms;
 // Colored transmittance atlas: RGB transmittance of translucent occluders in
 // front of the nearest opaque surface (white where nothing translucent occludes).
-@group(3) @binding(3)
+@group(0) @binding(13)
 var t_shadow_transmittance: texture_2d_array<f32>;
-@group(3) @binding(4)
+@group(0) @binding(14)
 var s_shadow_color: sampler;
 
 // Colored visibility of a light at a shadow texel: the opaque PCF visibility
@@ -634,12 +637,12 @@ struct VertexInput {
     has_morph_normals: u32,
     weights: array<vec4<f32>, 16>,
 }
-@if(deform) @group(4) @binding(0) var<storage, read> joint_palette: array<mat4x4<f32>>;
-@if(deform) @group(4) @binding(1) var<storage, read> skin_joints: array<vec4<u32>>;
-@if(deform) @group(4) @binding(2) var<storage, read> skin_weights: array<vec4<f32>>;
-@if(deform) @group(4) @binding(3) var<storage, read> morph_pos: array<vec4<f32>>;
-@if(deform) @group(4) @binding(4) var<storage, read> morph_nrm: array<vec4<f32>>;
-@if(deform) @group(4) @binding(5) var<uniform> deform: DeformControl;
+@if(deform) @group(3) @binding(0) var<storage, read> joint_palette: array<mat4x4<f32>>;
+@if(deform) @group(3) @binding(1) var<storage, read> skin_joints: array<vec4<u32>>;
+@if(deform) @group(3) @binding(2) var<storage, read> skin_weights: array<vec4<f32>>;
+@if(deform) @group(3) @binding(3) var<storage, read> morph_pos: array<vec4<f32>>;
+@if(deform) @group(3) @binding(4) var<storage, read> morph_nrm: array<vec4<f32>>;
+@if(deform) @group(3) @binding(5) var<uniform> deform: DeformControl;
 
 // Instance input
 struct InstanceInput {
@@ -1078,7 +1081,10 @@ fn shade_light(
 
     let kD = (vec3<f32>(1.0) - F) * (1.0 - metallic) * cc_atten;
 
-    let wrap = 0.2;
+    // True Lambert (cosine) diffuse, matching the path tracer. (Previously a 0.2
+    // half-Lambert wrap, `NdotL*0.8 + 0.2`, brightened the terminator/dark side —
+    // a softer but non-physical look that made the rasterizer disagree with the PT.)
+    let wrap = 0.0;
     let diffuse_wrap = max(NdotL_raw * (1.0 - wrap) + wrap, 0.0);
 
     let radiance = light.color * light_intensity * attenuation;

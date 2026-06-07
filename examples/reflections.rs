@@ -16,8 +16,6 @@
 //!
 //! Run with the `egui` feature: `cargo run --features egui --example reflections`.
 
-use std::path::Path;
-
 #[cfg(not(feature = "egui"))]
 #[kiss3d::main]
 async fn main() {
@@ -28,6 +26,8 @@ async fn main() {
 #[kiss3d::main]
 async fn main() {
     use kiss3d::prelude::*;
+    #[cfg(not(target_arch = "wasm32"))]
+    use std::path::Path;
 
     let mut window = Window::new("Kiss3d: reflections").await;
     let mut camera = OrbitCamera3d::new(Vec3::new(0.0, 2.5, 9.0), Vec3::new(0.0, 0.5, 0.0));
@@ -35,7 +35,10 @@ async fn main() {
 
     window.set_ambient(0.1);
     scene.add_light(Light::directional(Vec3::new(-0.5, -0.8, -0.4)).with_intensity(2.5));
+    #[cfg(not(target_arch = "wasm32"))]
     window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
+    #[cfg(target_arch = "wasm32")]
+    window.set_skybox_from_memory(include_bytes!("media/skybox.png"));
 
     // Reflective floor: a brushed-metal slab. A slightly rough (not perfect-mirror)
     // floor blurs the SSR reflections, so the partial reflections at steep
@@ -43,10 +46,11 @@ async fn main() {
     // can't reflect rays pointing back toward the camera, leaving gaps a mirror
     // would expose).
     let mut floor = scene.add_cube(24.0, 0.1, 24.0);
-    floor.set_position(Vec3::new(0.0, -1.0, 0.0));
-    floor.set_color(Color::new(0.5, 0.5, 0.55, 1.0));
-    floor.set_metallic(1.0);
-    floor.set_roughness(0.18);
+    floor
+        .set_position(Vec3::new(0.0, -1.0, 0.0))
+        .set_color(Color::new(0.5, 0.5, 0.55, 1.0))
+        .set_metallic(1.0)
+        .set_roughness(0.18);
 
     // Chrome spheres of increasing roughness. They orbit the middle sphere and bob
     // up and down (animated in the render loop). Each is stored with its orbit
@@ -62,14 +66,14 @@ async fn main() {
     let mut spheres = Vec::new();
     for (i, color) in palette.iter().enumerate() {
         let mut s = scene.add_sphere(0.9);
-        s.set_color(*color);
-        s.set_metallic(0.9);
-        s.set_roughness(0.05 + 0.18 * i as f32);
         // Put the (moving) spheres on render layer 1 so they're excluded from the
         // probe capture below — a single-point probe distorts nearby objects, so
         // SSR (which reflects them accurately) handles them instead. The floor
         // stays on the default layer 0, which the probe does capture.
-        s.set_render_layers(0b10);
+        s.set_color(*color)
+            .set_metallic(0.9)
+            .set_roughness(0.05 + 0.18 * i as f32)
+            .set_render_layers(0b10);
         let offset = (i as f32 - 2.0) * 2.4; // signed distance from the middle sphere
         let radius = offset.abs();
         let base_angle = if offset >= 0.0 {

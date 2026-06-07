@@ -1304,6 +1304,18 @@ impl ShadowMapper {
         &self.bind_group
     }
 
+    /// The shadow GPU resources, for the object material to fold into its view
+    /// (group 0) bind group. Cloning these handles is cheap (reference-counted).
+    pub fn resources(&self) -> crate::resource::ShadowResources {
+        crate::resource::ShadowResources {
+            atlas: self.array_view.clone(),
+            compare_sampler: self.compare_sampler.clone(),
+            uniform: self.uniform_buffer.clone(),
+            transmittance: self.transmittance_array_view.clone(),
+            transmittance_sampler: self.transmittance_sampler.clone(),
+        }
+    }
+
     /// Whether shadow mapping is enabled globally.
     pub fn is_enabled(&self) -> bool {
         self.enabled

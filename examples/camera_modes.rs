@@ -37,23 +37,25 @@ async fn main() {
     // Layer 0: red cubes in a back row.
     for i in 0..5 {
         let x = (i as f32 - 2.0) * 2.0;
-        let mut c = scene.add_cube(1.0, 1.0, 1.0);
-        c.translate(Vec3::new(x, 0.0, -2.0));
-        c.set_color(RED);
-        c.set_render_layers(1 << 0);
+        scene
+            .add_cube(1.0, 1.0, 1.0)
+            .translate(Vec3::new(x, 0.0, -2.0))
+            .set_color(RED)
+            .set_render_layers(1 << 0);
     }
     // Layer 1: green spheres in a front row.
     for i in 0..5 {
         let x = (i as f32 - 2.0) * 2.0;
-        let mut s = scene.add_sphere(0.6);
-        s.translate(Vec3::new(x, 0.0, 2.0));
-        s.set_color(LIME);
-        s.set_render_layers(1 << 1);
+        scene
+            .add_sphere(0.6)
+            .translate(Vec3::new(x, 0.0, 2.0))
+            .set_color(LIME)
+            .set_render_layers(1 << 1);
     }
 
     // UI state.
     let mut orthographic = false;
-    let mut ev100 = 7.0f32;
+    let mut ev100 = 1.0f32;
     let mut layers = Layers::Both;
 
     while window.render_3d(&mut scene, &mut camera).await {

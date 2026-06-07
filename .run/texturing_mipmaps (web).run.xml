@@ -1,6 +1,6 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="texturing_mipmaps (web)" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
-    <option name="command" value="run --package kiss3d --example texturing_mipmaps --target wasm32-unknown-unknown" />
+    <option name="command" value="run --package kiss3d --example texturing_mipmaps --features rt_switcher --target wasm32-unknown-unknown" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <option name="emulateTerminal" value="true" />
     <option name="channel" value="DEFAULT" />

@@ -17,9 +17,6 @@
 //! * **Tony McMapface** — Tomasz Stachowiak's perceptual display transform,
 //!   sampled from its baked CC0 3D LUT.
 //!
-//! A checkbox switches between the rasterizer and the GPU path tracer — the same
-//! operator applies to both, so you can compare the tonemappers in either backend.
-//!
 //! Run with the `egui` feature: `cargo run --features egui --example tonemapping`.
 
 #[cfg(not(feature = "egui"))]
@@ -33,7 +30,6 @@ async fn main() {
 async fn main() {
     use kiss3d::post_processing::Tonemap;
     use kiss3d::prelude::*;
-    use kiss3d::renderer::RayTracer;
 
     let mut window = Window::new("Kiss3d: tonemapping comparison").await;
     window.set_background_color(Color::new(0.09, 0.10, 0.13, 1.0));
@@ -82,43 +78,25 @@ async fn main() {
         )
         .set_position(Vec3::new(4.0, 6.0, 3.0));
 
-    // The same tonemap operators apply to both backends, so the comparison holds
-    // whether the scene is rasterized or path-traced.
-    let mut raytracer = RayTracer::new();
-
     // UI state (start at the default operator).
     let mut tonemap = Tonemap::default();
     let mut exposure = 1.0f32;
     let mut bloom = false;
-    let mut pathtrace = false;
     let mut auto_exposure = false;
 
-    loop {
+    while window.render_3d(&mut scene, &mut camera).await {
         // Exposure and tonemap live on the window's HDR settings and drive both
         // the rasterizer and the path tracer.
         window.set_tonemap(tonemap);
         window.set_exposure(exposure);
         // Auto-exposure (rasterizer only) overrides the manual exposure when on.
-        window.hdr_settings_mut().auto_exposure = auto_exposure && !pathtrace;
-
-        let still_open = if pathtrace {
-            window
-                .raytrace_3d(&mut scene, &mut camera, &mut raytracer)
-                .await
-        } else {
-            window.set_bloom_enabled(bloom);
-            window.render_3d(&mut scene, &mut camera).await
-        };
-        if !still_open {
-            break;
-        }
+        window.hdr_settings_mut().auto_exposure = auto_exposure;
+        window.set_bloom_enabled(bloom);
 
         window.draw_ui(|ctx| {
             egui::Window::new("Tonemapping")
                 .default_width(260.0)
                 .show(ctx, |ui| {
-                    ui.checkbox(&mut pathtrace, "Path tracing (vs. rasterizer)");
-                    ui.separator();
                     ui.label("Operator:");
                     ui.radio_value(&mut tonemap, Tonemap::None, "None (clamp)");
                     ui.radio_value(&mut tonemap, Tonemap::Aces, "ACES");
@@ -131,18 +109,12 @@ async fn main() {
                     );
                     ui.radio_value(&mut tonemap, Tonemap::TonyMcMapface, "Tony McMapface (LUT)");
                     ui.separator();
+                    ui.checkbox(&mut auto_exposure, "Auto-exposure");
                     ui.add_enabled(
-                        !pathtrace,
-                        egui::Checkbox::new(&mut auto_exposure, "Auto-exposure (rasterizer only)"),
-                    );
-                    ui.add_enabled(
-                        !(auto_exposure && !pathtrace),
+                        !auto_exposure,
                         egui::Slider::new(&mut exposure, 0.1..=4.0).text("Exposure"),
                     );
-                    ui.add_enabled(
-                        !pathtrace,
-                        egui::Checkbox::new(&mut bloom, "Bloom (rasterizer only)"),
-                    );
+                    ui.checkbox(&mut bloom, "Bloom");
                 });
         });
     }

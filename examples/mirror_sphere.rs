@@ -18,6 +18,7 @@
 //!
 //! Run with: `cargo run --release --example mirror_sphere`.
 
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 #[kiss3d::main]
@@ -31,7 +32,10 @@ async fn main() {
     // Skybox IBL + a couple of tinted directional lights give the metal something
     // rich to reflect even before the local probe kicks in.
     window.set_ambient(0.12);
+    #[cfg(not(target_arch = "wasm32"))]
     window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
+    #[cfg(target_arch = "wasm32")]
+    window.set_skybox_from_memory(include_bytes!("media/skybox.png"));
     scene.add_light(Light::directional(Vec3::new(-0.5, -0.8, -0.4)).with_intensity(2.2));
     scene.add_light(
         Light::directional(Vec3::new(0.6, -0.4, 0.5))
@@ -40,10 +44,11 @@ async fn main() {
     );
 
     // Reflective floor (captured on layer 0).
-    let mut floor = scene.add_cube(20.0, 0.2, 20.0);
-    floor.set_position(Vec3::new(0.0, -1.0, 0.0));
-    floor.set_color(Color::new(0.45, 0.46, 0.5, 1.0));
-    floor.set_roughness(0.22);
+    scene
+        .add_cube(20.0, 0.2, 20.0)
+        .set_position(Vec3::new(0.0, -1.0, 0.0))
+        .set_color(Color::new(0.45, 0.46, 0.5, 1.0))
+        .set_roughness(0.22);
 
     // A ring of colored columns surrounding the sphere — static environment that
     // wraps around the mirror so you can read the reflection as you orbit.
@@ -62,15 +67,16 @@ async fn main() {
         let angle = i as f32 / column_count as f32 * std::f32::consts::TAU;
         let radius = 6.5;
         let height = 4.0;
-        let mut col = scene.add_cylinder(0.45, height);
-        col.set_position(Vec3::new(
-            radius * angle.cos(),
-            height * 0.5 - 1.0,
-            radius * angle.sin(),
-        ));
-        col.set_color(*color);
-        col.set_metallic(0.1);
-        col.set_roughness(0.6);
+        scene
+            .add_cylinder(0.45, height)
+            .set_position(Vec3::new(
+                radius * angle.cos(),
+                height * 0.5 - 1.0,
+                radius * angle.sin(),
+            ))
+            .set_color(*color)
+            .set_metallic(0.1)
+            .set_roughness(0.6);
     }
 
     // Orbiting cubes — the moving content in the reflection. Stored with a
@@ -84,9 +90,7 @@ async fn main() {
     let mut cubes = Vec::new();
     for (i, color) in cube_colors.iter().enumerate() {
         let mut c = scene.add_cube(0.8, 0.8, 0.8);
-        c.set_color(*color);
-        c.set_metallic(0.2);
-        c.set_roughness(0.35);
+        c.set_color(*color).set_metallic(0.2).set_roughness(0.35);
         let phase = i as f32 / cube_colors.len() as f32 * std::f32::consts::TAU;
         cubes.push((c, phase));
     }
@@ -95,10 +99,11 @@ async fn main() {
     // reflection dominate, so it reads as polished chrome. On render layer 1 so
     // the probe capture excludes it (it must not reflect itself).
     let mut sphere = scene.add_sphere(1.6);
-    sphere.set_color(Color::new(1.0, 1.0, 1.0, 1.0));
-    sphere.set_metallic(1.0);
-    sphere.set_roughness(0.1);
-    sphere.set_render_layers(0b10);
+    sphere
+        .set_color(Color::new(1.0, 1.0, 1.0, 1.0))
+        .set_metallic(1.0)
+        .set_roughness(0.1)
+        .set_render_layers(0b10);
 
     // The runtime probe captures only layer 0 (everything except the sphere).
     window.set_reflection_capture_layers(0b01);

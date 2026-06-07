@@ -1,5 +1,4 @@
 use kiss3d::prelude::*;
-use kiss3d::window::Inspector;
 
 #[kiss3d::main]
 async fn main() {

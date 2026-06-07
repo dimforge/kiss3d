@@ -20,6 +20,7 @@ async fn main() {
 #[kiss3d::main]
 async fn main() {
     use kiss3d::prelude::*;
+    #[cfg(not(target_arch = "wasm32"))]
     use std::path::Path;
 
     let mut window = Window::new("Kiss3d: skybox").await;
@@ -30,21 +31,28 @@ async fn main() {
     scene.add_light(Light::directional(Vec3::new(-0.5, -0.7, -0.4)).with_intensity(2.5));
     for i in 0..4 {
         let x = (i as f32 - 1.5) * 1.6;
-        let mut s = scene.add_sphere(0.6);
-        s.translate(Vec3::new(x, 0.0, 0.0));
-        s.set_metallic(1.0);
-        s.set_roughness(0.1 + 0.25 * i as f32);
-        s.set_color(Color::new(0.9, 0.9, 0.92, 1.0));
+        scene
+            .add_sphere(0.6)
+            .translate(Vec3::new(x, 0.0, 0.0))
+            .set_metallic(1.0)
+            .set_roughness(0.1 + 0.25 * i as f32)
+            .set_color(Color::new(0.9, 0.9, 0.92, 1.0));
     }
 
-    // Load an HDRI from the command line, or fall back to a procedural sky.
-    let from_file = std::env::args()
-        .nth(1)
-        .map(|p| window.set_skybox_from_file(Path::new(&p)))
-        .unwrap_or(false);
-    if !from_file {
-        window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
+    // Load an HDRI from the command line (native only), or fall back to the bundled
+    // sky — embedded into the binary on wasm, which has no filesystem.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let from_file = std::env::args()
+            .nth(1)
+            .map(|p| window.set_skybox_from_file(Path::new(&p)))
+            .unwrap_or(false);
+        if !from_file {
+            window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
+        }
     }
+    #[cfg(target_arch = "wasm32")]
+    window.set_skybox_from_memory(include_bytes!("media/skybox.png"));
 
     let mut rotation = 0.0f32;
     let mut intensity = 1.0f32;
@@ -67,7 +75,10 @@ async fn main() {
         if !enabled {
             window.clear_skybox();
         } else if !window.has_skybox() {
+            #[cfg(not(target_arch = "wasm32"))]
             window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
+            #[cfg(target_arch = "wasm32")]
+            window.set_skybox_from_memory(include_bytes!("media/skybox.png"));
         }
     }
 }

@@ -55,6 +55,9 @@ pub struct GpuScene {
     /// kernel uses a cheap binary occlusion test for shadow rays; when true it
     /// accumulates colored transmittance through translucent occluders.
     pub has_translucent: bool,
+    /// Whether any material opts out of casting shadows. When true, shadow rays use
+    /// the per-occluder walk (skipping non-casters) instead of the binary test.
+    pub has_non_shadow_caster: bool,
     /// Content hash of the [`RtScene`] this was built from.
     pub hash: u64,
 
@@ -220,6 +223,7 @@ impl GpuScene {
             num_lights: scene.lights.len() as u32,
             num_emitters: scene.emitters.len() as u32,
             has_translucent: scene.materials.iter().any(|m| m.base_color[3] < 1.0),
+            has_non_shadow_caster: scene.materials.iter().any(|m| m.casts_shadows == 0),
             hash: scene.hash,
             _blas: Vec::new(),
             tlas: None,
@@ -422,6 +426,7 @@ impl GpuScene {
             num_lights: scene.lights.len() as u32,
             num_emitters: scene.emitters.len() as u32,
             has_translucent: scene.materials.iter().any(|m| m.base_color[3] < 1.0),
+            has_non_shadow_caster: scene.materials.iter().any(|m| m.casts_shadows == 0),
             hash: scene.hash,
             _blas: blases,
             tlas: Some(tlas),

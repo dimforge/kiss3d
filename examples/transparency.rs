@@ -43,9 +43,10 @@ async fn main() {
         sheet(1.05, Color::new(0.25, 0.9, 0.35, 0.45)),
         sheet(-1.05, Color::new(0.3, 0.45, 0.95, 0.45)),
     ] {
-        let mut s = scene.add_cube(5.0, 2.6, 0.06);
-        s.set_color(color);
-        s.rotate(Quat::from_axis_angle(Vec3::Y, angle));
+        scene
+            .add_cube(5.0, 2.6, 0.06)
+            .set_color(color)
+            .rotate(Quat::from_axis_angle(Vec3::Y, angle));
     }
 
     // A cluster of overlapping translucent spheres floating above.

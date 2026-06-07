@@ -60,6 +60,16 @@ pub struct FrameUniforms {
     /// is bound. Lands at offset 144; its 16 bytes also pad the uniform to the
     /// 160-byte stride WGSL rounds this struct up to (mat4x4/vec4 alignment).
     pub background: [f32; 4],
+    /// Ambient light color (RGB; A unused), multiplying the scalar `ambient` fill.
+    pub ambient_color: [f32; 4],
+    /// Distance-fog color (RGB) + overall strength (A).
+    pub fog_color: [f32; 4],
+    /// Fog falloff encoding `(mode, param_a, param_b, height_falloff)`; `mode == 0`
+    /// disables fog. See [`crate::light::Fog`].
+    pub fog_params: [f32; 4],
+    /// Misc flags. `x = 1` when some object opts out of casting shadows (the kernel
+    /// then walks shadow-ray occluders to skip non-casters). The rest are reserved.
+    pub flags: [u32; 4],
 }
 
 const PREAMBLE: &str = include_str!("../../builtin/raytrace/rt_preamble.wgsl");

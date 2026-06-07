@@ -8,7 +8,7 @@ pub use self::point_renderer2d::PointRenderer2d;
 pub use self::point_renderer3d::PointRenderer3d;
 pub use self::polyline_renderer2d::{Polyline2d, PolylineRenderer2d};
 pub use self::polyline_renderer3d::{Polyline3d, PolylineRenderer3d};
-pub use self::raytracer::{RayBackend, RayTracer};
+pub use self::raytracer::{RayBackend, RayTracer, RayTracerPreset};
 pub use self::reflection_probe::{
     CubeFaceCamera, ProbeCapture, ReflectionProbe, ReflectionProbes, MAX_PROBES,
 };

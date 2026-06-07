@@ -198,8 +198,7 @@ impl Clustered {
         }
         // Round up to the next power of two for headroom, clamped to the device's
         // maximum storage-buffer binding size.
-        let max_lights =
-            (ctxt.device.limits().max_storage_buffer_binding_size as u64 / 64).max(1) as u32;
+        let max_lights = (ctxt.device.limits().max_storage_buffer_binding_size / 64).max(1) as u32;
         let cap = needed
             .next_power_of_two()
             .min(max_lights)

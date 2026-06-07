@@ -38,10 +38,8 @@ async fn main() {
     c.set_instances(&instances);
 
     let rot = Quat::from_axis_angle(Vec3::Y, 0.014);
-    let mut inspector = Inspector::default();
 
     while window.render_3d(&mut scene, &mut camera).await {
         c.rotate(rot);
-        window.draw_inspector(&mut inspector, Some(&mut scene), None, None);
     }
 }

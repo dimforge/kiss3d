@@ -152,7 +152,7 @@ impl Bsdf {
 /// is below `1.0`.
 ///
 /// [`Blend`]: AlphaMode::Blend
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum AlphaMode {
     /// Fully opaque: the alpha channel is ignored and the surface always renders
@@ -163,16 +163,11 @@ pub enum AlphaMode {
     Mask(f32),
     /// Standard (straight) alpha blending through the order-independent
     /// transparency pass when alpha `< 1.0`.
+    #[default]
     Blend,
     /// Premultiplied alpha blending (color is already multiplied by alpha) through
     /// the order-independent transparency pass when alpha `< 1.0`.
     Premultiplied,
-}
-
-impl Default for AlphaMode {
-    fn default() -> Self {
-        AlphaMode::Blend
-    }
 }
 
 impl AlphaMode {
@@ -195,21 +190,16 @@ impl AlphaMode {
 }
 
 /// How parallax mapping marches the height field.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Default)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub enum ParallaxMethod {
     /// Parallax-occlusion mapping: linear search + interpolation. Cheaper.
+    #[default]
     Occlusion,
     /// Relief mapping: linear search + `max_steps` binary-search refinements.
     /// Sharper than occlusion at the cost of extra samples; more steps give a
     /// crisper crossing.
     Relief { max_steps: u32 },
-}
-
-impl Default for ParallaxMethod {
-    fn default() -> Self {
-        ParallaxMethod::Occlusion
-    }
 }
 
 impl ParallaxMethod {
@@ -521,11 +511,11 @@ impl ObjectData3d {
 
     /// Refreshes this object's GPU deform state for the current frame: writes the
     /// control uniform (skin flag + current morph weights) and (re)builds the deform
-    /// bind group over the palette + skin/morph storage buffers. Native-only; a no-op
-    /// when the object isn't deformable. Called once per frame from
+    /// bind group over the palette + skin/morph storage buffers. A no-op when the
+    /// object isn't deformable. Called once per frame from
     /// [`SceneNode3d::update_deformations`](crate::scene::SceneNode3d::update_deformations)
-    /// after the joint palette has been uploaded.
-    #[cfg(not(target_arch = "wasm32"))]
+    /// after the joint palette has been uploaded. Runs on all targets (the deform
+    /// group is group 3, within WebGPU's 4-bind-group cap).
     pub(crate) fn update_deform(&mut self, mesh: &GpuMesh3d) {
         use crate::builtin::deform::{DeformControl, DeformGpu};
 
@@ -643,6 +633,13 @@ impl ObjectData3d {
     #[inline]
     pub fn light_layers(&self) -> u32 {
         self.light_layers
+    }
+
+    /// Whether this object occludes lights (casts shadows). See
+    /// [`Object3d::set_casts_shadows`].
+    #[inline]
+    pub fn casts_shadows(&self) -> bool {
+        self.casts_shadows
     }
 
     /// Returns the path-tracer BSDF model for this object.
@@ -1021,9 +1018,9 @@ impl Object3d {
             segmentation_id: next_segmentation_id(),
             material,
             user_data: Box::new(user_data),
-            render_layers: 1,         // layer 0
-            light_layers: u32::MAX,   // affected by every light
-            casts_shadows: true,      // contributes to the shadow depth pass
+            render_layers: 1,       // layer 0
+            light_layers: u32::MAX, // affected by every light
+            casts_shadows: true,    // contributes to the shadow depth pass
 
             // PBR defaults (backward compatible with Blinn-Phong appearance)
             metallic: 0.0,

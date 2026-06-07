@@ -54,12 +54,13 @@ async fn main() {
 
     // Spot light pointing down at the scene, casting a sharper shadow. `reorient`
     // aims the node's forward (-Z) vector from the light position toward the floor.
-    let mut spot = scene.add_light(
-        Light::spot(0.35, 0.55, 30.0)
-            .with_color(Color::new(0.8, 0.85, 1.0, 1.0))
-            .with_intensity(12.0),
-    );
-    spot.reorient(Vec3::new(4.0, 6.0, 4.0), Vec3::ZERO, Vec3::Y);
+    scene
+        .add_light(
+            Light::spot(0.35, 0.55, 30.0)
+                .with_color(Color::new(0.8, 0.85, 1.0, 1.0))
+                .with_intensity(12.0),
+        )
+        .reorient(Vec3::new(4.0, 6.0, 4.0), Vec3::ZERO, Vec3::Y);
 
     // A non-shadow-casting fill light to lift the ambient look.
     scene

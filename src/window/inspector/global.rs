@@ -96,7 +96,7 @@ impl Inspector {
                     egui::ComboBox::from_id_salt("inspector_msaa")
                         .selected_text(msaa_label(win.samples))
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut win.samples, NumSamples::Zero, "Off");
+                            ui.selectable_value(&mut win.samples, NumSamples::One, "Off");
                             ui.selectable_value(&mut win.samples, NumSamples::Four, "4×");
                         });
                 });
@@ -249,17 +249,8 @@ impl Inspector {
                         .text("Interactive scale"),
                 );
 
-                ui.collapsing("Depth of field", |ui| {
-                    ui.add(
-                        egui::Slider::new(&mut self.rt.f_number, 0.0..=32.0)
-                            .text("f-number (0 = pinhole)"),
-                    );
-                    ui.add(
-                        egui::Slider::new(&mut self.rt.focus_distance, 0.01..=100.0)
-                            .text("Focus distance")
-                            .logarithmic(true),
-                    );
-                });
+                // Depth of field is shared with the rasterizer — edit it in the
+                // global "Depth of field" section above; the path tracer mirrors it.
 
                 ui.collapsing("Environment", |ui| {
                     ui.add(

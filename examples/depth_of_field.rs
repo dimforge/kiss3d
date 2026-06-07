@@ -33,10 +33,11 @@ async fn main() {
     scene.add_light(Light::directional(Vec3::new(-0.4, -0.8, -0.3)).with_intensity(2.5));
 
     // A ground plane to give the blur something continuous to fall off over.
-    let mut floor = scene.add_cube(40.0, 0.1, 40.0);
-    floor.set_position(Vec3::new(0.0, -1.0, -10.0));
-    floor.set_color(Color::new(0.35, 0.35, 0.4, 1.0));
-    floor.set_roughness(0.9);
+    scene
+        .add_cube(40.0, 0.1, 40.0)
+        .set_position(Vec3::new(0.0, -1.0, -10.0))
+        .set_color(Color::new(0.35, 0.35, 0.4, 1.0))
+        .set_roughness(0.9);
 
     // A row of spheres marching away from the camera, one every 2 units.
     let palette = [
@@ -50,11 +51,12 @@ async fn main() {
         Color::new(0.95, 0.95, 0.95, 1.0),
     ];
     for (i, color) in palette.iter().enumerate() {
-        let mut s = scene.add_sphere(0.7);
-        s.set_position(Vec3::new(0.0, -0.3, -2.0 * i as f32));
-        s.set_color(*color);
-        s.set_metallic(0.1);
-        s.set_roughness(0.4);
+        scene
+            .add_sphere(0.7)
+            .set_position(Vec3::new(0.0, -0.3, -2.0 * i as f32))
+            .set_color(*color)
+            .set_metallic(0.1)
+            .set_roughness(0.4);
     }
 
     let mut enabled = true;

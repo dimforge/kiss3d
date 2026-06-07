@@ -65,8 +65,6 @@ struct RtKnobs {
     denoise: bool,
     denoise_iterations: u32,
     interactive_scale: f32,
-    f_number: f32,
-    focus_distance: f32,
     env_rotation_deg: f32,
     env_intensity: f32,
 }
@@ -80,8 +78,6 @@ impl Default for RtKnobs {
             denoise: false,
             denoise_iterations: 5,
             interactive_scale: 0.5,
-            f_number: 0.0,
-            focus_distance: 1.0,
             env_rotation_deg: 0.0,
             env_intensity: 1.0,
         }
@@ -98,7 +94,8 @@ impl RtKnobs {
         rt.set_denoise(self.denoise);
         rt.set_denoise_iterations(self.denoise_iterations);
         rt.set_interactive_scale(self.interactive_scale);
-        rt.set_f_number(self.f_number, self.focus_distance);
+        // Depth of field is shared with the rasterizer (driven by the window's DoF
+        // settings in `raytrace_3d_frame`), so it is not a separate path-tracer knob.
 
         let env = (self.env_rotation_deg.to_radians(), self.env_intensity);
         if prev_env != Some(env) {
@@ -234,7 +231,7 @@ impl Default for Inspector {
             env_status: String::new(),
             env_load_requested: false,
             env_clear_requested: false,
-            samples: NumSamples::Zero,
+            samples: NumSamples::One,
             ssao_enabled: false,
             ssao: SsaoSettings::default(),
             ssr_enabled: false,
@@ -455,7 +452,7 @@ impl Window {
     ) {
         // One-time seeding of UI state from the live window.
         if !inspector.initialized {
-            inspector.samples = NumSamples::from_u32(self.samples()).unwrap_or(NumSamples::Zero);
+            inspector.samples = NumSamples::from_u32(self.samples()).unwrap_or(NumSamples::One);
             inspector.ssao_enabled = self.ssao_enabled();
             inspector.ssr_enabled = self.ssr_enabled();
             inspector.dof_enabled = self.dof_enabled();

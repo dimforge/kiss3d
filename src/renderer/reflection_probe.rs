@@ -7,7 +7,8 @@
 //! tracks the room geometry rather than appearing infinitely far away.
 //!
 //! All probes share one mip-chained equirectangular `texture_2d_array` (one layer
-//! per probe), reusing the "mip-as-prefilter" approach of [`EnvironmentMap`]: the
+//! per probe), reusing the "mip-as-prefilter" approach of
+//! [`EnvironmentMap`](crate::renderer::EnvironmentMap): the
 //! coarser mips stand in for rougher pre-filtered reflections. The probe records
 //! (position, parallax box, intensity, …) are uploaded into the material's frame
 //! uniform as a small fixed-size array, so probes need no storage buffers and work

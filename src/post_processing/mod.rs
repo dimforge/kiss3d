@@ -7,6 +7,7 @@ pub use crate::post_processing::hdr::{
     ColorGrading, HdrPipeline, HdrSettings, Tonemap, HDR_FORMAT, OIT_ACCUM_FORMAT,
     OIT_REVEAL_FORMAT,
 };
+pub use crate::post_processing::loupe::{Loupe, LoupeCorner};
 pub use crate::post_processing::oculus_stereo::OculusStereo;
 pub use crate::post_processing::post_processing_effect::{
     PostProcessingContext, PostProcessingEffect,
@@ -19,6 +20,7 @@ mod cas;
 mod fxaa;
 mod grayscales;
 mod hdr;
+mod loupe;
 mod oculus_stereo;
 pub mod post_processing_effect;
 #[cfg(not(target_arch = "wasm32"))]

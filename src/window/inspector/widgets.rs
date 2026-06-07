@@ -130,7 +130,7 @@ pub(super) fn color_edit(ui: &mut egui::Ui, label: &str, c: &mut Color) -> bool 
 
 pub(super) fn msaa_label(s: NumSamples) -> &'static str {
     match s {
-        NumSamples::Zero | NumSamples::One => "Off",
+        NumSamples::One => "Off",
         NumSamples::Four => "4×",
     }
 }

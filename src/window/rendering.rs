@@ -70,15 +70,36 @@ impl Window {
             .await
     }
 
+    // `scene`/`camera` are only taken mutably (via `as_deref_mut`) by the
+    // `rt_switcher` block below; without that feature the `mut` is unused.
+    #[cfg_attr(not(feature = "rt_switcher"), allow(unused_mut))]
     pub async fn render(
         &mut self,
-        scene: Option<&mut SceneNode3d>,
+        mut scene: Option<&mut SceneNode3d>,
         scene_2d: Option<&mut SceneNode2d>,
-        camera: Option<&mut dyn Camera3d>,
+        mut camera: Option<&mut dyn Camera3d>,
         camera_2d: Option<&mut dyn Camera2d>,
         renderer: Option<&mut dyn Renderer3d>,
         post_processing: Option<&mut dyn PostProcessingEffect>,
     ) -> bool {
+        #[cfg(feature = "rt_switcher")]
+        if let (Some(mut rt), Some(camera), Some(scene)) = (
+            self.raytracer.0.take(),
+            camera.as_deref_mut(),
+            scene.as_deref_mut(),
+        ) {
+            // NOTE: this will skip 2D completely.
+            // Indicate the raytracer was enabled before calling `raytrace_3d`.
+            // This is useful so we can restore the correct state depending on
+            // the switch input handling.
+            self.raytracer.1 = true;
+            let result = self.raytrace_3d(scene, camera, &mut rt).await;
+            if self.raytracer.0.is_none() && self.raytracer.1 {
+                self.raytracer.0 = Some(rt);
+            }
+            return result;
+        }
+
         let mut default_cam2 = FixedView2d::default();
         let mut default_cam = FixedView3d::default();
 
@@ -407,7 +428,7 @@ impl Window {
                         viewport_height: FACE,
                         render_layers: self.reflection_capture_layers,
                         force_no_cull: false,
-                        shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                        shadow: Some(self.shadow_mapper.resources()),
                         phase: RenderPhase::Opaque,
                     };
                     {
@@ -546,7 +567,7 @@ impl Window {
                         viewport_height: h,
                         render_layers: camera.render_layers(),
                         force_no_cull: false,
-                        shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                        shadow: Some(self.shadow_mapper.resources()),
                         phase: RenderPhase::Prepass,
                     };
                     {
@@ -652,7 +673,7 @@ impl Window {
                     viewport_height: h,
                     render_layers: camera.render_layers(),
                     force_no_cull: false,
-                    shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                    shadow: Some(self.shadow_mapper.resources()),
                     phase: RenderPhase::Opaque,
                 };
 
@@ -741,7 +762,10 @@ impl Window {
         // and the composite blends them back, all for zero draws otherwise. The
         // `has_transparent_surfaces` check uses the same per-object classification the
         // material applies, so a real transparent surface is never dropped.
-        if let Some(scene) = scene.as_deref_mut().filter(|s| s.has_transparent_surfaces()) {
+        if let Some(scene) = scene
+            .as_deref_mut()
+            .filter(|s| s.has_transparent_surfaces())
+        {
             let oit_context = RenderContext {
                 surface_format: Context::render_format(),
                 // The OIT geometry pass shares the (MSAA) opaque depth buffer, so its
@@ -751,7 +775,7 @@ impl Window {
                 viewport_height: h,
                 render_layers: camera.render_layers(),
                 force_no_cull: false,
-                shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                shadow: Some(self.shadow_mapper.resources()),
                 phase: RenderPhase::Transparent,
             };
             {
@@ -958,7 +982,7 @@ impl Window {
                         viewport_height: h,
                         render_layers: camera.render_layers(),
                         force_no_cull: false,
-                        shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                        shadow: Some(self.shadow_mapper.resources()),
                         phase: RenderPhase::Transmission,
                     };
                     for g in 0..groups {
@@ -1292,6 +1316,44 @@ impl Window {
         let hdr = self.hdr_settings();
         let exposure = hdr.exposure;
         let tonemap_operator = hdr.tonemap.as_u32();
+        // Feed the window's skybox to the path tracer as its environment, so a
+        // skybox set on the window also lights and backgrounds the ray-traced
+        // view (the tracer's own environment, if set, still takes precedence).
+        let skybox = if self.skybox.is_set() {
+            Some((
+                self.skybox.environment(),
+                self.skybox.rotation(),
+                self.skybox.intensity(),
+                self.skybox.generation(),
+            ))
+        } else {
+            None
+        };
+
+        // Depth of field: the path tracer shares the rasterizer's DoF settings rather
+        // than a separate aperture. Convert the window's DoF (focal distance, aperture
+        // f-stops, sensor height + the camera's vertical FOV) into the tracer's
+        // thin-lens radius + focus distance, matching the rasterizer's
+        // circle-of-confusion model (see `circle_of_confusion` in dof.wgsl). Disabled
+        // DoF gives a pinhole camera. Re-applied every frame; `set_aperture` only
+        // resets accumulation when the derived values actually change.
+        let (lens_radius, focus_distance) = if self.dof_enabled {
+            let dof = self.dof.as_ref().map(|d| *d.settings()).unwrap_or_default();
+            // proj[1][1] = cot(fov_y / 2): the rasterizer derives the focal length
+            // from the sensor height and this term.
+            let proj11 = camera.view_transform_pair(0).1.to_cols_array()[5];
+            let focal_length = 0.5 * dof.sensor_height * proj11;
+            let aperture_d = focal_length / dof.aperture_f_stops.max(1e-3);
+            let denom = (dof.focal_distance - focal_length).max(1e-4);
+            (
+                0.5 * aperture_d * dof.focal_distance / denom,
+                dof.focal_distance,
+            )
+        } else {
+            (0.0, 1.0)
+        };
+        raytracer.set_aperture(lens_radius, focus_distance);
+
         // The path tracer records its own GPU phases (trace / denoise / tonemap)
         // into the GPU timer.
         raytracer.render_frame(
@@ -1299,6 +1361,7 @@ impl Window {
             camera,
             &lights,
             self.background,
+            skybox,
             &mut encoder,
             &frame_view,
             w,
@@ -1578,7 +1641,7 @@ impl Window {
                 render_layers: camera.render_layers(),
                 // The reflected projection flips winding, so disable back-face cull.
                 force_no_cull: true,
-                shadow_bind_group: Some(self.shadow_mapper.bind_group().clone()),
+                shadow: Some(self.shadow_mapper.resources()),
                 phase: RenderPhase::Opaque,
             };
             {

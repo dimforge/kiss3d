@@ -15,7 +15,7 @@
 //! ```
 
 use kiss3d::prelude::*;
-use kiss3d::window::Inspector;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 #[kiss3d::main]
@@ -44,7 +44,12 @@ async fn main() {
     } else {
         Vec3::splat(0.012)
     };
+    // Read the model from the path on native; on wasm (no filesystem) the bundled
+    // Fox is embedded into the binary. A CLI override only applies on native.
+    #[cfg(not(target_arch = "wasm32"))]
     let mut fox = scene.add_gltf(Path::new(path), scale);
+    #[cfg(target_arch = "wasm32")]
+    let mut fox = scene.add_gltf_from_memory(include_bytes!("media/gltf/Fox.glb"), scale);
 
     let names: Vec<String> = fox.player.clip_names().map(|s| s.to_string()).collect();
     println!(
@@ -56,9 +61,15 @@ async fn main() {
         fox.player.set_looping(true);
     }
 
-    // A model with morph atergts
+    // A model with morph targets.
+    #[cfg(not(target_arch = "wasm32"))]
     let mut morph_cube = scene.add_gltf(
         Path::new("examples/media/gltf/AnimatedMorphCube.glb"),
+        Vec3::splat(0.3),
+    );
+    #[cfg(target_arch = "wasm32")]
+    let mut morph_cube = scene.add_gltf_from_memory(
+        include_bytes!("media/gltf/AnimatedMorphCube.glb"),
         Vec3::splat(0.3),
     );
 

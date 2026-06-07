@@ -1,3 +1,8 @@
+//! NOTE: native-only. Unlike the other asset examples, this one is not embedded for
+//! wasm: the OBJ loader resolves the external `.mtl` (and its textures) from the
+//! filesystem by path, so `include_bytes!` embedding would require a memory-based
+//! OBJ loader that doesn't exist yet. Runs on native; on wasm it has no assets.
+
 use kiss3d::prelude::*;
 use std::f32;
 use std::path::Path;

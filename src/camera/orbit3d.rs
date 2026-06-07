@@ -466,7 +466,13 @@ impl OrbitCamera3d {
                 // `dist`) keeps working.
                 let half_h = self.dist * (self.fov * 0.5).tan();
                 let half_w = half_h * aspect;
-                Mat4::orthographic_rh_gl(-half_w, half_w, -half_h, half_h, self.znear, self.zfar)
+                // `orthographic_rh` maps depth to wgpu's [0, 1] clip range. The GL
+                // variant (`_rh_gl`, [-1, 1]) maps depth linearly, so everything
+                // nearer than the midpoint of [znear, zfar] lands at ndc_z < 0 and is
+                // clipped — i.e. the whole scene vanishes. (Perspective gets away with
+                // `_rh_gl` only because its nonlinear depth keeps the visible scene in
+                // [0, 1] bar a thin near sliver.)
+                Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, self.znear, self.zfar)
             }
         };
         self.view = self.view_transform().to_mat4();

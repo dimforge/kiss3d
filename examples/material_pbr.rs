@@ -9,6 +9,7 @@
 //!   - clearcoat     0 -> 1   (matte base gains a glossy coat)
 //!   - anisotropy   -1 -> 1   (highlight stretches along the tangent)
 //!   - reflectance   0 -> 1   (dielectric specular brightness)
+//!   - subsurface    0 -> 1   (translucent fill softens the terminator / dark side)
 //!   - transmission  0 -> 1   (refractive glass: opaque -> clear, refracts the scene)
 //!
 //! The bottom row is real screen-space refractive glass: each sphere refracts the
@@ -19,6 +20,7 @@
 //! Run with: `cargo run --example material_pbr`.
 
 use kiss3d::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 #[kiss3d::main]
@@ -30,13 +32,16 @@ async fn main() {
     // The skybox is the dominant light source (image-based lighting): the material
     // differences come through in its reflections, and the glass row refracts it. A
     // soft directional key adds specular highlights.
+    #[cfg(not(target_arch = "wasm32"))]
     window.set_skybox_from_file(Path::new("./examples/media/skybox.png"));
+    #[cfg(target_arch = "wasm32")]
+    window.set_skybox_from_memory(include_bytes!("media/skybox.png"));
     window.set_ambient(0.0);
     window.transmission_settings_mut().steps = 4;
     scene.add_light(Light::directional(Vec3::new(-0.4, -0.8, -0.6)).with_intensity(2.0));
 
     let cols = 6;
-    let rows = 6;
+    let rows = 7;
     let spacing = 2.2;
     for r in 0..rows {
         for c in 0..cols {
@@ -44,8 +49,7 @@ async fn main() {
             let y = ((rows as f32 - 1.0) * 0.5 - r as f32) * spacing;
             let t = c as f32 / (cols as f32 - 1.0); // 0 -> 1 across the columns
 
-            let mut s = scene.add_sphere(0.9)
-             .translate(Vec3::new(x, y, 0.0));
+            let mut s = scene.add_sphere(0.9).translate(Vec3::new(x, y, 0.0));
 
             // Each row picks a base material that makes its swept extension most
             // visible, then overrides that one parameter with the column ramp `t`.
@@ -53,48 +57,57 @@ async fn main() {
                 // Roughness: a polished metal smears the reflected skybox as it rises.
                 0 => {
                     s.set_color(Color::new(0.95, 0.95, 0.97, 1.0))
-                     .set_metallic(1.0)
-                     .set_roughness(t);
+                        .set_metallic(1.0)
+                        .set_roughness(t);
                 }
                 // Metallic: a glossy dielectric turns into tinted gold.
                 1 => {
                     s.set_color(Color::new(0.95, 0.70, 0.30, 1.0))
-                     .set_roughness(0.2)
-                     .set_metallic(t);
+                        .set_roughness(0.2)
+                        .set_metallic(t);
                 }
                 // Clearcoat: a matte red surface gains a sharp glossy coat on top.
                 2 => {
                     s.set_color(Color::new(0.80, 0.15, 0.12, 1.0))
-                     .set_metallic(0.0)
-                     .set_roughness(0.75)
-                     .set_clearcoat(t, 0.05);
+                        .set_metallic(0.0)
+                        .set_roughness(0.75)
+                        .set_clearcoat(t, 0.05);
                 }
                 // Anisotropy: a brushed metal stretches its highlight with the tangent.
                 3 => {
                     s.set_color(Color::new(0.85, 0.85, 0.88, 1.0))
-                     .set_metallic(1.0)
-                     .set_roughness(0.4)
-                     .set_anisotropy(t * 2.0 - 1.0, 0.0); // -1 -> 1
+                        .set_metallic(1.0)
+                        .set_roughness(0.4)
+                        .set_anisotropy(t * 2.0 - 1.0, 0.0); // -1 -> 1
                 }
                 // Reflectance: F0 of a smooth blue dielectric, dim to bright specular.
                 4 => {
                     s.set_color(Color::new(0.15, 0.30, 0.80, 1.0))
-                     .set_metallic(0.0)
-                     .set_roughness(0.15)
-                     .set_reflectance(t);
+                        .set_metallic(0.0)
+                        .set_roughness(0.15)
+                        .set_reflectance(t);
+                }
+                // Subsurface: a warm diffuse base whose translucent fill brightens the
+                // shadow side / softens the terminator as it rises (a per-material wrap,
+                // honored by both the rasterizer and the path tracer).
+                5 => {
+                    s.set_color(Color::new(0.85, 0.45, 0.35, 1.0))
+                        .set_metallic(0.0)
+                        .set_roughness(0.6)
+                        .set_subsurface(t, 0.0);
                 }
                 // Transmission: refractive glass. As it rises the sphere goes from a
                 // solid dielectric to clear glass that refracts the scene behind it
                 // (bent by ior/thickness), with a cool volume tint and a Fresnel rim
                 // reflection. Smooth here; raise roughness for frosted glass.
-                5 => {
+                6 => {
                     s.set_color(Color::new(0.85, 0.92, 1.0, 1.0))
-                     .set_reflectance(0.8)
-                     .set_roughness(0.2)
-                     .set_ior(1.5)
-                     .set_thickness(0.4)
-                     .set_attenuation(Color::new(0.82, 0.92, 1.0, 1.0), 8.0)
-                     .set_transmission(t);
+                        .set_reflectance(0.8)
+                        .set_roughness(0.2)
+                        .set_ior(1.5)
+                        .set_thickness(0.4)
+                        .set_attenuation(Color::new(0.82, 0.92, 1.0, 1.0), 8.0)
+                        .set_transmission(t);
                 }
                 _ => {}
             }
@@ -116,12 +129,13 @@ async fn main() {
         ];
         for (i, c) in palette.iter().enumerate() {
             let x = (i as f32 - (palette.len() as f32 - 1.0) * 0.5) * 2.2;
-            let mut b = scene.add_sphere(0.9);
-            b.translate(Vec3::new(x, bottom_y, -3.0));
-            b.set_color(*c);
-            b.set_roughness(0.5);
-            // A touch of emission so the refracted colors stay vivid.
-            b.set_emissive(Color::new(c.r * 0.4, c.g * 0.4, c.b * 0.4, 1.0));
+            scene
+                .add_sphere(0.9)
+                .translate(Vec3::new(x, bottom_y, -3.0))
+                .set_color(*c)
+                .set_roughness(0.5)
+                // A touch of emission so the refracted colors stay vivid.
+                .set_emissive(Color::new(c.r * 0.4, c.g * 0.4, c.b * 0.4, 1.0));
         }
     }
 
@@ -133,7 +147,8 @@ async fn main() {
         "row 3  clearcoat     0 -> 1",
         "row 4  anisotropy   -1 -> 1",
         "row 5  reflectance   0 -> 1",
-        "row 6  transmission  0 -> 1",
+        "row 6  subsurface    0 -> 1",
+        "row 7  transmission  0 -> 1",
     ];
 
     while window.render_3d(&mut scene, &mut camera).await {
