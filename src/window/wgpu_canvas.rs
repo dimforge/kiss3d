@@ -611,9 +611,13 @@ impl WgpuCanvas {
                         Action::Press,
                         Modifiers::empty(),
                     ));
-                    pending
-                        .borrow_mut()
-                        .push(WindowEvent::Char(event.key().chars().nth(0).unwrap()));
+                    // Force only digits and letters to be Char events
+                    let key_string = event.key();
+                    if key_string.len() == 1 {
+                        if let Some(ch) = event.key().chars().nth(0) {
+                            pending.borrow_mut().push(WindowEvent::Char(ch));
+                        }
+                    }
                 });
                 let _ = web_window
                     .add_event_listener_with_callback("keydown", closure.as_ref().unchecked_ref());
