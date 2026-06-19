@@ -611,6 +611,10 @@ impl WgpuCanvas {
                         Action::Press,
                         Modifiers::empty(),
                     ));
+                    // Assuming that all single key char inputs are of format 'KeyZ'
+                    if event.code().len() == 4 {
+                        pending.borrow_mut().push(WindowEvent::Char(event.code().chars().nth(3).unwrap()));
+                    } 
                 });
                 let _ = web_window
                     .add_event_listener_with_callback("keydown", closure.as_ref().unchecked_ref());
