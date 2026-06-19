@@ -22,6 +22,7 @@ async fn main() {
 
     // UI state
     let mut rotation_speed = 0.014;
+    let mut text = String::from("String");
     let mut opacity = 1.0;
     let mut cube_color = [1.0, 0.0, 0.0];
 
@@ -53,6 +54,9 @@ async fn main() {
                     // Opacity control
                     ui.label("Opacity:");
                     ui.add(egui::Slider::new(&mut opacity, 0.0..=1.0));
+
+                    // Text Input
+                    ui.add(egui::TextEdit::singleline(&mut text));
 
                     // Color picker
                     ui.label("Cube Color:");
