@@ -70,6 +70,22 @@ impl Window {
             .await
     }
 
+    /// Renders a 2D scene and runs a post-processing effect over the result.
+    ///
+    /// The 2D scene is rasterized into the HDR film and tonemapped (with bloom when
+    /// [`set_bloom_enabled`](Self::set_bloom_enabled) is on) exactly as in
+    /// [`render_2d`](Self::render_2d), then `post` (e.g. [`Crt`](crate::post_processing::Crt))
+    /// runs over the LDR image before it reaches the screen.
+    pub async fn render_2d_with(
+        &mut self,
+        scene: &mut SceneNode2d,
+        camera: &mut impl Camera2d,
+        post: &mut dyn PostProcessingEffect,
+    ) -> bool {
+        self.render(None, Some(scene), None, Some(camera), None, Some(post))
+            .await
+    }
+
     // `scene`/`camera` are only taken mutably (via `as_deref_mut`) by the
     // `rt_switcher` block below; without that feature the `mut` is unused.
     #[cfg_attr(not(feature = "rt_switcher"), allow(unused_mut))]

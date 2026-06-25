@@ -14,6 +14,7 @@ EXAMPLES=(
     primitives2d
     blend_modes2d
     sprites2d
+    post_processing2d
     clustered_lights
     wireframe
     lines

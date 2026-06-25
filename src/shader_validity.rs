@@ -26,7 +26,7 @@ mod tests {
     use crate::context::Context;
     use crate::light::Light;
     use crate::post_processing::{
-        Cas, Fxaa, Grayscales, OculusStereo, PostProcessingEffect, SobelEdgeHighlight, Waves,
+        Cas, Crt, Fxaa, Grayscales, OculusStereo, PostProcessingEffect, SobelEdgeHighlight, Waves,
     };
     use crate::renderer::RayTracer;
     use crate::scene::{AlphaMode, SceneNode2d, SceneNode3d};
@@ -173,6 +173,7 @@ mod tests {
                 Box::new(Grayscales::new()),
                 Box::new(Waves::new()),
                 Box::new(OculusStereo::new()),
+                Box::new(Crt::new()),
             ];
             for eff in &mut effects {
                 surface
