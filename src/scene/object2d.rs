@@ -14,6 +14,91 @@ use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 
+/// How a 2D object's surface is composited over what is already in the framebuffer.
+///
+/// The surface pass of [`ObjectMaterial2d`](crate::builtin::ObjectMaterial2d) builds
+/// one pipeline variant per blend mode (lazily, keyed by MSAA sample count), so
+/// switching an object's blend mode is free beyond the first use of that variant.
+/// Wireframe and point overlays always use straight alpha blending.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub enum Blend2d {
+    /// Straight (non-premultiplied) alpha blending: `src.rgb * src.a + dst.rgb * (1 - src.a)`.
+    /// The default, matching ordinary transparent sprites.
+    #[default]
+    Alpha,
+    /// Premultiplied alpha: `src.rgb + dst.rgb * (1 - src.a)`. Correct for textures
+    /// whose color is already multiplied by their alpha (avoids dark edge fringing).
+    PremultipliedAlpha,
+    /// Additive blending: `src.rgb * src.a + dst.rgb`. Light-emitting effects — fire,
+    /// sparks, glows, lasers — that should only ever brighten the background.
+    Additive,
+    /// Multiplicative blending: `src.rgb * dst.rgb`. Shadows, tints and stains that
+    /// darken the background.
+    Multiply,
+    /// Screen blending: `src.rgb + dst.rgb * (1 - src.rgb)`. A softer brightening than
+    /// additive that never blows past white.
+    Screen,
+    /// No blending: the source overwrites the destination (alpha is still written).
+    Opaque,
+}
+
+impl Blend2d {
+    /// The number of distinct blend modes; used to size the material's pipeline table.
+    pub(crate) const COUNT: usize = 6;
+
+    /// Every blend mode, in `as usize` discriminant order. Iterated when a material
+    /// pre-builds its per-blend-mode pipeline table so that `table[mode as usize]`
+    /// indexes the matching pipeline.
+    pub(crate) const ALL: [Blend2d; Self::COUNT] = [
+        Blend2d::Alpha,
+        Blend2d::PremultipliedAlpha,
+        Blend2d::Additive,
+        Blend2d::Multiply,
+        Blend2d::Screen,
+        Blend2d::Opaque,
+    ];
+
+    /// The wgpu blend state realizing this mode for a straight-(non-premultiplied)
+    /// color target, or `None` for [`Blend2d::Opaque`] (blending disabled).
+    pub(crate) fn blend_state(self) -> Option<wgpu::BlendState> {
+        use wgpu::{BlendComponent, BlendFactor, BlendOperation, BlendState};
+        let alpha_over = BlendComponent {
+            src_factor: BlendFactor::One,
+            dst_factor: BlendFactor::OneMinusSrcAlpha,
+            operation: BlendOperation::Add,
+        };
+        match self {
+            Blend2d::Alpha => Some(BlendState::ALPHA_BLENDING),
+            Blend2d::PremultipliedAlpha => Some(BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            Blend2d::Additive => Some(BlendState {
+                color: BlendComponent {
+                    src_factor: BlendFactor::SrcAlpha,
+                    dst_factor: BlendFactor::One,
+                    operation: BlendOperation::Add,
+                },
+                alpha: alpha_over,
+            }),
+            Blend2d::Multiply => Some(BlendState {
+                color: BlendComponent {
+                    src_factor: BlendFactor::Dst,
+                    dst_factor: BlendFactor::Zero,
+                    operation: BlendOperation::Add,
+                },
+                alpha: alpha_over,
+            }),
+            Blend2d::Screen => Some(BlendState {
+                color: BlendComponent {
+                    src_factor: BlendFactor::One,
+                    dst_factor: BlendFactor::OneMinusSrc,
+                    operation: BlendOperation::Add,
+                },
+                alpha: alpha_over,
+            }),
+            Blend2d::Opaque => None,
+        }
+    }
+}
+
 /// Set of data identifying a scene node.
 pub struct ObjectData2d {
     material: Rc<RefCell<Box<dyn Material2d + 'static>>>,
@@ -27,6 +112,7 @@ pub struct ObjectData2d {
     points_use_perspective: bool,
     draw_surface: bool,
     cull: bool,
+    blend: Blend2d,
     user_data: Box<dyn Any + 'static>,
 }
 
@@ -89,6 +175,12 @@ impl ObjectData2d {
     #[inline]
     pub fn backface_culling_enabled(&self) -> bool {
         self.cull
+    }
+
+    /// How this object's surface is composited over the framebuffer.
+    #[inline]
+    pub fn blend(&self) -> Blend2d {
+        self.blend
     }
 
     /// An user-defined data.
@@ -275,6 +367,7 @@ impl Object2d {
             points_use_perspective: true,
             draw_surface: true,
             cull: true,
+            blend: Blend2d::default(),
             material,
             user_data: Box::new(user_data),
         };
@@ -449,6 +542,20 @@ impl Object2d {
     #[inline]
     pub fn enable_backface_culling(&mut self, active: bool) {
         self.data.cull = active;
+    }
+
+    /// Sets how this object's surface is composited over the framebuffer.
+    ///
+    /// See [`Blend2d`] for the available modes. Defaults to [`Blend2d::Alpha`].
+    #[inline]
+    pub fn set_blend(&mut self, blend: Blend2d) {
+        self.data.blend = blend;
+    }
+
+    /// Returns how this object's surface is composited over the framebuffer.
+    #[inline]
+    pub fn blend(&self) -> Blend2d {
+        self.data.blend
     }
 
     /// Attaches user-defined data to this object.

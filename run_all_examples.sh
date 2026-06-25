@@ -12,6 +12,7 @@ EXAMPLES=(
     primitives
     primitives_scale
     primitives2d
+    blend_modes2d
     clustered_lights
     wireframe
     lines

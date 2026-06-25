@@ -6,7 +6,7 @@ use crate::resource::{
     GpuMesh2d, Material2d, MaterialManager2d, MeshManager2d, RenderContext2d, Texture,
     TextureManager,
 };
-use crate::scene::Object2d;
+use crate::scene::{Blend2d, Object2d};
 use glamx::{Pose2, Rot2, Vec2};
 use std::cell::{Ref, RefCell, RefMut};
 use std::f32;
@@ -1017,6 +1017,29 @@ impl SceneNode2d {
     #[inline]
     pub fn set_color_recursive(&mut self, color: Color) -> Self {
         self.apply_to_objects_mut_recursive(&mut |o| o.set_color(color));
+        self.clone()
+    }
+
+    /// Sets how this node's object is composited over the framebuffer.
+    ///
+    /// See [`Blend2d`] for the available modes (additive, multiply, screen, …).
+    /// Defaults to [`Blend2d::Alpha`].
+    ///
+    /// # See also
+    /// * [`Self::set_blend_recursive`] - to also modify all descendants.
+    #[inline]
+    pub fn set_blend(&mut self, blend: Blend2d) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_blend(blend));
+        self.clone()
+    }
+
+    /// Sets how this node's object and all its descendants are composited.
+    ///
+    /// # See also
+    /// * [`Self::set_blend`] - to only modify this node.
+    #[inline]
+    pub fn set_blend_recursive(&mut self, blend: Blend2d) -> Self {
+        self.apply_to_objects_mut_recursive(&mut |o| o.set_blend(blend));
         self.clone()
     }
 
