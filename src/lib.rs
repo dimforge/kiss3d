@@ -127,6 +127,7 @@ pub mod color;
 pub mod context;
 pub mod event;
 pub mod light;
+pub mod light2d;
 pub mod loader;
 pub mod post_processing;
 pub mod procedural;
@@ -146,6 +147,7 @@ pub mod prelude {
     pub use crate::context::*;
     pub use crate::event::*;
     pub use crate::light::*;
+    pub use crate::light2d::*;
     pub use crate::loader::*;
     pub use crate::renderer::*;
     pub use crate::resource::*;

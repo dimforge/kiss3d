@@ -6,6 +6,7 @@ use crate::resource::{
     GpuMesh2d, Material2d, MaterialManager2d, MeshManager2d, RenderContext2d, Texture,
     TextureManager,
 };
+use crate::builtin::{LitMaterial2d, LitParams};
 use crate::scene::sprite::SpriteSheet;
 use crate::scene::{Blend2d, Border, Object2d};
 use glamx::{Pose2, Rot2, Vec2};
@@ -485,6 +486,26 @@ impl SceneNode2d {
     pub fn nine_slice(size: Vec2, world: Border, uv: Border) -> SceneNode2d {
         let mesh = crate::scene::sprite::nine_slice_mesh(size, world, uv);
         Self::mesh(Rc::new(RefCell::new(mesh)), Vec2::ONE)
+    }
+
+    /// Creates a `width` × `height` sprite quad lit by the dynamic 2D lights, using
+    /// the shared [`LitMaterial2d`].
+    ///
+    /// Give it an albedo texture with `set_texture*`, optionally a normal map with
+    /// [`set_normal_map_from_file`](Self::set_normal_map_from_file), and tune shading
+    /// with [`set_lit_params`](Self::set_lit_params). Populate the lights through the
+    /// [`Light2dManager`](crate::light2d::Light2dManager) each frame.
+    pub fn lit_sprite(width: f32, height: f32) -> SceneNode2d {
+        let mut node = Self::rectangle(width, height);
+        node.set_material(LitMaterial2d::shared());
+        node
+    }
+
+    /// Adds a lit sprite as a child of this node. See [`Self::lit_sprite`].
+    pub fn add_lit_sprite(&mut self, width: f32, height: f32) -> SceneNode2d {
+        let node = Self::lit_sprite(width, height);
+        self.add_child(node.clone());
+        node
     }
 
     /// Removes this node from its parent.
@@ -1082,6 +1103,21 @@ impl SceneNode2d {
     #[inline]
     pub fn set_blend_recursive(&mut self, blend: Blend2d) -> Self {
         self.apply_to_objects_mut_recursive(&mut |o| o.set_blend(blend));
+        self.clone()
+    }
+
+    /// Sets the [`LitParams`] of this node's object (used by [`LitMaterial2d`]).
+    #[inline]
+    pub fn set_lit_params(&mut self, params: LitParams) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_lit_params(Some(params)));
+        self.clone()
+    }
+
+    /// Loads a normal map from a file and sets it on this node's object, for use with
+    /// [`LitMaterial2d`].
+    #[inline]
+    pub fn set_normal_map_from_file(&mut self, path: &Path, name: &str) -> Self {
+        self.apply_to_object_mut(&mut |o| o.set_normal_map_from_file(path, name));
         self.clone()
     }
 

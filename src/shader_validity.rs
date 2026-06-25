@@ -21,8 +21,9 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::builtin::ObjectMaterial;
+    use crate::builtin::{LitParams, ObjectMaterial};
     use crate::camera::{CoordinateSystem2d, FixedView2d, OrbitCamera3d};
+    use crate::light2d::{Light2d, Light2dManager};
     use crate::context::Context;
     use crate::light::Light;
     use crate::post_processing::{
@@ -108,6 +109,27 @@ mod tests {
         s.add_rectangle(50.0, 50.0)
             .set_lines_width(2.0, false)
             .set_position(Vec2::new(60.0, -40.0));
+        // Non-default blend modes exercise the extra surface pipelines.
+        s.add_rectangle(40.0, 40.0)
+            .set_color(Color::new(0.8, 0.2, 0.2, 0.6))
+            .set_blend(crate::scene::Blend2d::Additive)
+            .set_position(Vec2::new(0.0, 70.0));
+        s.add_rectangle(40.0, 40.0)
+            .set_color(Color::new(0.2, 0.8, 0.2, 0.6))
+            .set_blend(crate::scene::Blend2d::Multiply)
+            .set_position(Vec2::new(20.0, 70.0));
+        // Sprite quad + 9-slice mesh (object2d shader, more vertices).
+        s.add_sprite(30.0, 30.0).set_position(Vec2::new(-60.0, 60.0));
+        s.add_nine_slice(
+            Vec2::new(60.0, 40.0),
+            crate::scene::Border::uniform(8.0),
+            crate::scene::Border::uniform(0.25),
+        )
+        .set_position(Vec2::new(-60.0, 0.0));
+        // Lit material (uses the default flat normal map + global 2D lights).
+        s.add_lit_sprite(40.0, 40.0)
+            .set_lit_params(LitParams::default().with_specular(0.5, 24.0))
+            .set_position(Vec2::new(80.0, 0.0));
         s
     }
 
@@ -155,7 +177,22 @@ mod tests {
                 surface.render_3d(&mut scene, &mut cam).await;
             }
 
-            // 3) 2D scene (object2d / points2d / polyline2d / wireframe).
+            // 3) 2D scene (object2d / points2d / polyline2d / wireframe / sdf2d / lit2d).
+            Light2dManager::get_global_manager(|m| {
+                m.set_ambient(Color::new(0.1, 0.1, 0.12, 1.0));
+                m.set_lights(&[
+                    Light2d::point(Vec2::new(80.0, 30.0), Color::new(1.0, 0.9, 0.8, 1.0), 2.0, 200.0),
+                    Light2d::spot(
+                        Vec2::new(40.0, 60.0),
+                        Vec2::new(0.0, -1.0),
+                        Color::new(0.6, 0.8, 1.0, 1.0),
+                        2.0,
+                        180.0,
+                        0.3,
+                        0.6,
+                    ),
+                ]);
+            });
             let mut cam2 = FixedView2d::new(CoordinateSystem2d::default(), false);
             let mut scene2 = demo_scene_2d();
             surface.render_2d(&mut scene2, &mut cam2).await;

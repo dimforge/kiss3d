@@ -113,6 +113,8 @@ pub struct ObjectData2d {
     draw_surface: bool,
     cull: bool,
     blend: Blend2d,
+    normal_map: Option<Arc<Texture>>,
+    lit_params: Option<crate::builtin::LitParams>,
     user_data: Box<dyn Any + 'static>,
 }
 
@@ -181,6 +183,20 @@ impl ObjectData2d {
     #[inline]
     pub fn blend(&self) -> Blend2d {
         self.blend
+    }
+
+    /// The normal map used when this object is drawn with
+    /// [`LitMaterial2d`](crate::builtin::LitMaterial2d), if any.
+    #[inline]
+    pub fn normal_map(&self) -> Option<&Arc<Texture>> {
+        self.normal_map.as_ref()
+    }
+
+    /// The per-object lighting parameters used by
+    /// [`LitMaterial2d`](crate::builtin::LitMaterial2d), if any.
+    #[inline]
+    pub fn lit_params(&self) -> Option<crate::builtin::LitParams> {
+        self.lit_params
     }
 
     /// An user-defined data.
@@ -368,6 +384,8 @@ impl Object2d {
             draw_surface: true,
             cull: true,
             blend: Blend2d::default(),
+            normal_map: None,
+            lit_params: None,
             material,
             user_data: Box::new(user_data),
         };
@@ -556,6 +574,39 @@ impl Object2d {
     #[inline]
     pub fn blend(&self) -> Blend2d {
         self.data.blend
+    }
+
+    /// Sets the normal map used when this object is drawn with
+    /// [`LitMaterial2d`](crate::builtin::LitMaterial2d). `None` makes the surface flat.
+    #[inline]
+    pub fn set_normal_map(&mut self, normal_map: Option<Arc<Texture>>) {
+        self.data.normal_map = normal_map;
+    }
+
+    /// Loads a normal map from a file and sets it on this object (see [`Self::set_normal_map`]).
+    #[inline]
+    pub fn set_normal_map_from_file(&mut self, path: &Path, name: &str) {
+        let texture = TextureManager::get_global_manager(|tm| tm.add(path, name));
+        self.set_normal_map(Some(texture));
+    }
+
+    /// Returns the normal map, if any.
+    #[inline]
+    pub fn normal_map(&self) -> Option<&Arc<Texture>> {
+        self.data.normal_map.as_ref()
+    }
+
+    /// Sets the per-object lighting parameters used by
+    /// [`LitMaterial2d`](crate::builtin::LitMaterial2d). Ignored by other materials.
+    #[inline]
+    pub fn set_lit_params(&mut self, params: Option<crate::builtin::LitParams>) {
+        self.data.lit_params = params;
+    }
+
+    /// Returns the per-object lighting parameters, if any.
+    #[inline]
+    pub fn lit_params(&self) -> Option<crate::builtin::LitParams> {
+        self.data.lit_params
     }
 
     /// Attaches user-defined data to this object.

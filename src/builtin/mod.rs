@@ -74,6 +74,7 @@ pub use self::normals_material::{NormalsMaterial, NORMAL_FRAGMENT_SRC, NORMAL_VE
 pub use self::object_material::{ObjectMaterial, OBJECT_FRAGMENT_SRC, OBJECT_VERTEX_SRC};
 pub use self::uvs_material::{UvsMaterial, UVS_FRAGMENT_SRC, UVS_VERTEX_SRC};
 
+pub use self::lit_material2d::{LitMaterial2d, LitMaterial2dGpuData, LitParams};
 pub use self::object_material2d::ObjectMaterial2d;
 pub use self::shadow::{ShadowMapper, MAX_SHADOW_VIEWS};
 
@@ -85,4 +86,5 @@ mod object_material;
 mod shadow;
 mod uvs_material;
 
+mod lit_material2d;
 mod object_material2d;
