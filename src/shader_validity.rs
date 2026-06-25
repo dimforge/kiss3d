@@ -337,6 +337,17 @@ mod tests {
                     .await;
             }
 
+            // 6) Chained post-processing (exercises the ping-pong path: resolve → A,
+            // effect 0 A→B, effect 1 B→frame).
+            {
+                let mut a = Fxaa::new();
+                let mut b = Crt::new();
+                let mut chain: [&mut dyn PostProcessingEffect; 2] = [&mut a, &mut b];
+                surface
+                    .render_chain(Some(&mut scene), None, Some(&mut cam), None, None, &mut chain)
+                    .await;
+            }
+
             // Any invalid shader/pipeline created above is captured here.
             let err = scope.pop().await;
             assert!(err.is_none(), "shader validation error: {:?}", err);

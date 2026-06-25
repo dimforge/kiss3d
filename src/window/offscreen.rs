@@ -91,6 +91,24 @@ impl OffscreenSurface {
             .await;
     }
 
+    /// Renders one frame through an ordered chain of post-processing effects.
+    /// See [`Window::render_chain`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn render_chain(
+        &mut self,
+        scene: Option<&mut SceneNode3d>,
+        scene_2d: Option<&mut SceneNode2d>,
+        camera: Option<&mut dyn Camera3d>,
+        camera_2d: Option<&mut dyn Camera2d>,
+        renderer: Option<&mut dyn Renderer3d>,
+        post_processing: &mut [&mut dyn PostProcessingEffect],
+    ) {
+        let _ = self
+            .window
+            .render_chain(scene, scene_2d, camera, camera_2d, renderer, post_processing)
+            .await;
+    }
+
     /// Renders one path-traced frame into the off-screen texture.
     ///
     /// Call repeatedly with the same [`RayTracer`] to accumulate samples (the

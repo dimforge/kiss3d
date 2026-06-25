@@ -82,21 +82,74 @@ impl Window {
         camera: &mut impl Camera2d,
         post: &mut dyn PostProcessingEffect,
     ) -> bool {
-        self.render(None, Some(scene), None, Some(camera), None, Some(post))
+        self.render_2d_with_chain(scene, camera, &mut [post]).await
+    }
+
+    /// Renders a 2D scene through an ordered chain of post-processing effects.
+    ///
+    /// The effects run back to back: the tonemapped scene feeds the first, each
+    /// effect's output feeds the next, and the last writes the frame. Unlike a single
+    /// effect, this lets you combine, say, [`Gi2d`](crate::post_processing::Gi2d) then
+    /// [`Crt`](crate::post_processing::Crt). An empty chain behaves like
+    /// [`render_2d`](Self::render_2d).
+    pub async fn render_2d_with_chain(
+        &mut self,
+        scene: &mut SceneNode2d,
+        camera: &mut impl Camera2d,
+        chain: &mut [&mut dyn PostProcessingEffect],
+    ) -> bool {
+        self.render_chain(None, Some(scene), None, Some(camera), None, chain)
             .await
     }
 
+    /// Renders a 3D scene through an ordered chain of post-processing effects.
+    /// See [`render_2d_with_chain`](Self::render_2d_with_chain).
+    pub async fn render_3d_with_chain(
+        &mut self,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+        chain: &mut [&mut dyn PostProcessingEffect],
+    ) -> bool {
+        self.render_chain(Some(scene), None, Some(camera), None, None, chain)
+            .await
+    }
+
+    pub async fn render(
+        &mut self,
+        scene: Option<&mut SceneNode3d>,
+        scene_2d: Option<&mut SceneNode2d>,
+        camera: Option<&mut dyn Camera3d>,
+        camera_2d: Option<&mut dyn Camera2d>,
+        renderer: Option<&mut dyn Renderer3d>,
+        post_processing: Option<&mut dyn PostProcessingEffect>,
+    ) -> bool {
+        // Adapt the single-effect option to a 0-or-1-element chain.
+        let mut single;
+        let chain: &mut [&mut dyn PostProcessingEffect] = match post_processing {
+            Some(p) => {
+                single = [p];
+                &mut single
+            }
+            None => &mut [],
+        };
+        self.render_chain(scene, scene_2d, camera, camera_2d, renderer, chain)
+            .await
+    }
+
+    /// The general render entry point: an optional 3D scene, an optional 2D scene,
+    /// their cameras, an optional custom 3D renderer, and an ordered post-processing
+    /// `chain` (empty = none). The single-scene/effect helpers wrap this.
     // `scene`/`camera` are only taken mutably (via `as_deref_mut`) by the
     // `rt_switcher` block below; without that feature the `mut` is unused.
     #[cfg_attr(not(feature = "rt_switcher"), allow(unused_mut))]
-    pub async fn render(
+    pub async fn render_chain(
         &mut self,
         mut scene: Option<&mut SceneNode3d>,
         scene_2d: Option<&mut SceneNode2d>,
         mut camera: Option<&mut dyn Camera3d>,
         camera_2d: Option<&mut dyn Camera2d>,
         renderer: Option<&mut dyn Renderer3d>,
-        post_processing: Option<&mut dyn PostProcessingEffect>,
+        post_processing: &mut [&mut dyn PostProcessingEffect],
     ) -> bool {
         #[cfg(feature = "rt_switcher")]
         if let (Some(mut rt), Some(camera), Some(scene)) = (
@@ -140,7 +193,7 @@ impl Window {
         camera: &mut dyn Camera3d,
         camera_2d: &mut dyn Camera2d,
         mut renderer: Option<&mut dyn Renderer3d>,
-        mut post_processing: Option<&mut dyn PostProcessingEffect>,
+        post_processing: &mut [&mut dyn PostProcessingEffect],
     ) -> bool {
         // Frame timing: CPU wall-clock for the whole frame (and submit/present
         // below) plus per-pass GPU timestamps recorded into the GPU timer. The
@@ -206,6 +259,8 @@ impl Window {
         // `resolve_view` below) before tonemapping.
         self.hdr.resize(w, h, sample_count);
         self.post_process_render_target
+            .resize(w, h, self.canvas.surface_format());
+        self.post_process_render_target_b
             .resize(w, h, self.canvas.surface_format());
         if offscreen {
             if self.offscreen_output_target.is_none() {
@@ -1118,30 +1173,55 @@ impl Window {
             }
         }
 
-        // Tonemap + bloom resolve. Existing post-processing effects run on the
-        // tonemapped LDR image: the HDR film is tonemapped into the LDR
-        // post-process target, then the effect composites it into `frame_view`.
-        // Without an effect, the HDR film is tonemapped straight into `frame_view`.
-        if let Some(ref mut p) = post_processing {
-            let pp_ldr_view = match &self.post_process_render_target {
+        // Tonemap + bloom resolve, then the post-processing chain. Effects run on the
+        // tonemapped LDR image. With no effect the HDR film is tonemapped straight
+        // into `frame_view`. With one or more, the film is tonemapped into the first
+        // ping-pong LDR target, then each effect reads the previous target and writes
+        // the next (A→B→A→…), with the last effect writing the final `frame_view`.
+        if post_processing.is_empty() {
+            self.hdr
+                .resolve(&mut encoder, &frame_view, &mut self.gpu_timer);
+        } else {
+            // Tonemap into the first ping-pong target (A).
+            let first_view = match &self.post_process_render_target {
                 RenderTarget::Offscreen(o) => o.color_view.clone(),
                 RenderTarget::Screen => frame_view.clone(),
             };
             self.hdr
-                .resolve(&mut encoder, &pp_ldr_view, &mut self.gpu_timer);
+                .resolve(&mut encoder, &first_view, &mut self.gpu_timer);
 
-            // TODO: use the real time value instead of 0.016!
-            p.update(0.016, w as f32, h as f32, znear, zfar);
+            let n = post_processing.len();
+            for i in 0..n {
+                // Even effects read A and write B, odd ones read B and write A; the
+                // final effect writes `frame_view` instead of a ping-pong target.
+                let read_a = i % 2 == 0;
+                let input = if read_a {
+                    &self.post_process_render_target
+                } else {
+                    &self.post_process_render_target_b
+                };
+                let output_view: &wgpu::TextureView = if i == n - 1 {
+                    &frame_view
+                } else {
+                    let out_target = if read_a {
+                        &self.post_process_render_target_b
+                    } else {
+                        &self.post_process_render_target
+                    };
+                    match out_target {
+                        RenderTarget::Offscreen(o) => &o.color_view,
+                        RenderTarget::Screen => &frame_view,
+                    }
+                };
 
-            let mut pp_context = PostProcessingContext {
-                encoder: &mut encoder,
-                output_view: &frame_view,
-            };
-
-            p.draw(&self.post_process_render_target, &mut pp_context);
-        } else {
-            self.hdr
-                .resolve(&mut encoder, &frame_view, &mut self.gpu_timer);
+                // TODO: use the real time value instead of 0.016!
+                post_processing[i].update(0.016, w as f32, h as f32, znear, zfar);
+                let mut pp_context = PostProcessingContext {
+                    encoder: &mut encoder,
+                    output_view,
+                };
+                post_processing[i].draw(input, &mut pp_context);
+            }
         }
 
         // Render text

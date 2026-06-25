@@ -100,6 +100,10 @@ pub struct Window {
     pub(super) transmission: Option<crate::renderer::Transmission>,
     pub(super) transmission_enabled: bool,
     pub(super) post_process_render_target: RenderTarget,
+    /// Second LDR target, paired with `post_process_render_target` as ping-pong
+    /// buffers when chaining more than one post-processing effect: each effect reads
+    /// one and writes the other, and the last writes the final frame.
+    pub(super) post_process_render_target_b: RenderTarget,
     /// Offscreen render target used when the window is hidden, so `snap` and
     /// recording work without a presentable surface. Created on first use.
     pub(super) offscreen_output_target: Option<RenderTarget>,
@@ -1022,6 +1026,7 @@ impl Window {
             transmission: None,
             transmission_enabled: true,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
+            post_process_render_target_b: framebuffer_manager.new_render_target(width, height, false),
             offscreen_output_target: None,
             aov_renderer: None,
             hidden: hide,
@@ -1097,6 +1102,7 @@ impl Window {
             transmission: None,
             transmission_enabled: true,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
+            post_process_render_target_b: framebuffer_manager.new_render_target(width, height, false),
             offscreen_output_target: None,
             aov_renderer: None,
             // A headless window has no surface; always render off-screen.
