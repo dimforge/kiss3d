@@ -16,6 +16,7 @@ EXAMPLES=(
     sprites2d
     post_processing2d
     lighting2d
+    tilemap2d
     clustered_lights
     wireframe
     lines

@@ -12,6 +12,7 @@ pub use self::object3d::{
 };
 pub use self::scene_node2d::{SceneNode2d, SceneNodeData2d};
 pub use self::sprite::{Border, SpriteSheet};
+pub use self::tilemap::Tilemap;
 pub use self::scene_node3d::{GltfModel, SceneNode3d, SceneNodeData3d};
 
 mod animation;
@@ -20,3 +21,4 @@ mod object3d;
 mod scene_node2d;
 mod scene_node3d;
 mod sprite;
+mod tilemap;

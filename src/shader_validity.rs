@@ -30,7 +30,7 @@ mod tests {
         Cas, Crt, Fxaa, Grayscales, OculusStereo, PostProcessingEffect, SobelEdgeHighlight, Waves,
     };
     use crate::renderer::RayTracer;
-    use crate::scene::{AlphaMode, SceneNode2d, SceneNode3d};
+    use crate::scene::{AlphaMode, SceneNode2d, SceneNode3d, SpriteSheet, Tilemap};
     use crate::window::OffscreenSurface;
     use glamx::{Vec2, Vec3};
 
@@ -130,6 +130,14 @@ mod tests {
         s.add_lit_sprite(40.0, 40.0)
             .set_lit_params(LitParams::default().with_specular(0.5, 24.0))
             .set_position(Vec2::new(80.0, 0.0));
+        // Tilemap mesh (atlas-textured single mesh, a few tiles set).
+        let mut tm = Tilemap::new(4, 4, Vec2::new(14.0, 14.0), SpriteSheet::new(2, 2));
+        tm.set_tile(0, 0, 0);
+        tm.set_tile(1, 1, 1);
+        tm.set_tile(2, 3, 2);
+        let mut tnode = tm.node();
+        tnode.set_position(Vec2::new(-90.0, 70.0));
+        s.add_child(tnode);
         s
     }
 
