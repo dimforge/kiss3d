@@ -1551,6 +1551,12 @@ struct OitOutput {
 // blending directly, so transparency is order-independent (no sorting).
 @fragment
 fn fs_oit(in: VertexOutput) -> OitOutput {
+    // Reflector capture: clip geometry behind the mirror plane (the plane is
+    // zeroed — a no-op — outside captures), same as `fs_main`.
+    if dot(frame.clip_plane.xyz, frame.clip_plane.xyz) > 0.0
+        && dot(frame.clip_plane.xyz, in.world_pos) + frame.clip_plane.w < 0.0 {
+        discard;
+    }
     let c = shade(in);
     let a = c.a;
     // Depth-based weight: nearer fragments dominate (McGuire eq. 9). `view_pos.z`

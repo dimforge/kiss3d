@@ -89,6 +89,10 @@ pub struct AovRenderer {
     object_bind_group_layout: wgpu::BindGroupLayout,
     object_uniform_buffer: DynamicUniformBuffer<ObjectUniforms>,
     object_bind_group: wgpu::BindGroup,
+
+    /// GPU-only AOV visualization (raw values → display colors); created on
+    /// first use of [`AovRenderer::visualize`].
+    visualize: Option<AovVisualize>,
 }
 
 impl AovRenderer {
@@ -246,7 +250,34 @@ impl AovRenderer {
             object_bind_group_layout,
             object_uniform_buffer,
             object_bind_group,
+            visualize: None,
         }
+    }
+
+    /// Renders the raw AOV in `raw_view` (of format [`AovKind::format`]) as a
+    /// display-ready image into `target_view` (of format `target_format`):
+    /// depth as fixed-range grayscale over `[0, depth_range]` world units
+    /// (near = bright, background = black), normals as RGB, segmentation ids
+    /// as distinct golden-ratio colors. Entirely on the GPU — no read-back.
+    pub fn visualize_into(
+        &mut self,
+        kind: AovKind,
+        encoder: &mut wgpu::CommandEncoder,
+        raw_view: &wgpu::TextureView,
+        target_view: &wgpu::TextureView,
+        target_format: wgpu::TextureFormat,
+        depth_range: f32,
+    ) {
+        if self
+            .visualize
+            .as_ref()
+            .is_some_and(|v| v.target_format != target_format)
+        {
+            self.visualize = None;
+        }
+        self.visualize
+            .get_or_insert_with(|| AovVisualize::new(target_format))
+            .render(kind, encoder, raw_view, target_view, depth_range);
     }
 
     fn make_object_bind_group(
@@ -439,4 +470,203 @@ struct DrawItem {
     normals: wgpu::Buffer,
     faces: wgpu::Buffer,
     num_indices: u32,
+}
+
+/// Uniforms of the AOV visualization pass (see `aov_visualize.wgsl`).
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Pod, Zeroable)]
+struct VisUniforms {
+    /// `x`: float mode (0 = depth, 1 = normals); `y`: depth range;
+    /// `z`: 1.0 when the target format is sRGB.
+    params: [f32; 4],
+}
+
+/// Fullscreen pass turning a raw AOV texture into a display-ready image.
+///
+/// Two pipelines: one sampling the float AOV texture (depth/normals) and one
+/// sampling the integer segmentation texture. Owned by [`AovRenderer`].
+struct AovVisualize {
+    target_format: wgpu::TextureFormat,
+    layout_float: wgpu::BindGroupLayout,
+    layout_seg: wgpu::BindGroupLayout,
+    pipeline_float: wgpu::RenderPipeline,
+    pipeline_seg: wgpu::RenderPipeline,
+    uniform_buffer: wgpu::Buffer,
+}
+
+impl AovVisualize {
+    fn new(target_format: wgpu::TextureFormat) -> AovVisualize {
+        let ctxt = Context::get();
+
+        let uniform_entry = wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        };
+        let texture_entry = |binding: u32, sample_type: wgpu::TextureSampleType| {
+            wgpu::BindGroupLayoutEntry {
+                binding,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    sample_type,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            }
+        };
+
+        let layout_float = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("aov_visualize_float_layout"),
+            entries: &[
+                uniform_entry,
+                texture_entry(1, wgpu::TextureSampleType::Float { filterable: false }),
+            ],
+        });
+        let layout_seg = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("aov_visualize_seg_layout"),
+            entries: &[
+                uniform_entry,
+                texture_entry(2, wgpu::TextureSampleType::Uint),
+            ],
+        });
+
+        let shader = ctxt.create_shader_module(
+            Some("aov_visualize_shader"),
+            include_str!("aov_visualize.wgsl"),
+        );
+
+        let make_pipeline = |layout: &wgpu::BindGroupLayout, fs_entry: &str, label: &str| {
+            let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some(label),
+                bind_group_layouts: &[Some(layout)],
+                immediate_size: 0,
+            });
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(fs_entry),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target_format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+
+        let pipeline_float =
+            make_pipeline(&layout_float, "fs_float", "aov_visualize_float_pipeline");
+        let pipeline_seg = make_pipeline(&layout_seg, "fs_seg", "aov_visualize_seg_pipeline");
+
+        let uniform_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("aov_visualize_uniform_buffer"),
+            size: std::mem::size_of::<VisUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        AovVisualize {
+            target_format,
+            layout_float,
+            layout_seg,
+            pipeline_float,
+            pipeline_seg,
+            uniform_buffer,
+        }
+    }
+
+    fn render(
+        &self,
+        kind: AovKind,
+        encoder: &mut wgpu::CommandEncoder,
+        raw_view: &wgpu::TextureView,
+        target_view: &wgpu::TextureView,
+        depth_range: f32,
+    ) {
+        let ctxt = Context::get();
+        let float_mode = match kind {
+            AovKind::Depth => 0.0,
+            _ => 1.0,
+        };
+        let is_srgb = if self.target_format.is_srgb() { 1.0 } else { 0.0 };
+        ctxt.write_buffer(
+            &self.uniform_buffer,
+            0,
+            bytemuck::bytes_of(&VisUniforms {
+                params: [float_mode, depth_range, is_srgb, 0.0],
+            }),
+        );
+
+        let seg = kind == AovKind::Segmentation;
+        let bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("aov_visualize_bind_group"),
+            layout: if seg { &self.layout_seg } else { &self.layout_float },
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.uniform_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: if seg { 2 } else { 1 },
+                    resource: wgpu::BindingResource::TextureView(raw_view),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("aov_visualize_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(if seg {
+            &self.pipeline_seg
+        } else {
+            &self.pipeline_float
+        });
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.draw(0..3, 0..1);
+    }
 }

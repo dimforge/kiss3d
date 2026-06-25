@@ -13,6 +13,7 @@ pub use self::reflection_probe::{
     CubeFaceCamera, ProbeCapture, ReflectionProbe, ReflectionProbes, MAX_PROBES,
 };
 pub use self::reflector::{MirrorCamera, Reflector};
+pub(crate) use self::reflector::ReflectorOit;
 pub use self::renderer::Renderer3d;
 pub use self::skybox::Skybox;
 pub use self::ssao::{Ssao, SsaoSettings};

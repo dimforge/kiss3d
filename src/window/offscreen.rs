@@ -1,5 +1,6 @@
 //! Off-screen (headless) rendering surface.
 
+use crate::builtin::AovKind;
 use crate::camera::{Camera2d, Camera3d};
 use crate::color::Color;
 use crate::post_processing::{PostProcessingEffect, Tonemap};
@@ -7,6 +8,7 @@ use crate::renderer::{RayTracer, Renderer3d};
 use crate::scene::{SceneNode2d, SceneNode3d};
 use crate::window::{CanvasSetup, Window};
 use glamx::UVec2;
+#[cfg(not(target_arch = "wasm32"))]
 use image::{ImageBuffer, Luma, Rgb};
 
 /// A headless rendering surface.
@@ -125,6 +127,12 @@ impl OffscreenSurface {
 
     /// Path-traces a 3D scene for `samples` accumulated frames and returns the
     /// resulting image, in one call.
+    ///
+    /// Native only: reading the result back to the CPU requires blocking on the
+    /// GPU, which is impossible on the web. Use [`Self::output_view`] +
+    /// [`Window::register_egui_texture`] to display the surface without a
+    /// read-back.
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn render_image_raytraced(
         &mut self,
         scene: &mut SceneNode3d,
@@ -139,6 +147,9 @@ impl OffscreenSurface {
     }
 
     /// Renders a 3D scene and returns the resulting image, in one call.
+    ///
+    /// Native only (blocking GPU read-back).
+    #[cfg(not(target_arch = "wasm32"))]
     pub async fn render_image_3d(
         &mut self,
         scene: &mut SceneNode3d,
@@ -149,25 +160,69 @@ impl OffscreenSurface {
     }
 
     /// Captures the last rendered frame as raw RGB pixel data.
+    ///
+    /// Native only (blocking GPU read-back).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn snap(&self, out: &mut Vec<u8>) {
         self.window.snap(out)
     }
 
     /// Captures a rectangular region of the last rendered frame as raw RGB data.
+    ///
+    /// Native only (blocking GPU read-back).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn snap_rect(&self, out: &mut Vec<u8>, x: usize, y: usize, width: usize, height: usize) {
         self.window.snap_rect(out, x, y, width, height)
     }
 
     /// Captures the last rendered frame as an image.
+    ///
+    /// Native only (blocking GPU read-back).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn snap_image(&self) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
         self.window.snap_image()
     }
 
-    // === Auxiliary render outputs (AOVs) ===
+    // === GPU-resident output (no read-back; works on the web) ===
+
+    /// The texture view holding this surface's final rendered image (the LDR,
+    /// post-tonemap output of `render_3d` / `raytrace_3d` / `render_aov_3d`).
+    ///
+    /// Register it with a visible window's egui renderer
+    /// ([`Window::register_egui_texture`]) to display the surface's content
+    /// without any GPU→CPU copy — this works on the web, where the `snap_*`
+    /// read-backs don't exist.
+    ///
+    /// The view is replaced when the surface is [`resize`](Self::resize)d;
+    /// re-register it afterwards.
+    pub fn output_view(&mut self) -> wgpu::TextureView {
+        self.window.offscreen_output_view()
+    }
+
+    /// Renders an auxiliary output (depth, normals or segmentation) of the
+    /// scene as a **display-ready image** into this surface's output texture
+    /// ([`Self::output_view`]), entirely on the GPU — no read-back, so it works
+    /// on the web.
+    ///
+    /// For [`AovKind::Depth`], depth is mapped over `[0, depth_range]` world
+    /// units (near = bright, background = black); the other kinds ignore
+    /// `depth_range`. See [`Window::render_aov_3d`].
+    pub fn render_aov_3d(
+        &mut self,
+        kind: AovKind,
+        scene: &mut SceneNode3d,
+        camera: &mut impl Camera3d,
+        depth_range: f32,
+    ) {
+        self.window.render_aov_3d(kind, scene, camera, depth_range)
+    }
+
+    // === Auxiliary render outputs (AOVs, CPU read-back; native only) ===
 
     /// Renders the scene and returns per-pixel linear, eye-space depth (in world
     /// units), row-major with a top-left origin. Background pixels read back as
     /// `0.0`. See [`Window::snap_depth_raw`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn snap_depth_raw(
         &mut self,
         scene: &mut SceneNode3d,
@@ -179,6 +234,7 @@ impl OffscreenSurface {
     /// Renders the scene and returns its depth as a normalized 8-bit grayscale
     /// image (nearest surface brightest, background black). See
     /// [`Window::snap_depth`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn snap_depth(
         &mut self,
         scene: &mut SceneNode3d,
@@ -189,6 +245,7 @@ impl OffscreenSurface {
 
     /// Renders the scene and returns its world-space surface normals, encoded
     /// from `[-1, 1]` to `[0, 255]` per channel. See [`Window::snap_normals`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn snap_normals(
         &mut self,
         scene: &mut SceneNode3d,
@@ -199,6 +256,7 @@ impl OffscreenSurface {
 
     /// Like [`snap_normals`](Self::snap_normals) but in camera (eye) space. See
     /// [`Window::snap_camera_normals`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn snap_camera_normals(
         &mut self,
         scene: &mut SceneNode3d,
@@ -210,6 +268,7 @@ impl OffscreenSurface {
     /// Renders the scene and returns the per-pixel segmentation/object id (`0`
     /// for background), row-major with a top-left origin. See
     /// [`Window::snap_segmentation`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn snap_segmentation(
         &mut self,
         scene: &mut SceneNode3d,
@@ -221,6 +280,7 @@ impl OffscreenSurface {
     /// Renders the scene and returns a colorized segmentation image (each id
     /// mapped to a distinct color, background black). See
     /// [`Window::snap_segmentation_colored`].
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn snap_segmentation_colored(
         &mut self,
         scene: &mut SceneNode3d,

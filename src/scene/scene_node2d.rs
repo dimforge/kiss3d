@@ -1517,4 +1517,17 @@ impl SceneNode2d {
         self.data_mut().get_object_mut().set_instances(instances);
         self.clone()
     }
+
+    /// Prepares this node's per-instance buffers for direct compute writes of
+    /// `count` instances and returns the raw GPU buffers.
+    ///
+    /// See [`Object2d::instance_compute_buffers`](crate::scene::Object2d::instance_compute_buffers).
+    pub fn instance_compute_buffers(
+        &mut self,
+        count: usize,
+    ) -> crate::scene::InstanceComputeBuffers2d {
+        self.data_mut()
+            .get_object_mut()
+            .instance_compute_buffers(count)
+    }
 }

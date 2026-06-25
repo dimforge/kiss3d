@@ -104,6 +104,26 @@ impl EguiRenderer {
         self.textures_delta.append(output.textures_delta);
     }
 
+    /// Registers a native wgpu texture view with egui, returning a
+    /// [`egui::TextureId`] that `ui.image((id, size))` can draw — no CPU copy
+    /// involved. The texture stays registered until
+    /// [`Self::unregister_native_texture`].
+    pub fn register_native_texture(
+        &mut self,
+        view: &wgpu::TextureView,
+        filter: wgpu::FilterMode,
+    ) -> egui::TextureId {
+        let ctxt = Context::get();
+        self.renderer
+            .register_native_texture(&ctxt.device, view, filter)
+    }
+
+    /// Frees a texture id previously returned by
+    /// [`Self::register_native_texture`].
+    pub fn unregister_native_texture(&mut self, id: egui::TextureId) {
+        self.renderer.free_texture(&id);
+    }
+
     /// Returns true if egui wants to capture the mouse (e.g., hovering over a widget).
     pub fn wants_pointer_input(&self) -> bool {
         self.egui_ctx.egui_wants_pointer_input()

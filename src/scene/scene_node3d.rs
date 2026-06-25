@@ -3102,6 +3102,22 @@ impl SceneNode3d {
         self.data_mut().get_object_mut().set_instances(instances);
         self.clone()
     }
+
+    /// Prepares this node's per-instance buffers for direct compute writes of
+    /// `count` instances and returns the raw GPU buffers.
+    ///
+    /// See [`Object3d::instance_compute_buffers`](crate::scene::Object3d::instance_compute_buffers):
+    /// a compute shader on the shared `wgpu::Device` fills position/color/
+    /// deformation directly, instead of uploading them from the CPU via
+    /// [`set_instances`](Self::set_instances).
+    pub fn instance_compute_buffers(
+        &mut self,
+        count: usize,
+    ) -> crate::scene::InstanceComputeBuffers {
+        self.data_mut()
+            .get_object_mut()
+            .instance_compute_buffers(count)
+    }
 }
 
 /// The proper world matrix of a node, composing full per-node TRS (`T · R · S`)

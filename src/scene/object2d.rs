@@ -253,6 +253,21 @@ pub const POINTS_COLOR_USE_OBJECT_2D: [f32; 4] = [0.0, 0.0, 0.0, 0.0];
 ///
 /// Contains GPU-allocated buffers for positions, deformations, colors,
 /// wireframe settings, and point settings of all 2D instances to be rendered.
+/// Raw per-instance GPU buffers prepared for direct compute writes (2D).
+///
+/// Returned by [`Object2d::instance_compute_buffers`] (and the matching
+/// [`SceneNode2d`](crate::scene::SceneNode2d) method). A compute shader running
+/// on the same `wgpu::Device` can fill these each frame instead of uploading
+/// per-instance data from the CPU via [`set_instances`](Object2d::set_instances).
+pub struct InstanceComputeBuffers2d {
+    /// One `Vec2` position per instance.
+    pub positions: wgpu::Buffer,
+    /// One RGBA color (`[f32; 4]`) per instance.
+    pub colors: wgpu::Buffer,
+    /// Two `Vec2` deformation-matrix columns per instance (4 floats / instance).
+    pub deformations: wgpu::Buffer,
+}
+
 pub struct InstancesBuffer2d {
     /// GPU buffer of instance positions.
     pub positions: GPUVec<Vec2>,
@@ -527,6 +542,28 @@ impl Object2d {
         *self.instances.borrow_mut().lines_widths.data_mut() = Some(lines_width_data);
         *self.instances.borrow_mut().points_colors.data_mut() = Some(points_col_data);
         *self.instances.borrow_mut().points_sizes.data_mut() = Some(points_size_data);
+    }
+
+    /// Prepares this object's per-instance buffers to be written directly by a
+    /// compute shader, for `count` instances, and returns the raw GPU buffers.
+    ///
+    /// The 2D analogue of
+    /// [`Object3d::instance_compute_buffers`](crate::scene::Object3d::instance_compute_buffers):
+    /// the object renders `count` instances reading position/color/deformation
+    /// straight from these buffers, which the caller fills via a compute pass on
+    /// the same `wgpu::Device`. An alternative to
+    /// [`set_instances`](Self::set_instances); use one or the other per frame.
+    pub fn instance_compute_buffers(&mut self, count: usize) -> InstanceComputeBuffers2d {
+        let mut inst = self.instances.borrow_mut();
+        let positions = inst.positions.prepare_gpu_writable(count).clone();
+        let colors = inst.colors.prepare_gpu_writable(count).clone();
+        // Two Vec2 columns (a Mat2) per instance.
+        let deformations = inst.deformations.prepare_gpu_writable(count * 2).clone();
+        InstanceComputeBuffers2d {
+            positions,
+            colors,
+            deformations,
+        }
     }
 
     /// Gets the data of this object.

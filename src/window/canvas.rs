@@ -79,7 +79,6 @@ impl Canvas {
     }
 
     /// Open a headless canvas (no window) for off-screen rendering.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn open_headless(
         width: u32,
         height: u32,

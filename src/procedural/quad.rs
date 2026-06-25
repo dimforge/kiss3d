@@ -31,6 +31,7 @@ pub fn quad(width: f32, height: f32, usubdivs: usize, vsubdivs: usize) -> Render
     let s = Vec3::new(width, height, 1.0);
 
     quad.scale_by(s);
+    quad.replicate_vertices();
 
     quad
 }

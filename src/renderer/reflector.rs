@@ -325,3 +325,243 @@ impl Reflector {
         self.view_proj.set(vp);
     }
 }
+
+/// Weighted-blended OIT accumulation targets + composite pipeline for the
+/// reflector capture pass, so transparent (alpha < 1) surfaces also appear in
+/// mirrors. One set is shared by all reflectors of a window (each capture
+/// clears the targets).
+///
+/// The HDR pipeline owns the equivalent targets for the main pass, but those
+/// match the film's MSAA sample count while the reflector capture is always
+/// single-sampled — hence this dedicated single-sample set (same formats, same
+/// `hdr_oit.wgsl` composite).
+pub(crate) struct ReflectorOit {
+    width: u32,
+    height: u32,
+    _accum: wgpu::Texture,
+    accum_view: wgpu::TextureView,
+    _reveal: wgpu::Texture,
+    reveal_view: wgpu::TextureView,
+    layout: wgpu::BindGroupLayout,
+    pipeline: wgpu::RenderPipeline,
+    vertex_buffer: wgpu::Buffer,
+}
+
+impl ReflectorOit {
+    pub fn new(width: u32, height: u32) -> ReflectorOit {
+        let ctxt = Context::get();
+        let layout = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("reflector_oit_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+
+        let shader = ctxt.create_shader_module(
+            Some("reflector_oit_shader"),
+            include_str!("../builtin/hdr_oit.wgsl"),
+        );
+        let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("reflector_oit_pipeline_layout"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let vertex_layout = wgpu::VertexBufferLayout {
+            array_stride: (std::mem::size_of::<f32>() * 2) as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &[wgpu::VertexAttribute {
+                offset: 0,
+                shader_location: 0,
+                format: wgpu::VertexFormat::Float32x2,
+            }],
+        };
+        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("reflector_oit_composite_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_main"),
+                buffers: std::slice::from_ref(&vertex_layout),
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_composite"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: crate::post_processing::HDR_FORMAT,
+                    blend: Some(wgpu::BlendState {
+                        color: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::SrcAlpha,
+                            dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                            operation: wgpu::BlendOperation::Add,
+                        },
+                        alpha: wgpu::BlendComponent::REPLACE,
+                    }),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleStrip,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: None,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState {
+                count: 1,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let vertices: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]];
+        let vertex_buffer = ctxt.create_buffer_init(
+            Some("reflector_oit_quad"),
+            bytemuck::cast_slice(&vertices),
+            wgpu::BufferUsages::VERTEX,
+        );
+
+        let (accum, accum_view, reveal, reveal_view) = Self::make_targets(width, height);
+        ReflectorOit {
+            width: width.max(1),
+            height: height.max(1),
+            _accum: accum,
+            accum_view,
+            _reveal: reveal,
+            reveal_view,
+            layout,
+            pipeline,
+            vertex_buffer,
+        }
+    }
+
+    fn make_targets(
+        w: u32,
+        h: u32,
+    ) -> (
+        wgpu::Texture,
+        wgpu::TextureView,
+        wgpu::Texture,
+        wgpu::TextureView,
+    ) {
+        let ctxt = Context::get();
+        let make = |label: &str, format: wgpu::TextureFormat| {
+            let tex = ctxt.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: wgpu::Extent3d {
+                    width: w.max(1),
+                    height: h.max(1),
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let view = tex.create_view(&wgpu::TextureViewDescriptor::default());
+            (tex, view)
+        };
+        let (accum, accum_view) = make(
+            "reflector_oit_accum",
+            crate::post_processing::OIT_ACCUM_FORMAT,
+        );
+        let (reveal, reveal_view) = make(
+            "reflector_oit_reveal",
+            crate::post_processing::OIT_REVEAL_FORMAT,
+        );
+        (accum, accum_view, reveal, reveal_view)
+    }
+
+    /// Resizes the OIT targets if needed.
+    pub fn resize(&mut self, width: u32, height: u32) {
+        let (w, h) = (width.max(1), height.max(1));
+        if self.width == w && self.height == h {
+            return;
+        }
+        let (accum, accum_view, reveal, reveal_view) = Self::make_targets(w, h);
+        self._accum = accum;
+        self.accum_view = accum_view;
+        self._reveal = reveal;
+        self.reveal_view = reveal_view;
+        self.width = w;
+        self.height = h;
+    }
+
+    /// The OIT accumulation target (additive premultiplied-weighted color).
+    pub fn accum_view(&self) -> &wgpu::TextureView {
+        &self.accum_view
+    }
+
+    /// The OIT revealage target (multiplicative coverage).
+    pub fn reveal_view(&self) -> &wgpu::TextureView {
+        &self.reveal_view
+    }
+
+    /// Composites the accumulated transparency over `target`
+    /// (SrcAlpha / OneMinusSrcAlpha, like the HDR pipeline's OIT composite).
+    pub fn composite(&self, encoder: &mut wgpu::CommandEncoder, target: &wgpu::TextureView) {
+        let ctxt = Context::get();
+        let bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("reflector_oit_composite_bind_group"),
+            layout: &self.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.accum_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.reveal_view),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("reflector_oit_composite_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+        pass.draw(0..4, 0..1);
+    }
+}

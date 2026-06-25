@@ -1696,6 +1696,15 @@ impl Window {
             jobs.push((mcam, r.color_view().clone(), r.depth_view().clone(), clip));
         });
 
+        // Mirror the main pass's phase gating so nothing visible is missing from
+        // the reflections: transparent (OIT) surfaces and refractive glass are
+        // drawn into each capture after its opaque pass.
+        let has_transparent = scene.has_transparent_surfaces();
+        let mut glass_nodes: Vec<SceneNode3d> = Vec::new();
+        if self.transmission_enabled {
+            scene.collect_refractive(&mut glass_nodes);
+        }
+
         // Fixed-light path for the capture frames (the mirror camera has no clustered
         // cull data). Reflector surfaces skip themselves during capture (handled in
         // the material via `capture_mode`).
@@ -1774,6 +1783,147 @@ impl Window {
                     .data_mut()
                     .render(0, &mut mcam, &mlights, &mut pass, &ctx);
             }
+
+            // === Transparent (OIT) surfaces in the mirror ===
+            // Same weighted-blended OIT as the main pass, but into dedicated
+            // single-sample targets, composited over the capture. Tests against
+            // the capture's opaque depth.
+            if has_transparent {
+                let oit = self
+                    .reflector_oit
+                    .get_or_insert_with(|| crate::renderer::ReflectorOit::new(w, h));
+                oit.resize(w, h);
+                let oit_ctx = RenderContext {
+                    surface_format: crate::post_processing::HDR_FORMAT,
+                    sample_count: 1,
+                    viewport_width: w,
+                    viewport_height: h,
+                    render_layers: camera.render_layers(),
+                    force_no_cull: true,
+                    shadow: Some(self.shadow_mapper.resources()),
+                    phase: RenderPhase::Transparent,
+                };
+                {
+                    let oit_ts = self.gpu_timer.render_scope("reflector_oit");
+                    let mut oit_pass = menc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("reflector_oit_pass"),
+                        color_attachments: &[
+                            // accum: cleared to 0 (additive).
+                            Some(wgpu::RenderPassColorAttachment {
+                                view: oit.accum_view(),
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            }),
+                            // revealage: cleared to 1 (nothing occluded yet).
+                            Some(wgpu::RenderPassColorAttachment {
+                                view: oit.reveal_view(),
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::WHITE),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                                depth_slice: None,
+                            }),
+                        ],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &depth_view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: oit_ts,
+                        occlusion_query_set: None,
+                        multiview_mask: None,
+                    });
+                    scene
+                        .data_mut()
+                        .render(0, &mut mcam, &mlights, &mut oit_pass, &oit_ctx);
+                }
+                oit.composite(&mut menc, &color_view);
+            }
+
+            // === Refractive (glass) surfaces in the mirror ===
+            // Snapshot the capture (opaque + transparent) into the shared blurred
+            // mip chain, then draw the glass objects sampling it — one snapshot
+            // layer, so mirrored glass refracts the scene behind it but not other
+            // glass (unlike the main pass's multi-layer refinement). Sharing
+            // `self.transmission` with the main pass is safe: passes execute in
+            // submission order, and the main pass rebuilds the snapshot later.
+            if !glass_nodes.is_empty() {
+                {
+                    let t = self
+                        .transmission
+                        .get_or_insert_with(|| crate::renderer::Transmission::new(w, h));
+                    t.resize(w, h);
+                }
+                // Farthest from the (reflected) eye first, so nearer glass draws
+                // over glass behind it.
+                let eye = mcam.eye();
+                glass_nodes.sort_by(|a, b| {
+                    let da = a.world_position().distance_squared(eye);
+                    let db = b.world_position().distance_squared(eye);
+                    db.partial_cmp(&da).unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+                let t = self.transmission.as_ref().unwrap();
+                t.build(&mut menc, &color_view, &mut self.gpu_timer);
+                {
+                    let default_mat = MaterialManager3d::get_global_manager(|mm| mm.get_default());
+                    default_mat
+                        .borrow_mut()
+                        .set_transmission_background(Some(t.view()));
+                }
+                let glass_ctx = RenderContext {
+                    surface_format: crate::post_processing::HDR_FORMAT,
+                    sample_count: 1,
+                    viewport_width: w,
+                    viewport_height: h,
+                    render_layers: camera.render_layers(),
+                    force_no_cull: true,
+                    shadow: Some(self.shadow_mapper.resources()),
+                    phase: RenderPhase::Transmission,
+                };
+                let glass_ts = self.gpu_timer.render_scope("reflector_glass");
+                let mut glass_pass = menc.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("reflector_glass_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &color_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    timestamp_writes: glass_ts,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                for node in glass_nodes.iter_mut() {
+                    node.data_mut().render_object_only(
+                        0,
+                        &mut mcam,
+                        &mlights,
+                        &mut glass_pass,
+                        &glass_ctx,
+                    );
+                }
+            }
+
             ctxt.submit(std::iter::once(menc.finish()));
         }
 
@@ -1788,5 +1938,26 @@ impl Window {
         // Bump the frame counter so the per-pass loop re-prepares the main camera
         // (reflector objects then pick up the view-proj set on their Reflector above).
         MaterialManager3d::get_global_manager(|mm| mm.begin_frame());
+    }
+
+    /// The texture view holding the final (LDR, post-tonemap) image of a hidden
+    /// window or [`OffscreenSurface`](crate::window::OffscreenSurface), creating
+    /// the target on demand. The render path draws into this same target, so the
+    /// view always shows the latest rendered frame.
+    ///
+    /// The view is replaced when the window is resized; re-acquire (and
+    /// re-register with egui) afterwards.
+    pub(crate) fn offscreen_output_view(&mut self) -> wgpu::TextureView {
+        let (w, h) = (self.width().max(1), self.height().max(1));
+        if self.offscreen_output_target.is_none() {
+            self.offscreen_output_target =
+                Some(self.framebuffer_manager.new_render_target(w, h, true));
+        }
+        let target = self.offscreen_output_target.as_mut().unwrap();
+        target.resize(w, h, self.canvas.surface_format());
+        target
+            .color_view()
+            .expect("offscreen render target is never the screen")
+            .clone()
     }
 }

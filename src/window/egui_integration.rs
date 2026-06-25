@@ -59,6 +59,35 @@ impl Window {
         self.egui_context.renderer.context()
     }
 
+    /// Registers a native wgpu texture view with this window's egui renderer,
+    /// returning a [`egui::TextureId`] that can be drawn with
+    /// `ui.image((id, size))` inside [`Window::draw_ui`] — entirely on the
+    /// GPU, no read-back, so it works on the web too.
+    ///
+    /// Typical use: display the live output of an
+    /// [`OffscreenSurface`](crate::window::OffscreenSurface) (its
+    /// [`output_view`](crate::window::OffscreenSurface::output_view)) as a
+    /// picture-in-picture panel.
+    ///
+    /// The id stays valid until [`Window::unregister_egui_texture`]. If the
+    /// underlying texture is reallocated (e.g. the surface is resized),
+    /// re-register the new view.
+    pub fn register_egui_texture(
+        &mut self,
+        view: &wgpu::TextureView,
+        filter: wgpu::FilterMode,
+    ) -> egui::TextureId {
+        self.egui_context
+            .renderer
+            .register_native_texture(view, filter)
+    }
+
+    /// Frees a texture id previously returned by
+    /// [`Window::register_egui_texture`].
+    pub fn unregister_egui_texture(&mut self, id: egui::TextureId) {
+        self.egui_context.renderer.unregister_native_texture(id)
+    }
+
     /// Checks if egui is currently capturing mouse input.
     ///
     /// Returns `true` if the mouse is hovering over or interacting with an egui widget.

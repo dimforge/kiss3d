@@ -79,6 +79,7 @@ EXAMPLES=(
     multi_windows
     ui
     inspector
+    robot_view
 )
 
 echo "Running ${#EXAMPLES[@]} kiss3d examples..."

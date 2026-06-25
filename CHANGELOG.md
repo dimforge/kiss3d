@@ -37,6 +37,7 @@
 - Reflection probes (baked image or runtime cube capture), parallax-corrected: `Window::add_reflection_probe`, `capture_reflection_probe`, `set_reflection_probe_image`, `set_reflection_capture_layers`.
 - Screen-space reflections: `Window::set_ssr_enabled` / `ssr_settings_mut`, with per-object `Object3d::set_ssr(SsrMaterial)`.
 - Planar mirror reflectors integrated into the default PBR material: `SceneNode3d::add_reflector`, `Object3d::set_reflector` and `set_reflector_*`.
+- Reflector captures render every phase, not just opaque surfaces: transparent (alpha < 1) objects are drawn into mirrors with the same weighted-blended OIT as the main pass, and refractive glass is drawn refracting the mirrored scene behind it (one snapshot layer).
 - Screen-space ambient occlusion: `Window::set_ssao_enabled` / `ssao_settings_mut`.
 - Screen-space refractive transmission (glass): `Window::set_transmission_enabled` / `transmission_settings_mut`.
 - Examples: `reflections`, `mirror`, `mirror_sphere`.
@@ -112,6 +113,12 @@
 - Bumped `glamx` dependency: 0.2 → 0.3. ([#384](https://github.com/dimforge/kiss3d/pull/384))
 
 ## New Features
+
+### Off-screen rendering on the web + zero-copy egui display
+
+- `OffscreenSurface` now exists on wasm: creation and all GPU-side rendering (`render_3d`, `raytrace_3d`, ...) work in the browser. Only the CPU read-backs (`snap_*`, `render_image_*`) remain native-only (they must block on the GPU).
+- `OffscreenSurface::output_view` exposes the surface's final (post-tonemap) texture, and `Window::register_egui_texture` / `unregister_egui_texture` register any wgpu texture view with the window's egui renderer — so an offscreen surface can be displayed live in an egui UI with zero GPU→CPU copies, on native and web alike.
+- GPU-only AOV visualization: `Window::render_aov_3d` / `OffscreenSurface::render_aov_3d` render depth (fixed-range grayscale), normals or colorized segmentation as a display-ready image into the surface's output texture, with no read-back. The `robot_view` example uses all of the above.
 
 ### Off-screen Rendering ([#382](https://github.com/dimforge/kiss3d/pull/382))
 

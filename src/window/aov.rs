@@ -132,6 +132,104 @@ impl Window {
         img
     }
 
+    /// Renders an auxiliary output (depth, normals or segmentation) of the
+    /// scene as a **display-ready image** into the window's offscreen output
+    /// texture, entirely on the GPU — no CPU read-back, so unlike the `snap_*`
+    /// methods this also works on the web.
+    ///
+    /// Meant for [`OffscreenSurface::render_aov_3d`](crate::window::OffscreenSurface::render_aov_3d):
+    /// display the result by registering the surface's
+    /// [`output_view`](crate::window::OffscreenSurface::output_view) with a
+    /// visible window's egui renderer. On native, `snap`/`snap_image` read the
+    /// visualized image back afterwards (useful for testing).
+    ///
+    /// Depth is mapped over `[0, depth_range]` world units (nearest = bright,
+    /// background = black); the other kinds ignore `depth_range`. Normals are
+    /// encoded to RGB and segmentation ids to distinct colors, exactly like
+    /// [`snap_normals`](Self::snap_normals) /
+    /// [`snap_segmentation_colored`](Self::snap_segmentation_colored).
+    pub fn render_aov_3d(
+        &mut self,
+        kind: AovKind,
+        scene: &mut SceneNode3d,
+        camera: &mut dyn Camera3d,
+        depth_range: f32,
+    ) {
+        let w = self.width().max(1);
+        let h = self.height().max(1);
+        let ctxt = Context::get();
+
+        // Make sure the camera matrices match the target size, then propagate
+        // world transforms so the AOV renderer can read them per object.
+        camera.update(&self.canvas);
+        let mut lights = LightCollection::with_ambient(self.ambient_intensity);
+        scene.data_mut().prepare(0, camera, &mut lights, w, h);
+
+        // Raw AOV target (sampled by the visualize pass below) + depth.
+        let color = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aov_color_texture"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: kind.format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let color_view = color.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let depth = ctxt.create_texture(&wgpu::TextureDescriptor {
+            label: Some("aov_depth_texture"),
+            size: wgpu::Extent3d {
+                width: w,
+                height: h,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: Context::depth_format(),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let depth_view = depth.create_view(&wgpu::TextureViewDescriptor::default());
+
+        if self.aov_renderer.is_none() {
+            self.aov_renderer = Some(AovRenderer::new());
+        }
+
+        let out_view = self.offscreen_output_view();
+        let out_format = self.canvas.surface_format();
+
+        let mut encoder = ctxt.create_command_encoder(Some("aov_encoder"));
+        let aov = self.aov_renderer.as_mut().unwrap();
+        aov.render(kind, scene, camera, &mut encoder, &color_view, &depth_view);
+        aov.visualize_into(
+            kind,
+            &mut encoder,
+            &color_view,
+            &out_view,
+            out_format,
+            depth_range,
+        );
+        ctxt.submit(std::iter::once(encoder.finish()));
+
+        // Mirror the regular render path: copy the output into the readback
+        // texture so `snap`/`snap_image` see the visualized AOV on native.
+        let out_color = self
+            .offscreen_output_target
+            .as_ref()
+            .expect("offscreen output target was just created")
+            .color_texture()
+            .expect("offscreen render target is never the screen")
+            .clone();
+        self.canvas.copy_texture_to_readback(&out_color);
+    }
+
     /// Linearly normalizes a raw linear-depth buffer into an 8-bit grayscale
     /// image (nearest surface brightest, background black).
     pub fn depth_to_luma8(

@@ -657,7 +657,6 @@ impl WgpuCanvas {
 
     /// Opens a headless canvas: a wgpu context with no window and no surface,
     /// for off-screen rendering. Works without a display server.
-    #[cfg(not(target_arch = "wasm32"))]
     pub async fn open_headless(
         width: u32,
         height: u32,
@@ -744,6 +743,7 @@ impl WgpuCanvas {
 
         WgpuCanvas {
             window: None,
+            #[cfg(not(target_arch = "wasm32"))]
             window_id: None,
             surface: None,
             surface_config,
@@ -758,6 +758,10 @@ impl WgpuCanvas {
             msaa_view,
             sample_count,
             readback_texture,
+            #[cfg(target_arch = "wasm32")]
+            pending_events: Rc::new(RefCell::new(Vec::new())),
+            #[cfg(target_arch = "wasm32")]
+            _event_closures: Vec::new(),
         }
     }
 

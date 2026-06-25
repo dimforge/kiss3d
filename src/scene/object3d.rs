@@ -888,6 +888,22 @@ pub struct InstancesBuffer3d {
     pub points_sizes: GPUVec<f32>,
 }
 
+/// Raw per-instance GPU buffers prepared for direct compute writes.
+///
+/// Returned by [`Object3d::instance_compute_buffers`] (and the matching
+/// [`SceneNode3d`](crate::scene::SceneNode3d) method). A compute shader running
+/// on the same `wgpu::Device` can fill these buffers each frame instead of
+/// uploading per-instance data from the CPU via
+/// [`set_instances`](Object3d::set_instances).
+pub struct InstanceComputeBuffers {
+    /// One `Vec3` position per instance.
+    pub positions: wgpu::Buffer,
+    /// One RGBA color (`[f32; 4]`) per instance.
+    pub colors: wgpu::Buffer,
+    /// Three `Vec3` deformation-matrix columns per instance (9 floats / instance).
+    pub deformations: wgpu::Buffer,
+}
+
 /// Helper function to convert Color to [f32; 4] for GPU buffers.
 #[inline]
 pub(crate) fn color_to_array(color: Color) -> [f32; 4] {
@@ -1373,6 +1389,31 @@ impl Object3d {
         *self.instances.borrow_mut().lines_widths.data_mut() = Some(lines_width_data);
         *self.instances.borrow_mut().points_colors.data_mut() = Some(points_col_data);
         *self.instances.borrow_mut().points_sizes.data_mut() = Some(points_size_data);
+    }
+
+    /// Prepares this object's per-instance buffers to be written directly by a
+    /// compute shader, for `count` instances, and returns the raw GPU buffers.
+    ///
+    /// The object will render `count` instances reading position, color and
+    /// deformation straight from these buffers. The caller must fill them — e.g.
+    /// with a compute pass on the same `wgpu::Device` — before the next frame.
+    /// This is an alternative to [`set_instances`](Self::set_instances), which
+    /// uploads the same data from the CPU; use one or the other per frame.
+    ///
+    /// Only the surface attributes (position/color/deformation) are managed
+    /// here; the wireframe/point overlay attributes keep their previous
+    /// contents, so this is intended for plain surface-rendered instances.
+    pub fn instance_compute_buffers(&mut self, count: usize) -> InstanceComputeBuffers {
+        let mut inst = self.instances.borrow_mut();
+        let positions = inst.positions.prepare_gpu_writable(count).clone();
+        let colors = inst.colors.prepare_gpu_writable(count).clone();
+        // Three Vec3 columns (a Mat3) per instance.
+        let deformations = inst.deformations.prepare_gpu_writable(count * 3).clone();
+        InstanceComputeBuffers {
+            positions,
+            colors,
+            deformations,
+        }
     }
 
     /// Enables or disables backface culling for this object.

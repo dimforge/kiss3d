@@ -169,6 +169,46 @@ impl<T: Pod + Zeroable> GPUVec<T> {
         self.buffer.as_ref()
     }
 
+    /// Prepares this vector to be filled directly by a compute shader.
+    ///
+    /// Ensures a GPU-resident buffer of at least `count` elements exists with
+    /// `STORAGE` usage added (so a compute pass on the same `wgpu::Device` can
+    /// write into it), reports a length of `count`, and detaches any CPU-side
+    /// data so a subsequent [`load_to_gpu`](Self::load_to_gpu) at render time is
+    /// a no-op and will not overwrite the compute-written contents.
+    ///
+    /// The buffer is reallocated only when it does not yet exist or is too
+    /// small, so calling this every frame at a stable `count` is cheap. Returns
+    /// the GPU buffer to bind as a compute output.
+    #[inline]
+    pub fn prepare_gpu_writable(&mut self, count: usize) -> &wgpu::Buffer {
+        let ctxt = Context::get();
+        self.usage |= wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_DST
+            | wgpu::BufferUsages::VERTEX;
+
+        let needed = (std::mem::size_of::<T>() * count.max(1)) as u64;
+        let realloc = match &self.buffer {
+            Some(b) => b.size() < needed,
+            None => true,
+        };
+        if realloc {
+            self.buffer = Some(ctxt.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("GPUVec compute-writable buffer"),
+                size: needed,
+                usage: self.usage,
+                mapped_at_creation: false,
+            }));
+        }
+
+        // Report `count` instances and detach CPU data: rendering reads `len`
+        // (since `dirty` is false) and `load_to_gpu` becomes a no-op.
+        self.len = count;
+        self.dirty = false;
+        self.data = None;
+        self.buffer.as_ref().unwrap()
+    }
+
     /// Unloads this resource from the GPU.
     #[inline]
     pub fn unload_from_gpu(&mut self) {
