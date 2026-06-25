@@ -6,7 +6,8 @@ use crate::resource::{
     GpuMesh2d, Material2d, MaterialManager2d, MeshManager2d, RenderContext2d, Texture,
     TextureManager,
 };
-use crate::scene::{Blend2d, Object2d};
+use crate::scene::sprite::SpriteSheet;
+use crate::scene::{Blend2d, Border, Object2d};
 use glamx::{Pose2, Rot2, Vec2};
 use std::cell::{Ref, RefCell, RefMut};
 use std::f32;
@@ -463,6 +464,29 @@ impl SceneNode2d {
         SceneNode2d::new(scale, Pose2::IDENTITY, Some(object))
     }
 
+    /// Creates a new scene node holding a `width` × `height` sprite quad.
+    ///
+    /// A sprite is a textured rectangle: give it a texture with
+    /// [`set_texture_from_file`](Self::set_texture_from_file) (or a sibling setter),
+    /// optionally restrict it to one frame of a [`SpriteSheet`] with
+    /// [`set_sprite_frame`](Self::set_sprite_frame), and pick a [`Blend2d`] mode.
+    pub fn sprite(width: f32, height: f32) -> SceneNode2d {
+        Self::rectangle(width, height)
+    }
+
+    /// Creates a new scene node holding a 9-slice sprite.
+    ///
+    /// The sprite is `size` world units (centered on the origin). Its four corner
+    /// cells keep the `world` border width, the top/bottom and left/right edge cells
+    /// stretch along one axis, and the center cell stretches along both — so a textured
+    /// panel can be resized without distorting its rounded corners or beveled frame.
+    /// The texture is split using the `uv` border (in UV `[0, 1]` units). Attach a
+    /// texture with one of the `set_texture*` methods.
+    pub fn nine_slice(size: Vec2, world: Border, uv: Border) -> SceneNode2d {
+        let mesh = crate::scene::sprite::nine_slice_mesh(size, world, uv);
+        Self::mesh(Rc::new(RefCell::new(mesh)), Vec2::ONE)
+    }
+
     /// Removes this node from its parent.
     pub fn detach(&mut self) {
         let self_self = self.clone();
@@ -579,6 +603,24 @@ impl SceneNode2d {
         line_width: f32,
     ) -> SceneNode2d {
         let node = Self::polyline(vertices, indices, line_width);
+        self.add_child(node.clone());
+        node
+    }
+
+    /// Adds a `width` × `height` sprite quad as a child of this node.
+    ///
+    /// See [`Self::sprite`].
+    pub fn add_sprite(&mut self, width: f32, height: f32) -> SceneNode2d {
+        let node = Self::sprite(width, height);
+        self.add_child(node.clone());
+        node
+    }
+
+    /// Adds a 9-slice sprite as a child of this node.
+    ///
+    /// See [`Self::nine_slice`].
+    pub fn add_nine_slice(&mut self, size: Vec2, world: Border, uv: Border) -> SceneNode2d {
+        let node = Self::nine_slice(size, world, uv);
         self.add_child(node.clone());
         node
     }
@@ -1041,6 +1083,48 @@ impl SceneNode2d {
     pub fn set_blend_recursive(&mut self, blend: Blend2d) -> Self {
         self.apply_to_objects_mut_recursive(&mut |o| o.set_blend(blend));
         self.clone()
+    }
+
+    /// Remaps this object's texture coordinates to the `[min, max]` sub-rectangle of
+    /// its texture (UV origin at the texture's top-left), selecting a region of an
+    /// atlas or sprite sheet.
+    ///
+    /// Each vertex's UV is recomputed from its normalized position within the mesh's
+    /// bounding box, so this is repeatable (calling it again replaces the previous
+    /// rect rather than compounding) and works for any quad sprite.
+    pub fn set_uv_rect(&mut self, min: Vec2, max: Vec2) -> Self {
+        let mut verts = Vec::new();
+        self.read_vertices(&mut |v| verts.extend_from_slice(v));
+        if verts.is_empty() {
+            return self.clone();
+        }
+
+        let mut lo = verts[0];
+        let mut hi = verts[0];
+        for v in &verts {
+            lo = lo.min(*v);
+            hi = hi.max(*v);
+        }
+        let extent = (hi - lo).max(Vec2::splat(f32::EPSILON));
+        let span = max - min;
+
+        self.modify_uvs(&mut |uvs| {
+            for (uv, v) in uvs.iter_mut().zip(verts.iter()) {
+                // Normalized position in the quad: 0 at left / top (world y is up, so
+                // the top edge `hi.y` maps to UV v = 0).
+                let nx = (v.x - lo.x) / extent.x;
+                let ny = (hi.y - v.y) / extent.y;
+                *uv = min + Vec2::new(nx, ny) * span;
+            }
+        });
+        self.clone()
+    }
+
+    /// Shows frame `index` of `sheet` on this sprite by remapping its UVs to that
+    /// frame's cell. Step `index` over time for flip-book animation. See [`SpriteSheet`].
+    pub fn set_sprite_frame(&mut self, sheet: &SpriteSheet, index: u32) -> Self {
+        let (min, max) = sheet.frame_uv(index);
+        self.set_uv_rect(min, max)
     }
 
     /// Sets the texture of this node's object only.
