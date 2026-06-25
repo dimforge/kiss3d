@@ -17,6 +17,7 @@ EXAMPLES=(
     post_processing2d
     lighting2d
     tilemap2d
+    skinning2d
     clustered_lights
     wireframe
     lines

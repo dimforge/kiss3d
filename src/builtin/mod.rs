@@ -76,6 +76,7 @@ pub use self::uvs_material::{UvsMaterial, UVS_FRAGMENT_SRC, UVS_VERTEX_SRC};
 
 pub use self::lit_material2d::{LitMaterial2d, LitMaterial2dGpuData, LitParams};
 pub use self::object_material2d::ObjectMaterial2d;
+pub use self::skinned_material2d::{Bone2d, SkinVertex2d, SkinnedMesh2d, MAX_JOINTS_2D};
 pub use self::shadow::{ShadowMapper, MAX_SHADOW_VIEWS};
 
 mod aov;
@@ -88,3 +89,4 @@ mod uvs_material;
 
 mod lit_material2d;
 mod object_material2d;
+mod skinned_material2d;

@@ -21,7 +21,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::builtin::{LitParams, ObjectMaterial};
+    use crate::builtin::{Bone2d, LitParams, ObjectMaterial, SkinVertex2d, SkinnedMesh2d};
     use crate::camera::{CoordinateSystem2d, FixedView2d, OrbitCamera3d};
     use crate::light2d::{Light2d, Light2dManager};
     use crate::context::Context;
@@ -32,7 +32,7 @@ mod tests {
     use crate::renderer::RayTracer;
     use crate::scene::{AlphaMode, SceneNode2d, SceneNode3d, SpriteSheet, Tilemap};
     use crate::window::OffscreenSurface;
-    use glamx::{Vec2, Vec3};
+    use glamx::{Pose2, Vec2, Vec3};
 
     use crate::color::Color;
 
@@ -141,6 +141,43 @@ mod tests {
         s
     }
 
+    /// A small 3-bone vertical strip skinned mesh.
+    fn demo_skinned_mesh() -> SkinnedMesh2d {
+        let mut verts = Vec::new();
+        for row in 0..3u32 {
+            for &x in &[-12.0f32, 12.0] {
+                verts.push(SkinVertex2d {
+                    position: Vec2::new(x, row as f32 * 30.0),
+                    uv: Vec2::new((x + 12.0) / 24.0, row as f32 / 2.0),
+                    joints: [row, 0, 0, 0],
+                    weights: [1.0, 0.0, 0.0, 0.0],
+                });
+            }
+        }
+        // Two quads (rows 0-1 and 1-2).
+        let faces = vec![
+            [0, 1, 3],
+            [0, 3, 2],
+            [2, 3, 5],
+            [2, 5, 4],
+        ];
+        let bones = vec![
+            Bone2d {
+                parent: None,
+                local: Pose2::IDENTITY,
+            },
+            Bone2d {
+                parent: Some(0),
+                local: Pose2::from_translation(Vec2::new(0.0, 30.0)),
+            },
+            Bone2d {
+                parent: Some(1),
+                local: Pose2::from_translation(Vec2::new(0.0, 30.0)),
+            },
+        ];
+        SkinnedMesh2d::new(verts, faces, bones)
+    }
+
     #[test]
     fn all_shaders_instantiate() {
         crate::pollster::block_on(async {
@@ -203,6 +240,13 @@ mod tests {
             });
             let mut cam2 = FixedView2d::new(CoordinateSystem2d::default(), false);
             let mut scene2 = demo_scene_2d();
+            // Skinned 2D mesh: a 3-bone vertical strip, posed and rendered.
+            let mut skinned = demo_skinned_mesh();
+            skinned.set_bone_local(1, Pose2::new(Vec2::new(0.0, 60.0), 0.3));
+            skinned.update();
+            let mut snode = skinned.node();
+            snode.set_position(Vec2::new(-40.0, -30.0));
+            scene2.add_child(snode);
             surface.render_2d(&mut scene2, &mut cam2).await;
 
             // 4) Path tracer (rt_kernel / denoise / rt tonemap).
