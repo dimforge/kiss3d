@@ -27,7 +27,8 @@ mod tests {
     use crate::context::Context;
     use crate::light::Light;
     use crate::post_processing::{
-        Cas, Crt, Fxaa, Grayscales, OculusStereo, PostProcessingEffect, SobelEdgeHighlight, Waves,
+        Cas, Crt, Fxaa, Gi2d, GiEmitter2d, GiOccluder2d, Grayscales, OculusStereo,
+        PostProcessingEffect, SobelEdgeHighlight, Waves,
     };
     use crate::renderer::RayTracer;
     use crate::scene::{AlphaMode, SceneNode2d, SceneNode3d, SpriteSheet, Tilemap};
@@ -257,6 +258,56 @@ mod tests {
             scene2.add_child(snode);
             surface.render_2d(&mut scene2, &mut cam2).await;
 
+            // GI with the jump-flood occluder SDF path (seed / step / resolve shaders).
+            {
+                let mut gi = Gi2d::new();
+                gi.set_sdf_occluders(true);
+                gi.set_camera(&cam2);
+                gi.set_occluders(&[GiOccluder2d::new(Vec2::ZERO, 20.0)]);
+                gi.set_emitters(&[GiEmitter2d::new(
+                    Vec2::new(40.0, 0.0),
+                    8.0,
+                    Color::new(1.0, 0.9, 0.7, 1.0),
+                    2.0,
+                )]);
+                surface
+                    .render(
+                        None,
+                        Some(&mut scene2),
+                        None,
+                        Some(&mut cam2),
+                        None,
+                        Some(&mut gi),
+                    )
+                    .await;
+            }
+
+            // GI via the radiance-cascade solver (cascade + cascade-composite shaders).
+            {
+                let mut gi = Gi2d::new();
+                gi.set_radiance_cascades(true);
+                gi.set_cascade_count(4);
+                gi.set_sdf_occluders(true); // exercises the SDF-cascade march path
+                gi.set_camera(&cam2);
+                gi.set_occluders(&[GiOccluder2d::new(Vec2::ZERO, 20.0)]);
+                gi.set_emitters(&[GiEmitter2d::new(
+                    Vec2::new(60.0, 0.0),
+                    10.0,
+                    Color::new(1.0, 0.9, 0.7, 1.0),
+                    2.0,
+                )]);
+                surface
+                    .render(
+                        None,
+                        Some(&mut scene2),
+                        None,
+                        Some(&mut cam2),
+                        None,
+                        Some(&mut gi),
+                    )
+                    .await;
+            }
+
             // 4) Path tracer (rt_kernel / denoise / rt tonemap).
             let mut rt = RayTracer::new();
             let mut rt_scene = demo_scene_3d();
@@ -271,6 +322,7 @@ mod tests {
                 Box::new(Waves::new()),
                 Box::new(OculusStereo::new()),
                 Box::new(Crt::new()),
+                Box::new(Gi2d::new()),
             ];
             for eff in &mut effects {
                 surface
