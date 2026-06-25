@@ -43,21 +43,6 @@ pub enum Blend2d {
 }
 
 impl Blend2d {
-    /// The number of distinct blend modes; used to size the material's pipeline table.
-    pub(crate) const COUNT: usize = 6;
-
-    /// Every blend mode, in `as usize` discriminant order. Iterated when a material
-    /// pre-builds its per-blend-mode pipeline table so that `table[mode as usize]`
-    /// indexes the matching pipeline.
-    pub(crate) const ALL: [Blend2d; Self::COUNT] = [
-        Blend2d::Alpha,
-        Blend2d::PremultipliedAlpha,
-        Blend2d::Additive,
-        Blend2d::Multiply,
-        Blend2d::Screen,
-        Blend2d::Opaque,
-    ];
-
     /// The wgpu blend state realizing this mode for a straight-(non-premultiplied)
     /// color target, or `None` for [`Blend2d::Opaque`] (blending disabled).
     pub(crate) fn blend_state(self) -> Option<wgpu::BlendState> {

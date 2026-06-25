@@ -29,10 +29,14 @@ struct ObjectUniforms {
 @group(1) @binding(0)
 var<uniform> object: ObjectUniforms;
 
-// Bind group 2: Texture and sampler
-@group(2) @binding(0)
+// Bind group 2: Texture and sampler.
+// Gated by the `textured` feature: solid-color objects (those still using the
+// default white texture) compile the untextured variant, which strips these
+// bindings and the sample below for higher occupancy. The pipeline layout is shared
+// across variants, so the (now unused) bindings simply strip away.
+@if(textured) @group(2) @binding(0)
 var t_diffuse: texture_2d<f32>;
-@group(2) @binding(1)
+@if(textured) @group(2) @binding(1)
 var s_diffuse: sampler;
 
 // Vertex input
@@ -95,7 +99,10 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let tex_color = textureSample(t_diffuse, s_diffuse, in.tex_coord);
+    var tex_color = vec4<f32>(1.0, 1.0, 1.0, 1.0);
+    @if(textured) {
+        tex_color = textureSample(t_diffuse, s_diffuse, in.tex_coord);
+    }
     let final_color = tex_color * (object.color * in.vert_color);
     return final_color;
 }

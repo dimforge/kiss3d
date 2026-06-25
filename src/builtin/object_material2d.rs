@@ -3,13 +3,65 @@ use crate::context::Context;
 use crate::resource::vertex_index::VERTEX_INDEX_FORMAT;
 use crate::resource::{
     multisample_state, DynamicUniformBuffer, GpuData, GpuMesh2d, Material2d, PipelineCache,
-    RenderContext2d, Texture,
+    RenderContext2d, Texture, TextureManager,
 };
 use crate::scene::{Blend2d, InstancesBuffer2d, ObjectData2d};
 use bytemuck::{Pod, Zeroable};
 use glamx::{Mat2, Mat3, Pose2, Vec2};
 use std::any::Any;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
+use std::rc::Rc;
+use std::sync::Arc;
+
+/// Conditional-compilation features for the 2D object shader (`object2d.wgsl`).
+///
+/// Each bit maps to a WESL `@if(...)` flag; a per-object mask selects a specialized
+/// shader variant so unused paths (and their texture bindings) are stripped, raising
+/// GPU occupancy. The pipeline layout is shared across variants — stripped bindings
+/// simply go unused — so all variants reuse the same bind groups.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Default)]
+pub(crate) struct ShaderFeatures2d(u32);
+
+impl ShaderFeatures2d {
+    /// The object samples a texture (vs. a solid color using the default white texture).
+    const TEXTURED: u32 = 1 << 0;
+
+    /// `(WESL feature name, bit)` — names MUST match the `@if(...)` flags in `object2d.wgsl`.
+    const TABLE: [(&'static str, u32); 1] = [("textured", Self::TEXTURED)];
+
+    #[inline]
+    fn with(mut self, bit: u32, on: bool) -> Self {
+        if on {
+            self.0 |= bit;
+        } else {
+            self.0 &= !bit;
+        }
+        self
+    }
+
+    #[inline]
+    fn has(self, bit: u32) -> bool {
+        self.0 & bit != 0
+    }
+}
+
+/// Compiles `object2d.wgsl` to specialized WGSL for `features` via WESL conditional
+/// translation; dead-code elimination then strips the unused paths and bindings.
+fn compile_object2d_wgsl(features: ShaderFeatures2d) -> String {
+    let feats: Vec<(&str, bool)> = ShaderFeatures2d::TABLE
+        .iter()
+        .map(|(name, bit)| (*name, features.has(*bit)))
+        .collect();
+    crate::builtin::compile_wesl(
+        &[
+            ("package::object2d", include_str!("object2d.wgsl")),
+            ("package::common", crate::builtin::COMMON_WESL),
+        ],
+        "package::object2d",
+        &feats,
+    )
+}
 
 /// Frame-level uniforms (view, projection) for 2D rendering.
 #[repr(C)]
@@ -298,9 +350,16 @@ impl GpuData for ObjectMaterial2dGpuData {
 /// - Object uniforms are accumulated in a dynamic buffer and flushed once
 /// - This significantly reduces the number of `write_buffer` calls per frame
 pub struct ObjectMaterial2d {
-    /// One surface pipeline per [`Blend2d`] mode (indexed by `blend as usize`), each
-    /// a [`PipelineCache`] that lazily builds per MSAA sample count.
-    pipelines: Vec<PipelineCache>,
+    /// Pipeline layout shared by every surface-shader variant (group 0 frame, group 1
+    /// object, group 2 texture); unused bindings in a stripped variant simply go unused.
+    surface_pipeline_layout: wgpu::PipelineLayout,
+    /// Specialized surface shader modules, compiled lazily and cached per feature mask.
+    surface_shaders: RefCell<HashMap<ShaderFeatures2d, Rc<wgpu::ShaderModule>>>,
+    /// Specialized surface pipelines, keyed by `(blend mode, features, sample count)`.
+    surface_pipelines: RefCell<HashMap<(Blend2d, ShaderFeatures2d, u32), Rc<wgpu::RenderPipeline>>>,
+    /// The global default (white) texture; an object still using it gets the
+    /// untextured shader variant.
+    default_texture: Arc<Texture>,
     object_bind_group_layout: wgpu::BindGroupLayout,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     // Wireframe pipeline and layouts
@@ -393,7 +452,7 @@ impl ObjectMaterial2d {
                 ],
             });
 
-        let pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        let surface_pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("planar_material_pipeline_layout"),
             bind_group_layouts: &[
                 Some(&frame_bind_group_layout),
@@ -403,25 +462,8 @@ impl ObjectMaterial2d {
             immediate_size: 0,
         });
 
-        // Load shader
-        let shader = ctxt.create_shader_module(
-            Some("planar_material_shader"),
-            &crate::builtin::compile_shader_with_common(
-                "package::object2d",
-                include_str!("object2d.wgsl"),
-            ),
-        );
-
-        // Main 2D surface pipelines: one per blend mode, each built lazily per MSAA
-        // sample count (2D content renders into the optionally-multisampled HDR film).
-        let pipelines: Vec<PipelineCache> = Blend2d::ALL
-            .iter()
-            .map(|&blend| {
-                let shader = shader.clone();
-                let pipeline_layout = pipeline_layout.clone();
-                Self::build_surface_pipeline(shader, pipeline_layout, blend)
-            })
-            .collect();
+        // Surface shader variants and pipelines are compiled lazily on first use,
+        // keyed by feature mask (textured vs. solid) / blend mode / MSAA sample count.
 
         // Create wireframe bind group layouts
         let wireframe_view_bind_group_layout =
@@ -791,7 +833,10 @@ impl ObjectMaterial2d {
         });
 
         ObjectMaterial2d {
-            pipelines,
+            surface_pipeline_layout,
+            surface_shaders: RefCell::new(HashMap::new()),
+            surface_pipelines: RefCell::new(HashMap::new()),
+            default_texture: TextureManager::get_global_manager(|tm| tm.get_default()),
             object_bind_group_layout,
             texture_bind_group_layout,
             wireframe_pipeline,
@@ -809,16 +854,36 @@ impl ObjectMaterial2d {
         }
     }
 
-    /// Builds the lazily-per-sample-count surface pipeline for one blend mode. The
-    /// shader and pipeline layout are captured by value (cheap reference-counted wgpu
-    /// handles) so each blend variant owns an independent `'static` builder closure.
-    fn build_surface_pipeline(
-        shader: wgpu::ShaderModule,
-        pipeline_layout: wgpu::PipelineLayout,
+    /// Returns the specialized surface shader module for `features`, compiling and
+    /// caching it on first use (WESL `@if` strips unused paths/bindings per variant).
+    fn surface_shader(&self, features: ShaderFeatures2d) -> Rc<wgpu::ShaderModule> {
+        if let Some(m) = self.surface_shaders.borrow().get(&features) {
+            return m.clone();
+        }
+        let wgsl = compile_object2d_wgsl(features);
+        let module =
+            Rc::new(Context::get().create_shader_module(Some("planar_material_shader"), &wgsl));
+        self.surface_shaders
+            .borrow_mut()
+            .insert(features, module.clone());
+        module
+    }
+
+    /// Returns the surface pipeline for `(blend, features, sample_count)`, building and
+    /// caching it on first use. All variants share `surface_pipeline_layout`.
+    fn surface_pipeline(
+        &self,
         blend: Blend2d,
-    ) -> PipelineCache {
-        PipelineCache::new(move |sample_count| {
-            let ctxt = Context::get();
+        features: ShaderFeatures2d,
+        sample_count: u32,
+    ) -> Rc<wgpu::RenderPipeline> {
+        let key = (blend, features, sample_count);
+        if let Some(p) = self.surface_pipelines.borrow().get(&key) {
+            return p.clone();
+        }
+        let shader = self.surface_shader(features);
+        let ctxt = Context::get();
+        {
             // Vertex buffer layouts
             // Note: We use separate buffers for instance data (positions, colors, deformations)
             // instead of interleaving them, to avoid per-frame data conversion overhead.
@@ -884,9 +949,9 @@ impl ObjectMaterial2d {
                 },
             ];
 
-            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            let pipeline = Rc::new(ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("planar_material_pipeline"),
-                layout: Some(&pipeline_layout),
+                layout: Some(&self.surface_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("vs_main"),
@@ -916,8 +981,12 @@ impl ObjectMaterial2d {
                 multisample: multisample_state(sample_count),
                 multiview_mask: None,
                 cache: None,
-            })
-        })
+            }));
+            self.surface_pipelines
+                .borrow_mut()
+                .insert(key, pipeline.clone());
+            pipeline
+        }
     }
 
     fn create_texture_bind_group(&self, texture: &Texture) -> wgpu::BindGroup {
@@ -1458,7 +1527,11 @@ impl Material2d for ObjectMaterial2d {
             };
             let object_bind_group = self.object_bind_group.as_ref().unwrap();
 
-            let pipeline = self.pipelines[data.blend() as usize].get(context.sample_count);
+            // Specialize the shader: objects still using the default white texture
+            // get the untextured variant (no texture sample), the rest the textured one.
+            let textured = !Arc::ptr_eq(data.texture(), &self.default_texture);
+            let features = ShaderFeatures2d::default().with(ShaderFeatures2d::TEXTURED, textured);
+            let pipeline = self.surface_pipeline(data.blend(), features, context.sample_count);
             render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, &self.frame_bind_group, &[]);
             // Use dynamic offset for object uniforms!

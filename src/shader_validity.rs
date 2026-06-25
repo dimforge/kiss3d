@@ -109,6 +109,14 @@ mod tests {
         s.add_rectangle(50.0, 50.0)
             .set_lines_width(2.0, false)
             .set_position(Vec2::new(60.0, -40.0));
+        // A textured object exercises the `textured` über-shader variant (solid
+        // objects above use the default white texture → the untextured variant).
+        let tex = crate::resource::TextureManager::get_global_manager(|tm| {
+            tm.add_empty("shader_validity_tex")
+        });
+        let mut textured = s.add_rectangle(30.0, 30.0);
+        textured.data_mut().get_object_mut().set_texture(tex);
+        textured.set_position(Vec2::new(-90.0, -70.0));
         // Non-default blend modes exercise the extra surface pipelines.
         s.add_rectangle(40.0, 40.0)
             .set_color(Color::new(0.8, 0.2, 0.2, 0.6))
