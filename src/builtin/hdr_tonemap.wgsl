@@ -17,7 +17,8 @@ struct TonemapUniforms {
     bloom_intensity: f32,
     // 1.0 when the adapted exposure texture should override `exposure`.
     auto_exposure: f32,
-    // Color grading: white-balance gain (rgb) + unused.
+    // Color grading: white-balance gain (rgb) + force-opaque flag (w: 1.0 writes
+    // alpha = 1.0 to the output, else the HDR scene alpha is forwarded).
     white_balance: vec4<f32>,
     // (saturation, contrast, gamma, hue).
     grading: vec4<f32>,
@@ -102,5 +103,8 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     // Artistic color grading, then the tonemap operator.
     let hdr = color_grade(exposed);
 
-    return vec4<f32>(apply_tonemap(hdr, u.tonemap_op), scene.a);
+    // Forward the scene alpha, unless force-opaque is set for on-screen surfaces
+    // (a transparent canvas would show the page through it on some browsers).
+    let out_a = select(scene.a, 1.0, u.white_balance.w > 0.5);
+    return vec4<f32>(apply_tonemap(hdr, u.tonemap_op), out_a);
 }

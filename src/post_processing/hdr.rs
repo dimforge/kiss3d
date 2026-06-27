@@ -170,7 +170,8 @@ struct TonemapUniforms {
     bloom_intensity: f32,
     // 1.0 when the adapted exposure texture overrides `exposure`.
     auto_exposure: f32,
-    // Color grading: white-balance gain (rgb) + unused.
+    // Color grading: white-balance gain (rgb) + force-opaque flag (w: 1.0 writes
+    // alpha = 1.0 to the output, else the HDR scene alpha is forwarded).
     white_balance: [f32; 4],
     // (saturation, contrast, gamma, hue).
     grading: [f32; 4],
@@ -949,7 +950,16 @@ impl HdrPipeline {
                             dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
                             operation: wgpu::BlendOperation::Add,
                         },
-                        alpha: wgpu::BlendComponent::REPLACE,
+                        // Keep the destination alpha (out.a = dst.a). The opaque
+                        // scene's alpha is forwarded to the surface by the tonemap;
+                        // overwriting it with the OIT coverage (1 - reveal) drove it
+                        // to 0 on the background and made the canvas transparent →
+                        // white page on browsers that composite canvas alpha (Firefox).
+                        alpha: wgpu::BlendComponent {
+                            src_factor: wgpu::BlendFactor::Zero,
+                            dst_factor: wgpu::BlendFactor::One,
+                            operation: wgpu::BlendOperation::Add,
+                        },
                     }),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
@@ -1522,10 +1532,17 @@ impl HdrPipeline {
         write_index
     }
 
+    /// `force_opaque` writes alpha = 1.0 to the output instead of forwarding the
+    /// HDR scene's alpha. Set it for on-screen window surfaces (a browser
+    /// composites the canvas against the page using its alpha, so a sub-1.0 alpha
+    /// — e.g. left behind by a transparency pass — would make the canvas
+    /// see-through). Leave it off for offscreen/snapshot/embedding targets that
+    /// legitimately want the scene's alpha preserved.
     pub(crate) fn resolve(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
+        force_opaque: bool,
         gpu: &mut crate::renderer::timings::GpuTimer,
     ) {
         let ctxt = Context::get();
@@ -1558,7 +1575,8 @@ impl HdrPipeline {
                 auto_exposure: if auto { 1.0 } else { 0.0 },
                 white_balance: {
                     let w = self.settings.color_grading.white_balance;
-                    [w[0], w[1], w[2], 0.0]
+                    // .w carries the force-opaque flag (see `force_opaque` above).
+                    [w[0], w[1], w[2], if force_opaque { 1.0 } else { 0.0 }]
                 },
                 grading: [
                     self.settings.color_grading.saturation,

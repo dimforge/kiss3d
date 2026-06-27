@@ -188,8 +188,10 @@ impl<T: Pod + Zeroable> GPUVec<T> {
             | wgpu::BufferUsages::VERTEX;
 
         let needed = (std::mem::size_of::<T>() * count.max(1)) as u64;
+        // Reallocate when the buffer is missing, too small, OR lacks the usage
+        // flags we just added.
         let realloc = match &self.buffer {
-            Some(b) => b.size() < needed,
+            Some(b) => b.size() < needed || !b.usage().contains(self.usage),
             None => true,
         };
         if realloc {

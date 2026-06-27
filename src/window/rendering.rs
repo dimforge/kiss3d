@@ -1178,9 +1178,13 @@ impl Window {
         // into `frame_view`. With one or more, the film is tonemapped into the first
         // ping-pong LDR target, then each effect reads the previous target and writes
         // the next (A→B→A→…), with the last effect writing the final `frame_view`.
+        // A visible window presents to a surface a browser composites against the
+        // page, so force an opaque alpha there; a hidden/offscreen target keeps the
+        // scene alpha for snapshots and host-app embedding.
+        let force_opaque = !offscreen;
         if post_processing.is_empty() {
             self.hdr
-                .resolve(&mut encoder, &frame_view, &mut self.gpu_timer);
+                .resolve(&mut encoder, &frame_view, force_opaque, &mut self.gpu_timer);
         } else {
             // Tonemap into the first ping-pong target (A).
             let first_view = match &self.post_process_render_target {
@@ -1188,7 +1192,7 @@ impl Window {
                 RenderTarget::Screen => frame_view.clone(),
             };
             self.hdr
-                .resolve(&mut encoder, &first_view, &mut self.gpu_timer);
+                .resolve(&mut encoder, &first_view, force_opaque, &mut self.gpu_timer);
 
             let n = post_processing.len();
             for i in 0..n {
