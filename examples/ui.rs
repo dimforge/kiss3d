@@ -22,7 +22,7 @@ async fn main() {
 
     // UI state
     let mut rotation_speed = 0.014;
-    let mut text = String::from("String");
+    let mut text = String::from("Edit text here!");
     let mut opacity = 1.0;
     let mut cube_color = [1.0, 0.0, 0.0];
 
