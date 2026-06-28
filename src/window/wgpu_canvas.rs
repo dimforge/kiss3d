@@ -69,6 +69,13 @@ fn experimental_features(required: wgpu::Features) -> ExperimentalFeatures {
     ExperimentalFeatures::disabled()
 }
 
+/// Combines the features kiss3d always wants with the consumer-requested extras from
+/// [`CanvasSetup::required_features`], dropping any the adapter doesn't support so
+/// `request_device` never fails on an unavailable feature.
+fn device_features(adapter: &wgpu::Adapter, extra: wgpu::Features) -> wgpu::Features {
+    raytracing_features(adapter) | (extra & adapter.features())
+}
+
 // Thread-local EventLoop singleton for native platforms.
 // winit only allows one EventLoop per program, so we store it in thread-local
 // storage and reuse it across window recreations. EventLoop is not Send/Sync,
@@ -280,7 +287,7 @@ impl WgpuCanvas {
             // unavailable there, which is an inherent WebGL2 limitation.
             let limits = adapter.limits();
 
-            let required_features = raytracing_features(&adapter);
+            let required_features = device_features(&adapter, canvas_setup.required_features);
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kiss3d device"),
@@ -686,7 +693,7 @@ impl WgpuCanvas {
                 .await
                 .expect("Failed to find an appropriate adapter");
 
-            let required_features = raytracing_features(&adapter);
+            let required_features = device_features(&adapter, canvas_setup.required_features);
             let (device, queue) = adapter
                 .request_device(&wgpu::DeviceDescriptor {
                     label: Some("kiss3d headless device"),

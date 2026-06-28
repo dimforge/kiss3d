@@ -49,6 +49,10 @@ pub struct CanvasSetup {
     /// let mut window = Window::new_with_setup("Title", 800, 600, setup);
     /// ```
     pub canvas_id: String,
+    /// Extra wgpu device features to request when creating the device, on top of
+    /// the ones kiss3d enables by default.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub required_features: wgpu::Features,
 }
 
 impl Default for CanvasSetup {
@@ -57,6 +61,7 @@ impl Default for CanvasSetup {
             vsync: true,
             samples: NumSamples::Four,
             canvas_id: "canvas".to_string(),
+            required_features: wgpu::Features::empty(),
         }
     }
 }
