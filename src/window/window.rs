@@ -994,7 +994,7 @@ impl Window {
         let mut usr_window = Window {
             should_close: false,
             first_frame: true,
-            close_key: Some(Key::Escape),
+            close_key: None,
             close_modifiers: None,
             last_timings: None,
             last_frame_instant: None,
