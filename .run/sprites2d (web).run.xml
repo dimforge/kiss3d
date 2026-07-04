@@ -1,5 +1,6 @@
 <component name="ProjectRunConfigurationManager">
   <configuration default="false" name="sprites2d (web)" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+    <option name="buildProfileId" value="dev" />
     <option name="command" value="run --package kiss3d --example sprites2d --target wasm32-unknown-unknown" />
     <option name="workingDirectory" value="file://$PROJECT_DIR$" />
     <envs />

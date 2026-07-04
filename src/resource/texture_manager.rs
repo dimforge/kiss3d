@@ -51,6 +51,7 @@ impl Texture {
         data: &[u8],
         format: wgpu::TextureFormat,
         address_mode: wgpu::AddressMode,
+        filter: wgpu::FilterMode,
         generate_mipmaps: bool,
     ) -> Arc<Texture> {
         let ctxt = Context::get();
@@ -151,8 +152,8 @@ impl Texture {
             address_mode_u: address_mode,
             address_mode_v: address_mode,
             address_mode_w: address_mode,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
+            mag_filter: filter,
+            min_filter: filter,
             mipmap_filter: if generate_mipmaps {
                 wgpu::MipmapFilterMode::Linear
             } else {
@@ -259,6 +260,7 @@ impl Texture {
             &white_pixel,
             wgpu::TextureFormat::Rgba8UnormSrgb,
             wgpu::AddressMode::Repeat,
+            wgpu::FilterMode::Linear,
             false,
         )
     }
@@ -274,6 +276,7 @@ impl Texture {
             &normal_pixel,
             wgpu::TextureFormat::Rgba8Unorm, // Normal maps use linear data, not sRGB
             wgpu::AddressMode::Repeat,
+            wgpu::FilterMode::Linear,
             false,
         )
     }
@@ -289,6 +292,7 @@ impl Texture {
             &mr_pixel,
             wgpu::TextureFormat::Rgba8Unorm, // Data texture, not sRGB
             wgpu::AddressMode::Repeat,
+            wgpu::FilterMode::Linear,
             false,
         )
     }
@@ -302,6 +306,7 @@ impl Texture {
             &ao_pixel,
             wgpu::TextureFormat::Rgba8Unorm, // Data texture, not sRGB
             wgpu::AddressMode::Repeat,
+            wgpu::FilterMode::Linear,
             false,
         )
     }
@@ -317,6 +322,7 @@ impl Texture {
             &pixel,
             wgpu::TextureFormat::Rgba8Unorm,
             wgpu::AddressMode::Repeat,
+            wgpu::FilterMode::Linear,
             false,
         )
     }
@@ -330,6 +336,7 @@ impl Texture {
             &emissive_pixel,
             wgpu::TextureFormat::Rgba8UnormSrgb, // Emissive is color data, use sRGB
             wgpu::AddressMode::Repeat,
+            wgpu::FilterMode::Linear,
             false,
         )
     }
@@ -393,14 +400,33 @@ impl TextureManager {
         }
     }
 
-    /// Allocates a new texture read from a `DynamicImage` object.
+    /// Allocates a new texture read from a `DynamicImage` object, sampled with
+    /// smooth (bilinear) filtering.
     ///
     /// If a texture with same name exists, nothing is created and the old texture is returned.
     pub fn add_image(&mut self, image: DynamicImage, name: &str) -> Arc<Texture> {
+        self.add_image_filtered(image, name, wgpu::FilterMode::Linear)
+    }
+
+    /// Like [`add_image`](Self::add_image) but with nearest-neighbor filtering, for
+    /// pixel-art / sprite-sheet textures: crisp when magnified, with no bilinear
+    /// bleed across atlas-cell boundaries.
+    pub fn add_image_pixelated(&mut self, image: DynamicImage, name: &str) -> Arc<Texture> {
+        self.add_image_filtered(image, name, wgpu::FilterMode::Nearest)
+    }
+
+    fn add_image_filtered(
+        &mut self,
+        image: DynamicImage,
+        name: &str,
+        filter: wgpu::FilterMode,
+    ) -> Arc<Texture> {
         let generate_mipmaps = self.generate_mipmaps;
         self.textures
             .entry(name.to_string())
-            .or_insert_with(|| TextureManager::load_texture_from_image(image, generate_mipmaps))
+            .or_insert_with(|| {
+                TextureManager::load_texture_from_image(image, generate_mipmaps, filter)
+            })
             .clone()
     }
 
@@ -409,6 +435,20 @@ impl TextureManager {
     /// If a texture with same name exists, nothing is created and the old texture is returned.
     pub fn add_image_from_memory(&mut self, image_data: &[u8], name: &str) -> Arc<Texture> {
         self.add_image(
+            image::load_from_memory(image_data).expect("Invalid data"),
+            name,
+        )
+    }
+
+    /// Like [`add_image_from_memory`](Self::add_image_from_memory) but with
+    /// nearest-neighbor filtering, for pixel-art / sprite-sheet textures (see
+    /// [`add_image_pixelated`](Self::add_image_pixelated)).
+    pub fn add_image_from_memory_pixelated(
+        &mut self,
+        image_data: &[u8],
+        name: &str,
+    ) -> Arc<Texture> {
+        self.add_image_pixelated(
             image::load_from_memory(image_data).expect("Invalid data"),
             name,
         )
@@ -444,6 +484,7 @@ impl TextureManager {
                     rgba_image.as_raw(),
                     format,
                     wgpu::AddressMode::Repeat,
+                    wgpu::FilterMode::Linear,
                     generate_mipmaps,
                 )
             })
@@ -451,7 +492,11 @@ impl TextureManager {
     }
 
     /// Loads a texture from a DynamicImage.
-    fn load_texture_from_image(image: DynamicImage, generate_mipmaps: bool) -> Arc<Texture> {
+    fn load_texture_from_image(
+        image: DynamicImage,
+        generate_mipmaps: bool,
+        filter: wgpu::FilterMode,
+    ) -> Arc<Texture> {
         let (width, height) = image.dimensions();
 
         // Convert to RGBA8
@@ -464,24 +509,42 @@ impl TextureManager {
             pixels,
             wgpu::TextureFormat::Rgba8UnormSrgb,
             wgpu::AddressMode::ClampToEdge,
+            filter,
             generate_mipmaps,
         )
     }
 
     /// Allocates a new texture read from a file.
-    fn load_texture_from_file(path: &Path, generate_mipmaps: bool) -> Arc<Texture> {
+    fn load_texture_from_file(
+        path: &Path,
+        generate_mipmaps: bool,
+        filter: wgpu::FilterMode,
+    ) -> Arc<Texture> {
         let image = image::open(path)
             .unwrap_or_else(|e| panic!("Unable to load texture from file {:?}: {:?}", path, e));
-        TextureManager::load_texture_from_image(image, generate_mipmaps)
+        TextureManager::load_texture_from_image(image, generate_mipmaps, filter)
     }
 
     /// Allocates a new texture read from a file. If a texture with same name exists, nothing is
     /// created and the old texture is returned.
     pub fn add(&mut self, path: &Path, name: &str) -> Arc<Texture> {
+        self.add_filtered(path, name, wgpu::FilterMode::Linear)
+    }
+
+    /// Like [`add`](Self::add) but samples with nearest-neighbor filtering, for
+    /// pixel-art / sprite-sheet textures (see
+    /// [`add_image_pixelated`](Self::add_image_pixelated)).
+    pub fn add_pixelated(&mut self, path: &Path, name: &str) -> Arc<Texture> {
+        self.add_filtered(path, name, wgpu::FilterMode::Nearest)
+    }
+
+    fn add_filtered(&mut self, path: &Path, name: &str, filter: wgpu::FilterMode) -> Arc<Texture> {
         let generate_mipmaps = self.generate_mipmaps;
         self.textures
             .entry(name.to_string())
-            .or_insert_with(|| TextureManager::load_texture_from_file(path, generate_mipmaps))
+            .or_insert_with(|| {
+                TextureManager::load_texture_from_file(path, generate_mipmaps, filter)
+            })
             .clone()
     }
 

@@ -83,6 +83,7 @@ fn load(data: &[u8], srgb: bool, invert: bool, flip_green: bool) -> Arc<Texture>
         img.as_raw(),
         format,
         wgpu::AddressMode::ClampToEdge,
+        wgpu::FilterMode::Linear,
         true,
     )
 }

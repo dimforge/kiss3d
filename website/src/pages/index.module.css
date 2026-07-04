@@ -32,13 +32,16 @@
   border-color: var(--ifm-color-primary-dark);
 }
 
-.heroBanner :global(.button--outline) {
-  color: var(--ifm-color-primary-darkest);
-  border-color: var(--ifm-color-primary-darkest);
+.heroBanner :global(.button--outline),
+.heroBanner :global(.button--outline):visited {
+  background: var(--ifm-color-primary);
+  border-color: var(--ifm-color-primary);
+  color: #fff;
 }
 
 .heroBanner :global(.button--outline):hover {
-  background: var(--ifm-color-primary-darkest);
+  background: var(--ifm-color-primary-dark);
+  border-color: var(--ifm-color-primary-dark);
   color: #fff;
 }
 
@@ -124,6 +127,19 @@
   gap: 1rem;
   flex-wrap: wrap;
   margin-top: 1.5rem;
+}
+
+.codeLinks :global(.button--outline),
+.codeLinks :global(.button--outline):visited {
+  background: linear-gradient(135deg, var(--ifm-color-primary) 0%, var(--ifm-color-primary-dark) 100%);
+  border-color: var(--ifm-color-primary);
+  color: #fff;
+}
+
+.codeLinks :global(.button--outline):hover {
+  background: linear-gradient(135deg, var(--ifm-color-primary-light) 0%, var(--ifm-color-primary) 100%);
+  border-color: var(--ifm-color-primary);
+  color: #fff;
 }
 
 @media screen and (max-width: 996px) {

@@ -725,6 +725,34 @@ impl Object2d {
         &self.mesh
     }
 
+    /// Deep-copies this object's mesh if it is shared (e.g. the single quad the mesh
+    /// manager hands to every sprite), so a per-object mesh edit — like remapping UVs
+    /// to a sprite-sheet frame — doesn't affect siblings. No-op if already unique.
+    pub fn make_mesh_unique(&mut self) {
+        if Rc::strong_count(&self.mesh) > 1 {
+            let (coords, faces, uvs) = {
+                let src = self.mesh.borrow();
+                let coords = src
+                    .coords()
+                    .read()
+                    .unwrap()
+                    .data()
+                    .clone()
+                    .unwrap_or_default();
+                let faces = src
+                    .faces()
+                    .read()
+                    .unwrap()
+                    .data()
+                    .clone()
+                    .unwrap_or_default();
+                let uvs = src.uvs().read().unwrap().data().clone();
+                (coords, faces, uvs)
+            };
+            self.mesh = Rc::new(RefCell::new(GpuMesh2d::new(coords, faces, uvs, true)));
+        }
+    }
+
     /// Mutably access the object's vertices.
     #[inline(always)]
     pub fn modify_vertices<F: FnMut(&mut Vec<Vec2>)>(&mut self, f: &mut F) {

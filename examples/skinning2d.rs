@@ -1,5 +1,6 @@
 use kiss3d::builtin::{Bone2d, SkinVertex2d, SkinnedMesh2d};
 use kiss3d::prelude::*;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 // Demonstrates 2D skeletal deformation with GPU skinning: a textured strip is bound
@@ -51,9 +52,15 @@ async fn main() {
 
     let mut skinned = SkinnedMesh2d::new(verts, faces, bones);
     skinned.set_transform(Pose2::from_translation(Vec2::new(0.0, -200.0)));
+    // Embed on wasm (no filesystem); read from disk on native.
+    #[cfg(not(target_arch = "wasm32"))]
     skinned
         .node()
         .set_texture_from_file(Path::new("./examples/media/kitten.png"), "kitten");
+    #[cfg(target_arch = "wasm32")]
+    skinned
+        .node()
+        .set_texture_from_memory(include_bytes!("./media/kitten.png"), "kitten");
     scene.add_child(skinned.node());
 
     let mut t = 0.0f32;

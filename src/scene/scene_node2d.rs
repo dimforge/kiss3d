@@ -1129,6 +1129,10 @@ impl SceneNode2d {
     /// bounding box, so this is repeatable (calling it again replaces the previous
     /// rect rather than compounding) and works for any quad sprite.
     pub fn set_uv_rect(&mut self, min: Vec2, max: Vec2) -> Self {
+        // Sprites share one built-in quad mesh; copy it first so rewriting UVs here
+        // doesn't move every other sprite to the same frame.
+        self.apply_to_object_mut(&mut |o| o.make_mesh_unique());
+
         let mut verts = Vec::new();
         self.read_vertices(&mut |v| verts.extend_from_slice(v));
         if verts.is_empty() {
@@ -1159,7 +1163,21 @@ impl SceneNode2d {
     /// Shows frame `index` of `sheet` on this sprite by remapping its UVs to that
     /// frame's cell. Step `index` over time for flip-book animation. See [`SpriteSheet`].
     pub fn set_sprite_frame(&mut self, sheet: &SpriteSheet, index: u32) -> Self {
-        let (min, max) = sheet.frame_uv(index);
+        let (mut min, mut max) = sheet.frame_uv(index);
+
+        // Pull the rect a sliver of a texel off the cell boundary so a nearest-sampled
+        // edge fragment can't round into the neighboring frame. This beats any float
+        // error yet is far too small to clip art touching the cell edge (a half-texel,
+        // texel-center inset would). Skipped for the 1x1 default texture.
+        let size = self.data().object().map(|o| o.data().texture().size);
+        if let Some((w, h)) = size {
+            if w > 1 && h > 1 {
+                let inset = Vec2::new(0.05 / w as f32, 0.05 / h as f32);
+                min += inset;
+                max -= inset;
+            }
+        }
+
         self.set_uv_rect(min, max)
     }
 
@@ -1211,6 +1229,27 @@ impl SceneNode2d {
     pub fn set_texture_from_memory(&mut self, image_data: &[u8], name: &str) -> Self {
         let texture =
             TextureManager::get_global_manager(|tm| tm.add_image_from_memory(image_data, name));
+
+        self.set_texture(texture)
+    }
+
+    /// Like [`Self::set_texture_from_file`] but with nearest-neighbor sampling, for
+    /// pixel-art and sprite-sheet / tilemap atlases: crisp when magnified, with no
+    /// bilinear bleed across atlas cells.
+    #[inline]
+    pub fn set_texture_from_file_pixelated(&mut self, path: &Path, name: &str) -> Self {
+        let texture = TextureManager::get_global_manager(|tm| tm.add_pixelated(path, name));
+
+        self.set_texture(texture)
+    }
+
+    /// Like [`Self::set_texture_from_memory`] but with nearest-neighbor sampling. See
+    /// [`Self::set_texture_from_file_pixelated`].
+    #[inline]
+    pub fn set_texture_from_memory_pixelated(&mut self, image_data: &[u8], name: &str) -> Self {
+        let texture = TextureManager::get_global_manager(|tm| {
+            tm.add_image_from_memory_pixelated(image_data, name)
+        });
 
         self.set_texture(texture)
     }
