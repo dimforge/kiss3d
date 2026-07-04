@@ -443,7 +443,12 @@ impl CubeFaceCamera {
         let u = FACE_UP[face];
         let fwd = glamx::Vec3::new(f[0], f[1], f[2]);
         let up = glamx::Vec3::new(u[0], u[1], u[2]);
-        let proj = glamx::Mat4::perspective_rh_gl(core::f32::consts::FRAC_PI_2, 1.0, znear, zfar);
+        let proj = glamx::glam::camera::rh::proj::opengl::perspective(
+            core::f32::consts::FRAC_PI_2,
+            1.0,
+            znear,
+            zfar,
+        );
         let view = glamx::Pose3::look_at_rh(eye, eye + fwd, up);
         CubeFaceCamera {
             eye,

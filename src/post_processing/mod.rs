@@ -3,7 +3,9 @@
 pub use crate::post_processing::cas::Cas;
 pub use crate::post_processing::crt::Crt;
 pub use crate::post_processing::fxaa::Fxaa;
-pub use crate::post_processing::gi2d::{Gi2d, GiEmitter2d, GiOccluder2d};
+pub use crate::post_processing::gi2d::{
+    Gi2d, GiEmitter2d, GiOccluder2d, MAX_EMITTERS, MAX_OCCLUDERS,
+};
 pub use crate::post_processing::grayscales::Grayscales;
 pub use crate::post_processing::hdr::{
     ColorGrading, HdrPipeline, HdrSettings, Tonemap, HDR_FORMAT, OIT_ACCUM_FORMAT,

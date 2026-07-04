@@ -32,6 +32,7 @@ use crate::context::Context;
 use crate::light::{CollectedLight, LightCollection, LightType, MAX_LIGHTS};
 use crate::scene::SceneNode3d;
 use bytemuck::{Pod, Zeroable};
+use glamx::glam::camera::rh::{proj::directx, view::look_at_mat4};
 use glamx::{Mat4, Vec3};
 
 /// Maximum number of shadow views (atlas layers) across all lights.
@@ -1933,10 +1934,10 @@ fn calculate_cascade(
     // fallen into the void) corrupt the depth range and make shadows flicker/degrade.
     let margin = 0.5 * radius;
     let light_eye = center - dir * (radius + margin);
-    let view = Mat4::look_at_rh(light_eye, center, up);
+    let view = look_at_mat4(light_eye, center, up);
     let near = 0.0_f32;
     let far = 2.0 * radius + 2.0 * margin;
-    let proj = Mat4::orthographic_rh(-radius, radius, -radius, radius, near, far);
+    let proj = directx::orthographic(-radius, radius, -radius, radius, near, far);
     let view_proj = proj * view;
 
     // Texel snap: round the projected world origin to the texel grid so a fixed
@@ -1957,8 +1958,8 @@ fn perspective_view_proj(eye: Vec3, target: Vec3, fov: f32, near: f32, far: f32)
     } else {
         Vec3::Y
     };
-    let view = Mat4::look_at_rh(eye, eye + fwd, up);
-    let proj = Mat4::perspective_rh(fov, 1.0, near, far);
+    let view = look_at_mat4(eye, eye + fwd, up);
+    let proj = directx::perspective(fov, 1.0, near, far);
     proj * view
 }
 
@@ -1966,7 +1967,7 @@ fn perspective_view_proj(eye: Vec3, target: Vec3, fov: f32, near: f32, far: f32)
 ///
 /// Face order: +X, -X, +Y, -Y, +Z, -Z, matching the selection logic in the shader.
 fn cube_face_view_projs(eye: Vec3, near: f32, far: f32) -> [Mat4; 6] {
-    let proj = Mat4::perspective_rh(std::f32::consts::FRAC_PI_2, 1.0, near, far);
+    let proj = directx::perspective(std::f32::consts::FRAC_PI_2, 1.0, near, far);
     let dirs_ups = [
         (Vec3::X, Vec3::NEG_Y),
         (Vec3::NEG_X, Vec3::NEG_Y),
@@ -1977,7 +1978,7 @@ fn cube_face_view_projs(eye: Vec3, near: f32, far: f32) -> [Mat4; 6] {
     ];
     let mut out = [Mat4::IDENTITY; 6];
     for (i, (dir, up)) in dirs_ups.iter().enumerate() {
-        let view = Mat4::look_at_rh(eye, eye + *dir, *up);
+        let view = look_at_mat4(eye, eye + *dir, *up);
         out[i] = proj * view;
     }
     out

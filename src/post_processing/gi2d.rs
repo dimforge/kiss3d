@@ -185,7 +185,7 @@ impl GiTexture {
     }
 }
 
-/// Screen-space 2D global-illumination post-processing effect (see the [module docs](self)).
+/// Screen-space 2D global-illumination post-processing effect (see the [module docs](crate::post_processing)).
 pub struct Gi2d {
     field_pipeline: wgpu::RenderPipeline,
     composite_pipeline: wgpu::RenderPipeline,
@@ -400,7 +400,7 @@ impl Gi2d {
                 vertex: wgpu::VertexState {
                     module: shader,
                     entry_point: Some("vs_main"),
-                    buffers: &[vertex_buffer_layout.clone()],
+                    buffers: std::slice::from_ref(&vertex_buffer_layout),
                     compilation_options: Default::default(),
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -480,15 +480,16 @@ impl Gi2d {
             ],
             immediate_size: 0,
         });
-        let cascade_composite_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("gi2d_cascade_composite_pipeline_layout"),
-            bind_group_layouts: &[
-                Some(&tex_bind_group_layout),      // scene
-                Some(&tex_only_bind_group_layout), // cascade 0 (textureLoad)
-                Some(&uniform_bind_group_layout),  // composite uniforms
-            ],
-            immediate_size: 0,
-        });
+        let cascade_composite_layout =
+            ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("gi2d_cascade_composite_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&tex_bind_group_layout),      // scene
+                    Some(&tex_only_bind_group_layout), // cascade 0 (textureLoad)
+                    Some(&uniform_bind_group_layout),  // composite uniforms
+                ],
+                immediate_size: 0,
+            });
         let cascade_shader = ctxt.create_shader_module(
             Some("gi2d_cascade_shader"),
             &crate::builtin::compile_shader_with_common(
@@ -773,7 +774,7 @@ impl Gi2d {
     /// Enables baking occluders into a jump-flooded distance field each frame so the
     /// march cost is independent of occluder count (one texture fetch per step). This
     /// is screen-space — off-screen occluders cast no shadows. Off by default (the
-    /// analytic, global per-disc path). See the [module docs](self).
+    /// analytic, global per-disc path). See the [module docs](crate::post_processing).
     pub fn set_sdf_occluders(&mut self, enabled: bool) {
         self.sdf_occluders = enabled;
     }
@@ -1029,7 +1030,11 @@ impl Gi2d {
         let mindim = cw.min(ch);
         // Highest level whose probe spacing (s0 * 2^c) still fits the field.
         let max_n = (32 - (mindim / s0).max(1).leading_zeros()).max(1);
-        let n = self.cascade_count.min(max_n).min(MAX_CASCADES as u32).max(1);
+        let n = self
+            .cascade_count
+            .min(max_n)
+            .min(MAX_CASCADES as u32)
+            .max(1);
 
         // World units per field pixel (uniform 2D camera) → ray-interval scale.
         let wpp = (2.0 / cw as f32) / self.vp.x_axis.x.abs().max(1e-6);
@@ -1150,7 +1155,12 @@ impl PostProcessingEffect for Gi2d {
 
         // Radiance-cascade solver: its own multi-pass path; skip the direct march.
         if self.radiance_cascades {
-            self.render_cascades(context.encoder, context.output_view, scene_view, scene_sampler);
+            self.render_cascades(
+                context.encoder,
+                context.output_view,
+                scene_view,
+                scene_sampler,
+            );
             self.frame_index = self.frame_index.wrapping_add(1);
             return;
         }

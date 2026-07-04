@@ -1,5 +1,5 @@
-use kiss3d::prelude::*;
 use kiss3d::post_processing::Crt;
+use kiss3d::prelude::*;
 
 // Demonstrates the 2D post-processing stack: HDR bloom (bright, >1.0 colors bleed
 // light) plus a CRT stylization effect (curvature, chromatic aberration, scanlines
@@ -38,7 +38,10 @@ async fn main() {
     crt.set_scanlines(0.3, 600.0);
 
     let mut t = 0.0f32;
-    while window.render_2d_with(&mut scene, &mut camera, &mut crt).await {
+    while window
+        .render_2d_with(&mut scene, &mut camera, &mut crt)
+        .await
+    {
         t += 0.05;
         let s = 1.0 + 0.25 * (0.5 + 0.5 * t.sin());
         pulse.set_local_scale(s, s);

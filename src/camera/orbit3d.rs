@@ -2,6 +2,7 @@ use crate::camera::first_person3d::CoordSystemRh;
 use crate::camera::Camera3d;
 use crate::event::{Action, Key, Modifiers, MouseButton, WindowEvent};
 use crate::window::Canvas;
+use glamx::glam::camera::rh::proj::{directx, opengl};
 use glamx::{Mat4, Pose3, Vec2, Vec3};
 use std::f32;
 
@@ -457,7 +458,7 @@ impl OrbitCamera3d {
         let aspect = self.last_framebuffer_size.x / self.last_framebuffer_size.y;
         self.proj = match self.projection {
             super::Projection::Perspective => {
-                Mat4::perspective_rh_gl(self.fov, aspect, self.znear, self.zfar)
+                opengl::perspective(self.fov, aspect, self.znear, self.zfar)
             }
             super::Projection::Orthographic => {
                 // Derive the orthographic half-height from the orbit distance and
@@ -472,7 +473,7 @@ impl OrbitCamera3d {
                 // clipped — i.e. the whole scene vanishes. (Perspective gets away with
                 // `_rh_gl` only because its nonlinear depth keeps the visible scene in
                 // [0, 1] bar a thin near sliver.)
-                Mat4::orthographic_rh(-half_w, half_w, -half_h, half_h, self.znear, self.zfar)
+                directx::orthographic(-half_w, half_w, -half_h, half_h, self.znear, self.zfar)
             }
         };
         self.view = self.view_transform().to_mat4();

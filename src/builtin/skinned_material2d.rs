@@ -73,7 +73,7 @@ fn mat3_to_padded(m: &Mat3) -> [[f32; 4]; 3] {
     ]
 }
 
-/// A 2D mesh deformed by a bone skeleton via GPU skinning (see the [module docs](self)).
+/// A 2D mesh deformed by a bone skeleton via GPU skinning (see the [module docs](crate::builtin)).
 pub struct SkinnedMesh2d {
     bones: Vec<Bone2d>,
     inverse_bind: Vec<Mat3>,
@@ -88,7 +88,11 @@ impl SkinnedMesh2d {
     /// skeleton. The bones' initial `local` transforms define the bind pose (used to
     /// compute the inverse-bind matrices), so pose the skeleton into its rest shape
     /// before calling this. Bones must be ordered parents-before-children.
-    pub fn new(vertices: Vec<SkinVertex2d>, faces: Vec<[u32; 3]>, bones: Vec<Bone2d>) -> SkinnedMesh2d {
+    pub fn new(
+        vertices: Vec<SkinVertex2d>,
+        faces: Vec<[u32; 3]>,
+        bones: Vec<Bone2d>,
+    ) -> SkinnedMesh2d {
         assert!(
             bones.len() <= MAX_JOINTS_2D,
             "SkinnedMesh2d supports at most {} bones",
@@ -513,20 +517,21 @@ impl Material2d for SkinnedMaterial2d {
         let texture = data.texture();
         let texture_ptr = std::sync::Arc::as_ptr(texture) as usize;
         if gpu_data.texture_bind_group.is_none() || gpu_data.cached_texture_ptr != texture_ptr {
-            gpu_data.texture_bind_group = Some(ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("skinned2d_texture_bind_group"),
-                layout: &self.texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&texture.view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&texture.sampler),
-                    },
-                ],
-            }));
+            gpu_data.texture_bind_group =
+                Some(ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("skinned2d_texture_bind_group"),
+                    layout: &self.texture_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&texture.view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&texture.sampler),
+                        },
+                    ],
+                }));
             gpu_data.cached_texture_ptr = texture_ptr;
         }
     }

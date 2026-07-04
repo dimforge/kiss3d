@@ -54,6 +54,12 @@ pub struct NormalMaterialGpuData {
     object_bind_group: Option<wgpu::BindGroup>,
 }
 
+impl Default for NormalMaterialGpuData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NormalMaterialGpuData {
     pub fn new() -> Self {
         let ctxt = Context::get();
@@ -99,6 +105,12 @@ pub struct NormalMaterial {
     pipeline: PipelineCache,
     frame_bind_group_layout: wgpu::BindGroupLayout,
     object_bind_group_layout: wgpu::BindGroupLayout,
+}
+
+impl Default for NormalMaterial {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl NormalMaterial {

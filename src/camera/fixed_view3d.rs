@@ -1,6 +1,7 @@
 use crate::camera::Camera3d;
 use crate::event::WindowEvent;
 use crate::window::Canvas;
+use glamx::glam::camera::rh::proj::opengl;
 use glamx::{Mat4, Pose3, Vec3};
 use std::f32;
 
@@ -44,7 +45,7 @@ impl FixedView3d {
 
     fn update_projviews(&mut self) {
         let aspect = self.last_framebuffer_size.0 / self.last_framebuffer_size.1;
-        self.proj = Mat4::perspective_rh_gl(self.fov, aspect, self.znear, self.zfar);
+        self.proj = opengl::perspective(self.fov, aspect, self.znear, self.zfar);
         self.inv_proj = self.proj.inverse();
     }
 }

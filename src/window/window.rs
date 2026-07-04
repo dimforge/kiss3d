@@ -1030,7 +1030,8 @@ impl Window {
             transmission_enabled: true,
             reflector_oit: None,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
-            post_process_render_target_b: framebuffer_manager.new_render_target(width, height, false),
+            post_process_render_target_b: framebuffer_manager
+                .new_render_target(width, height, false),
             offscreen_output_target: None,
             aov_renderer: None,
             hidden: hide,
@@ -1106,7 +1107,8 @@ impl Window {
             transmission_enabled: true,
             reflector_oit: None,
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
-            post_process_render_target_b: framebuffer_manager.new_render_target(width, height, false),
+            post_process_render_target_b: framebuffer_manager
+                .new_render_target(width, height, false),
             offscreen_output_target: None,
             aov_renderer: None,
             // A headless window has no surface; always render off-screen.

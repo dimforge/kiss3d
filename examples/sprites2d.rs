@@ -39,7 +39,7 @@ async fn main() {
     let mut frame = 0u32;
     while window.render_2d(&mut scene, &mut camera).await {
         // Advance the sprite-sheet animation a few times per second.
-        if frame % 20 == 0 {
+        if frame.is_multiple_of(20) {
             animated.set_sprite_frame(&sheet, frame / 20);
         }
         frame = frame.wrapping_add(1);

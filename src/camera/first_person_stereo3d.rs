@@ -1,5 +1,6 @@
 use std::f32;
 
+use glamx::glam::camera::rh::proj::opengl;
 use glamx::{Mat4, Pose3, Vec2, Vec3};
 
 use crate::camera::Camera3d;
@@ -180,7 +181,7 @@ impl FirstPersonCamera3dStereo {
 
     fn update_projviews(&mut self) {
         let aspect = self.last_framebuffer_size.x / self.last_framebuffer_size.y;
-        self.proj = Mat4::perspective_rh_gl(self.fov, aspect, self.znear, self.zfar);
+        self.proj = opengl::perspective(self.fov, aspect, self.znear, self.zfar);
         self.proj_view = self.proj * self.view_transform().to_mat4();
         self.inverse_proj_view = self.proj_view.inverse();
         self.view_left = self.view_transform_left().to_mat4();

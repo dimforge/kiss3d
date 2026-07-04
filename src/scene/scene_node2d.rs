@@ -1,3 +1,4 @@
+use crate::builtin::{LitMaterial2d, LitParams};
 use crate::camera::Camera2d;
 use crate::color::Color;
 use crate::prelude::InstanceData2d;
@@ -6,7 +7,6 @@ use crate::resource::{
     GpuMesh2d, Material2d, MaterialManager2d, MeshManager2d, RenderContext2d, Texture,
     TextureManager,
 };
-use crate::builtin::{LitMaterial2d, LitParams};
 use crate::scene::sprite::SpriteSheet;
 use crate::scene::{Blend2d, Border, Object2d};
 use glamx::{Pose2, Rot2, Vec2};

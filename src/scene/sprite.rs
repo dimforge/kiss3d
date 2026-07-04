@@ -23,7 +23,10 @@ pub struct SpriteSheet {
 impl SpriteSheet {
     /// A sheet with `columns` × `rows` equally-sized frames.
     pub fn new(columns: u32, rows: u32) -> Self {
-        assert!(columns > 0 && rows > 0, "sprite sheet needs a non-empty grid");
+        assert!(
+            columns > 0 && rows > 0,
+            "sprite sheet needs a non-empty grid"
+        );
         SpriteSheet { columns, rows }
     }
 
@@ -50,7 +53,7 @@ impl SpriteSheet {
 }
 
 /// Per-edge insets (left, right, top, bottom), reused for both the world-space border
-/// width and the texture-space (UV) border of a [9-slice](SceneNode2d::nine_slice) sprite.
+/// width and the texture-space (UV) border of a [9-slice](crate::scene::SceneNode2d::nine_slice) sprite.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct Border {
     /// Left inset.

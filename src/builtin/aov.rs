@@ -508,8 +508,8 @@ impl AovVisualize {
             },
             count: None,
         };
-        let texture_entry = |binding: u32, sample_type: wgpu::TextureSampleType| {
-            wgpu::BindGroupLayoutEntry {
+        let texture_entry =
+            |binding: u32, sample_type: wgpu::TextureSampleType| wgpu::BindGroupLayoutEntry {
                 binding,
                 visibility: wgpu::ShaderStages::FRAGMENT,
                 ty: wgpu::BindingType::Texture {
@@ -518,8 +518,7 @@ impl AovVisualize {
                     multisampled: false,
                 },
                 count: None,
-            }
-        };
+            };
 
         let layout_float = ctxt.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("aov_visualize_float_layout"),
@@ -620,7 +619,11 @@ impl AovVisualize {
             AovKind::Depth => 0.0,
             _ => 1.0,
         };
-        let is_srgb = if self.target_format.is_srgb() { 1.0 } else { 0.0 };
+        let is_srgb = if self.target_format.is_srgb() {
+            1.0
+        } else {
+            0.0
+        };
         ctxt.write_buffer(
             &self.uniform_buffer,
             0,
@@ -632,7 +635,11 @@ impl AovVisualize {
         let seg = kind == AovKind::Segmentation;
         let bind_group = ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("aov_visualize_bind_group"),
-            layout: if seg { &self.layout_seg } else { &self.layout_float },
+            layout: if seg {
+                &self.layout_seg
+            } else {
+                &self.layout_float
+            },
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,

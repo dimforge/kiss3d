@@ -107,7 +107,14 @@ impl OffscreenSurface {
     ) {
         let _ = self
             .window
-            .render_chain(scene, scene_2d, camera, camera_2d, renderer, post_processing)
+            .render_chain(
+                scene,
+                scene_2d,
+                camera,
+                camera_2d,
+                renderer,
+                post_processing,
+            )
             .await;
     }
 
@@ -130,8 +137,8 @@ impl OffscreenSurface {
     ///
     /// Native only: reading the result back to the CPU requires blocking on the
     /// GPU, which is impossible on the web. Use [`Self::output_view`] +
-    /// [`Window::register_egui_texture`] to display the surface without a
-    /// read-back.
+    /// `Window::register_egui_texture` (with the `egui` feature) to display the
+    /// surface without a read-back.
     #[cfg(not(target_arch = "wasm32"))]
     pub async fn render_image_raytraced(
         &mut self,
@@ -189,7 +196,7 @@ impl OffscreenSurface {
     /// post-tonemap output of `render_3d` / `raytrace_3d` / `render_aov_3d`).
     ///
     /// Register it with a visible window's egui renderer
-    /// ([`Window::register_egui_texture`]) to display the surface's content
+    /// (`Window::register_egui_texture`, with the `egui` feature) to display the surface's content
     /// without any GPU→CPU copy — this works on the web, where the `snap_*`
     /// read-backs don't exist.
     ///

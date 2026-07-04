@@ -384,16 +384,15 @@ async fn main() {
         wheel_spin += (pos - last_pos).length() / WHEEL_RADIUS;
         last_pos = pos;
         for wheel in &mut wheels {
-            wheel.set_rotation(Quat::from_rotation_x(wheel_spin) * Quat::from_rotation_z(FRAC_PI_2));
+            wheel
+                .set_rotation(Quat::from_rotation_x(wheel_spin) * Quat::from_rotation_z(FRAC_PI_2));
         }
 
         // Swivel the head, and place the onboard camera just in front of its lens.
         // Bearing of the mirror relative to the robot's heading, in [-pi, pi].
         let to_mirror = mirror_pos - (pos + Vec3::Y);
-        let rel_mirror_yaw =
-            (to_mirror.x.atan2(to_mirror.z) - yaw + PI).rem_euclid(TAU) - PI;
-        let mirror_in_range =
-            rel_mirror_yaw.abs() < GAZE_ACQUIRE && to_mirror.length() < 12.0;
+        let rel_mirror_yaw = (to_mirror.x.atan2(to_mirror.z) - yaw + PI).rem_euclid(TAU) - PI;
+        let mirror_in_range = rel_mirror_yaw.abs() < GAZE_ACQUIRE && to_mirror.length() < 12.0;
         if !paused {
             let dt = 0.016;
             if gaze_timer > 0.0 {
@@ -434,8 +433,7 @@ async fn main() {
         if pip_desired != pip_size {
             pip.resize(pip_desired.0, pip_desired.1);
             window.unregister_egui_texture(pip_tex);
-            pip_tex =
-                window.register_egui_texture(&pip.output_view(), wgpu::FilterMode::Linear);
+            pip_tex = window.register_egui_texture(&pip.output_view(), wgpu::FilterMode::Linear);
             pip_size = pip_desired;
         }
 
@@ -517,9 +515,7 @@ async fn main() {
                         look_offset = look_deg.to_radians();
                     }
                     if mode == ViewMode::Raytraced {
-                        ui.add(
-                            egui::Slider::new(&mut rt_samples, 1..=32).text("Samples/frame"),
-                        );
+                        ui.add(egui::Slider::new(&mut rt_samples, 1..=32).text("Samples/frame"));
                     }
                     ui.checkbox(&mut show_robot_in_pip, "Show robot body");
                     ui.checkbox(&mut paused, "Pause robot");

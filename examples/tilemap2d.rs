@@ -25,7 +25,7 @@ async fn main() {
     while window.render_2d(&mut scene, &mut camera).await {
         // A few times per second, rewrite the whole grid with a moving diagonal
         // wave selecting one of the four atlas tiles per cell.
-        if frame % 8 == 0 {
+        if frame.is_multiple_of(8) {
             let phase = frame / 8;
             let mut indices = Vec::with_capacity((columns * rows) as usize);
             for row in 0..rows {

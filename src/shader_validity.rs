@@ -23,9 +23,9 @@
 mod tests {
     use crate::builtin::{Bone2d, LitParams, ObjectMaterial, SkinVertex2d, SkinnedMesh2d};
     use crate::camera::{CoordinateSystem2d, FixedView2d, OrbitCamera3d};
-    use crate::light2d::{Light2d, Light2dManager};
     use crate::context::Context;
     use crate::light::Light;
+    use crate::light2d::{Light2d, Light2dManager};
     use crate::post_processing::{
         Cas, Crt, Fxaa, Gi2d, GiEmitter2d, GiOccluder2d, Grayscales, OculusStereo,
         PostProcessingEffect, SobelEdgeHighlight, Waves,
@@ -128,7 +128,8 @@ mod tests {
             .set_blend(crate::scene::Blend2d::Multiply)
             .set_position(Vec2::new(20.0, 70.0));
         // Sprite quad + 9-slice mesh (object2d shader, more vertices).
-        s.add_sprite(30.0, 30.0).set_position(Vec2::new(-60.0, 60.0));
+        s.add_sprite(30.0, 30.0)
+            .set_position(Vec2::new(-60.0, 60.0));
         s.add_nine_slice(
             Vec2::new(60.0, 40.0),
             crate::scene::Border::uniform(8.0),
@@ -164,12 +165,7 @@ mod tests {
             }
         }
         // Two quads (rows 0-1 and 1-2).
-        let faces = vec![
-            [0, 1, 3],
-            [0, 3, 2],
-            [2, 3, 5],
-            [2, 5, 4],
-        ];
+        let faces = vec![[0, 1, 3], [0, 3, 2], [2, 3, 5], [2, 5, 4]];
         let bones = vec![
             Bone2d {
                 parent: None,
@@ -235,7 +231,12 @@ mod tests {
             Light2dManager::get_global_manager(|m| {
                 m.set_ambient(Color::new(0.1, 0.1, 0.12, 1.0));
                 m.set_lights(&[
-                    Light2d::point(Vec2::new(80.0, 30.0), Color::new(1.0, 0.9, 0.8, 1.0), 2.0, 200.0),
+                    Light2d::point(
+                        Vec2::new(80.0, 30.0),
+                        Color::new(1.0, 0.9, 0.8, 1.0),
+                        2.0,
+                        200.0,
+                    ),
                     Light2d::spot(
                         Vec2::new(40.0, 60.0),
                         Vec2::new(0.0, -1.0),
@@ -344,7 +345,14 @@ mod tests {
                 let mut b = Crt::new();
                 let mut chain: [&mut dyn PostProcessingEffect; 2] = [&mut a, &mut b];
                 surface
-                    .render_chain(Some(&mut scene), None, Some(&mut cam), None, None, &mut chain)
+                    .render_chain(
+                        Some(&mut scene),
+                        None,
+                        Some(&mut cam),
+                        None,
+                        None,
+                        &mut chain,
+                    )
                     .await;
             }
 

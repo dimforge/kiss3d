@@ -18,15 +18,12 @@ async fn main() {
 
         // update the current camera.
         for event in window.events().iter() {
-            match event.value {
-                WindowEvent::Key(key, Action::Release, _) => {
-                    if key == Key::Numpad1 {
-                        use_arc_ball = true
-                    } else if key == Key::Numpad2 {
-                        use_arc_ball = false
-                    }
+            if let WindowEvent::Key(key, Action::Release, _) = event.value {
+                if key == Key::Numpad1 {
+                    use_arc_ball = true
+                } else if key == Key::Numpad2 {
+                    use_arc_ball = false
                 }
-                _ => {}
             }
         }
 

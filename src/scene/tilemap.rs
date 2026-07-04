@@ -88,8 +88,13 @@ impl Tilemap {
 
     /// Rebuilds the mesh from the current tile grid.
     fn rebuild(&mut self) {
-        let (coords, faces, uvs) =
-            build_mesh_data(self.columns, self.rows, self.tile_size, &self.sheet, &self.tiles);
+        let (coords, faces, uvs) = build_mesh_data(
+            self.columns,
+            self.rows,
+            self.tile_size,
+            &self.sheet,
+            &self.tiles,
+        );
         // Replace the mesh contents in place so the node keeps its identity.
         self.node.modify_vertices(&mut |v| {
             v.clear();

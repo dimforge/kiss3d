@@ -183,9 +183,8 @@ impl<T: Pod + Zeroable> GPUVec<T> {
     #[inline]
     pub fn prepare_gpu_writable(&mut self, count: usize) -> &wgpu::Buffer {
         let ctxt = Context::get();
-        self.usage |= wgpu::BufferUsages::STORAGE
-            | wgpu::BufferUsages::COPY_DST
-            | wgpu::BufferUsages::VERTEX;
+        self.usage |=
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::VERTEX;
 
         let needed = (std::mem::size_of::<T>() * count.max(1)) as u64;
         // Reallocate when the buffer is missing, too small, OR lacks the usage

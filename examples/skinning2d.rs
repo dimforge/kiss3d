@@ -21,7 +21,10 @@ async fn main() {
         for &x in &[-half_w, half_w] {
             verts.push(SkinVertex2d {
                 position: Vec2::new(x, row as f32 * seg_h),
-                uv: Vec2::new((x + half_w) / (2.0 * half_w), 1.0 - row as f32 / segments as f32),
+                uv: Vec2::new(
+                    (x + half_w) / (2.0 * half_w),
+                    1.0 - row as f32 / segments as f32,
+                ),
                 joints: [row as u32, 0, 0, 0],
                 weights: [1.0, 0.0, 0.0, 0.0],
             });

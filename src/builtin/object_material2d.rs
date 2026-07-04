@@ -452,15 +452,16 @@ impl ObjectMaterial2d {
                 ],
             });
 
-        let surface_pipeline_layout = ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("planar_material_pipeline_layout"),
-            bind_group_layouts: &[
-                Some(&frame_bind_group_layout),
-                Some(&object_bind_group_layout),
-                Some(&texture_bind_group_layout),
-            ],
-            immediate_size: 0,
-        });
+        let surface_pipeline_layout =
+            ctxt.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("planar_material_pipeline_layout"),
+                bind_group_layouts: &[
+                    Some(&frame_bind_group_layout),
+                    Some(&object_bind_group_layout),
+                    Some(&texture_bind_group_layout),
+                ],
+                immediate_size: 0,
+            });
 
         // Surface shader variants and pipelines are compiled lazily on first use,
         // keyed by feature mask (textured vs. solid) / blend mode / MSAA sample count.
@@ -949,39 +950,41 @@ impl ObjectMaterial2d {
                 },
             ];
 
-            let pipeline = Rc::new(ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("planar_material_pipeline"),
-                layout: Some(&self.surface_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    buffers: &vertex_buffer_layouts,
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
-                        blend: blend.blend_state(),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
+            let pipeline = Rc::new(
+                ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("planar_material_pipeline"),
+                    layout: Some(&self.surface_pipeline_layout),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs_main"),
+                        buffers: &vertex_buffer_layouts,
+                        compilation_options: Default::default(),
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some("fs_main"),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: Context::render_format(), // HDR rasterization target (tonemapped to LDR in the resolve pass)
+                            blend: blend.blend_state(),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                        compilation_options: Default::default(),
+                    }),
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::TriangleList,
+                        strip_index_format: None,
+                        front_face: wgpu::FrontFace::Ccw,
+                        cull_mode: None, // 2D objects typically don't need culling
+                        polygon_mode: wgpu::PolygonMode::Fill,
+                        unclipped_depth: false,
+                        conservative: false,
+                    },
+                    depth_stencil: None, // 2D rendering typically doesn't use depth
+                    multisample: multisample_state(sample_count),
+                    multiview_mask: None,
+                    cache: None,
                 }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None, // 2D objects typically don't need culling
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: None, // 2D rendering typically doesn't use depth
-                multisample: multisample_state(sample_count),
-                multiview_mask: None,
-                cache: None,
-            }));
+            );
             self.surface_pipelines
                 .borrow_mut()
                 .insert(key, pipeline.clone());

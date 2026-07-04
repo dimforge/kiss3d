@@ -84,7 +84,12 @@ async fn main() {
         let mover_pos = Vec2::new(t.cos() * 300.0, t.sin() * 220.0);
         mover.set_position(mover_pos);
         gi.set_emitters(&[
-            GiEmitter2d::new(Vec2::new(-260.0, -200.0), 22.0, warm, emitter_intensity * 0.85),
+            GiEmitter2d::new(
+                Vec2::new(-260.0, -200.0),
+                22.0,
+                warm,
+                emitter_intensity * 0.85,
+            ),
             GiEmitter2d::new(mover_pos, 20.0, cool, emitter_intensity),
         ]);
 
@@ -104,10 +109,14 @@ async fn main() {
                     ui.label("ambient");
                     ui.color_edit_button_rgb(&mut ambient);
                 });
-                ui.add(egui::Slider::new(&mut resolution_scale, 1..=4).text("resolution scale (1/n)"));
+                ui.add(
+                    egui::Slider::new(&mut resolution_scale, 1..=4).text("resolution scale (1/n)"),
+                );
                 ui.add(egui::Slider::new(&mut max_steps, 8..=128).text("max march steps"));
                 ui.add(egui::Slider::new(&mut max_distance, 200.0..=4000.0).text("max distance"));
-                ui.add(egui::Slider::new(&mut emitter_intensity, 0.0..=8.0).text("emitter intensity"));
+                ui.add(
+                    egui::Slider::new(&mut emitter_intensity, 0.0..=8.0).text("emitter intensity"),
+                );
 
                 ui.separator();
                 ui.label("Direct ray-march");
@@ -151,7 +160,10 @@ async fn main() {
         gi.set_cascade_base_directions(base_directions);
 
         gi.set_camera(&camera);
-        if !window.render_2d_with(&mut scene, &mut camera, &mut gi).await {
+        if !window
+            .render_2d_with(&mut scene, &mut camera, &mut gi)
+            .await
+        {
             break;
         }
     }

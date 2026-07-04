@@ -1195,7 +1195,7 @@ impl Window {
                 .resolve(&mut encoder, &first_view, force_opaque, &mut self.gpu_timer);
 
             let n = post_processing.len();
-            for i in 0..n {
+            for (i, pp) in post_processing.iter_mut().enumerate() {
                 // Even effects read A and write B, odd ones read B and write A; the
                 // final effect writes `frame_view` instead of a ping-pong target.
                 let read_a = i % 2 == 0;
@@ -1219,12 +1219,12 @@ impl Window {
                 };
 
                 // TODO: use the real time value instead of 0.016!
-                post_processing[i].update(0.016, w as f32, h as f32, znear, zfar);
+                pp.update(0.016, w as f32, h as f32, znear, zfar);
                 let mut pp_context = PostProcessingContext {
                     encoder: &mut encoder,
                     output_view,
                 };
-                post_processing[i].draw(input, &mut pp_context);
+                pp.draw(input, &mut pp_context);
             }
         }
 

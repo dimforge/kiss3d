@@ -44,12 +44,12 @@ async fn main() {
     let mut counter = 0usize;
 
     while !window.should_close() {
-        if time % 200 == 0 {
+        if time.is_multiple_of(200) {
             time = 0;
             counter = (counter + 1) % 4;
         }
 
-        time = time + 1;
+        time += 1;
 
         let _ = match counter {
             0 => {

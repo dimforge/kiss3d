@@ -27,6 +27,6 @@ async fn main() {
         });
         c.recompute_normals();
 
-        time = time + 0.016;
+        time += 0.016;
     }
 }

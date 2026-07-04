@@ -127,7 +127,7 @@ impl GpuData for LitMaterial2dGpuData {
 }
 
 /// A material that shades 2D objects with the global dynamic 2D lights (see the
-/// [module docs](self)).
+/// [module docs](crate::builtin)).
 pub struct LitMaterial2d {
     pipeline: PipelineCache,
     object_bind_group_layout: wgpu::BindGroupLayout,
@@ -217,7 +217,10 @@ impl LitMaterial2d {
 
         let shader = ctxt.create_shader_module(
             Some("lit2d_shader"),
-            &crate::builtin::compile_shader_with_common("package::lit2d", include_str!("lit2d.wgsl")),
+            &crate::builtin::compile_shader_with_common(
+                "package::lit2d",
+                include_str!("lit2d.wgsl"),
+            ),
         );
 
         let pipeline = PipelineCache::new(move |sample_count| {
@@ -369,11 +372,7 @@ impl LitMaterial2d {
         [[c[0][0], c[0][1], 0.0, 0.0], [c[1][0], c[1][1], 0.0, 0.0]]
     }
 
-    fn create_texture_bind_group(
-        &self,
-        albedo: &Texture,
-        normal: &Texture,
-    ) -> wgpu::BindGroup {
+    fn create_texture_bind_group(&self, albedo: &Texture, normal: &Texture) -> wgpu::BindGroup {
         let ctxt = Context::get();
         ctxt.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("lit2d_texture_bind_group"),
