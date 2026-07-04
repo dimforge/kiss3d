@@ -35,6 +35,15 @@ EXAMPLES=(
   instancing2d
   mouse_events
   dda_raycast2d
+  sprites2d
+  tilemap2d
+  skinning2d
+  blend_modes2d
+  lighting2d
+  # 2D post-processing
+  post_processing2d
+  global_illumination2d
+  effect_chain2d
   # Geometry & meshes
   primitives
   primitives_scale
@@ -83,6 +92,7 @@ EXAMPLES=(
   ui
   inspector
   text
+  robot_view
 )
 # Check for required tools
 check_requirements() {
