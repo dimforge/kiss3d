@@ -88,12 +88,25 @@ impl Tilemap {
 
     /// Rebuilds the mesh from the current tile grid.
     fn rebuild(&mut self) {
+        // Tiny UV inset from the node's atlas size (see [`build_mesh_data`]); zero if
+        // no texture is set yet (the map is empty then anyway).
+        let uv_inset = self
+            .node
+            .data()
+            .object()
+            .map(|o| {
+                let (w, h) = o.data().texture().size;
+                Vec2::new(0.05 / w as f32, 0.05 / h as f32)
+            })
+            .unwrap_or(Vec2::ZERO);
+
         let (coords, faces, uvs) = build_mesh_data(
             self.columns,
             self.rows,
             self.tile_size,
             &self.sheet,
             &self.tiles,
+            uv_inset,
         );
         // Replace the mesh contents in place so the node keeps its identity.
         self.node.modify_vertices(&mut |v| {
@@ -112,12 +125,18 @@ impl Tilemap {
 }
 
 /// Builds the `(coords, faces, uvs)` of the tilemap mesh: one quad per non-empty tile.
+///
+/// `uv_inset` shrinks each tile's UV rect inward on every side (a small fraction of
+/// a texel). Otherwise the rect ends on the atlas cell boundary and, at some zoom
+/// levels, edge fragments sample the neighboring cell — a thin seam on the
+/// right/bottom (black where that neighbor is a transparent decoration tile).
 fn build_mesh_data(
     columns: u32,
     rows: u32,
     tile_size: Vec2,
     sheet: &SpriteSheet,
     tiles: &[u32],
+    uv_inset: Vec2,
 ) -> (Vec<Vec2>, Vec<[VertexIndex; 3]>, Vec<Vec2>) {
     let mut coords = Vec::new();
     let mut uvs = Vec::new();
@@ -138,7 +157,9 @@ fn build_mesh_data(
             let y1 = half.y - row as f32 * tile_size.y;
             let y0 = y1 - tile_size.y;
 
-            let (uv_min, uv_max) = sheet.frame_uv(index);
+            let (frame_min, frame_max) = sheet.frame_uv(index);
+            let uv_min = frame_min + uv_inset;
+            let uv_max = frame_max - uv_inset;
 
             let base = coords.len() as VertexIndex;
             // top-left, top-right, bottom-right, bottom-left
@@ -174,6 +195,8 @@ fn build_mesh(
     sheet: &SpriteSheet,
     tiles: &[u32],
 ) -> GpuMesh2d {
-    let (coords, faces, uvs) = build_mesh_data(columns, rows, tile_size, sheet, tiles);
+    // The initial map is empty, so the inset is irrelevant; rebuild() applies the
+    // real one once the atlas texture (and its size) is known.
+    let (coords, faces, uvs) = build_mesh_data(columns, rows, tile_size, sheet, tiles, Vec2::ZERO);
     GpuMesh2d::new(coords, faces, Some(uvs), true)
 }

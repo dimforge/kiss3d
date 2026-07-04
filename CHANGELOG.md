@@ -1,4 +1,4 @@
-# Unreleased
+# v0.45.0
 
 ## Breaking Changes
 
@@ -35,6 +35,7 @@ A suite of new 2D features, all sharing the existing `SceneNode2d` scene graph, 
 
 - Fixed rendered content appearing see-through against the page (a white background) on browsers that composite the canvas with the page (Firefox): the on-screen surface now forces opaque output alpha, while offscreen / snapshot / embedding targets keep the scene's real alpha.
 - Fixed `GpuVector` not reallocating its buffer when an existing allocation lacked a newly-required usage flag.
+- Fixed egui text inputs on wasm ([#https://github.com/dimforge/kiss3d/pull/394]).
 
 # v0.44.0
 

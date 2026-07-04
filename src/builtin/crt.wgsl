@@ -66,9 +66,11 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // distance so the fringing grows toward the edges.
     let from_center = uv - vec2<f32>(0.5);
     let offset = from_center * uniforms.aberration;
-    let r = textureSample(t_fbo, s_fbo, uv + offset).r;
-    let g = textureSample(t_fbo, s_fbo, uv).g;
-    let b = textureSample(t_fbo, s_fbo, uv - offset).b;
+    // Explicit LOD: the bezel `return` above makes this non-uniform control flow,
+    // where implicit-LOD sampling is illegal (and there's no mip chain anyway).
+    let r = textureSampleLevel(t_fbo, s_fbo, uv + offset, 0.0).r;
+    let g = textureSampleLevel(t_fbo, s_fbo, uv, 0.0).g;
+    let b = textureSampleLevel(t_fbo, s_fbo, uv - offset, 0.0).b;
     var color = vec3<f32>(r, g, b);
 
     // Scanlines: a sinusoidal darkening along rows.

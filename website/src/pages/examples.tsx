@@ -19,6 +19,16 @@ const examples = {
     { name: 'instancing2d', title: 'Instancing 2D', description: '2D instancing' },
     { name: 'mouse_events', title: 'Mouse Events', description: 'Mouse interaction' },
     { name: 'dda_raycast2d', title: 'DDA Raycast', description: '2D grid ray casting' },
+    { name: 'sprites2d', title: 'Sprites', description: 'Sprite sheets & 9-slice panels' },
+    { name: 'tilemap2d', title: 'Tilemap', description: 'Tile atlas in one draw call' },
+    { name: 'skinning2d', title: 'Skinning 2D', description: '2D GPU skeletal deformation' },
+    { name: 'blend_modes2d', title: 'Blend Modes', description: 'Alpha, additive, screen & multiply' },
+    { name: 'lighting2d', title: 'Lighting 2D', description: 'Dynamic 2D point & spot lights' },
+  ],
+  '2D Post-processing': [
+    { name: 'post_processing2d', title: 'Post Processing 2D', description: 'Bloom & CRT stylization' },
+    { name: 'global_illumination2d', title: 'Global Illumination 2D', description: 'Screen-space 2D GI' },
+    { name: 'effect_chain2d', title: 'Effect Chain 2D', description: 'Chained 2D post-processing passes' },
   ],
   'Geometry & Meshes': [
     { name: 'primitives', title: 'Primitives 3D', description: 'All 3D primitive shapes' },
@@ -75,6 +85,7 @@ const examples = {
     { name: 'ui', title: 'UI', description: 'Simple widgets' },
     { name: 'inspector', title: 'Inspector', description: 'Scene inspector panel' },
     { name: 'text', title: 'Text', description: 'Text rendering' },
+    { name: 'robot_view', title: 'Robot Camera', description: 'Onboard sensor: color, path-traced, depth & normals' },
   ],
 };
 

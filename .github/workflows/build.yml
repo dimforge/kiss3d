@@ -39,6 +39,8 @@ jobs:
         run: cargo build --verbose -p kiss3d;
       - name: Build kiss3d (+ egui)
         run: cargo build --verbose -p kiss3d --features egui;
+      - name: Build examples (+ egui)
+        run: cargo build --verbose --examples --features egui;
       - name: Run tests
         run: cargo test
   build-wasm:

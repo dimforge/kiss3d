@@ -1,1 +1,4 @@
 skybox.png - https://freestylized.com/skybox/sky_96/
+tiny_town.png - Kenney "Tiny Town" (CC0) - https://kenney.nl/assets/tiny-town
+characters.png - Kenney "Pixel Platformer" (CC0) - https://kenney.nl/assets/pixel-platformer
+ui_panel.png - Kenney "UI Pack" (CC0) - https://kenney.nl/assets/ui-pack
