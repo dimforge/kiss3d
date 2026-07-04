@@ -1,3 +1,41 @@
+# Unreleased
+
+## Breaking Changes
+
+- The window no longer closes on <kbd>Escape</kbd> by default (`close_key` now defaults to `None` instead of `Some(Key::Escape)`). Call `Window::rebind_close_key(Some(Key::Escape))` to restore the previous behavior.
+
+## New Features
+
+### 2D rendering
+
+A suite of new 2D features, all sharing the existing `SceneNode2d` scene graph, `Camera2d` and HDR film (so bloom and tonemapping already apply to 2D content):
+
+- **Sprites, sprite sheets & 9-slice**: `SceneNode2d::sprite` / `add_sprite` (textured quads), `set_uv_rect`, and animation-frame selection via `SpriteSheet` (`SpriteSheet::new`, `frame_uv`) with `set_sprite_frame`. Nine-slice scaling through `nine_slice` / `add_nine_slice` and `Border` (`Border::uniform` / `symmetric`). Example: `sprites2d`.
+- **Per-object blend modes**: `Object2d::set_blend` and `SceneNode2d::set_blend` / `set_blend_recursive` with `Blend2d` (`Alpha`, `PremultipliedAlpha`, `Additive`, `Multiply`, `Screen`, `Opaque`). Example: `blend_modes2d`.
+- **Dynamic 2D lighting & normal-mapped sprites**: a new `light2d` module with up to `MAX_LIGHTS_2D` (16) point/spot `Light2d`s (`Light2d::point` / `spot` / `with_height`, `Light2dKind`) plus ambient, managed by the thread-local `Light2dManager`. `LitMaterial2d` shades sprites with per-pixel diffuse + Blinn-Phong specular from a normal map (flat sprites still pick up radial falloff and spot cones): `SceneNode2d::lit_sprite` / `add_lit_sprite`, `set_normal_map_from_file`, `set_lit_params` (`LitParams`). Example: `lighting2d`.
+- **Tilemaps**: `Tilemap` bakes a grid of `SpriteSheet` frames into a single-draw-call mesh (`Tilemap::new`, `set_tile`, `fill`, `node`; `Tilemap::EMPTY` cells are skipped/transparent). Example: `tilemap2d`.
+- **Skeletal mesh deformation (2D GPU skinning)**: `SkinnedMesh2d` binds vertices (`SkinVertex2d`) to up to `MAX_JOINTS_2D` (32) bones (`Bone2d`) with up to four weights each, blending per-bone joint matrices on the GPU (Spine/DragonBones-style). Pose with `set_bone_local` / `set_transform`, then `update()` once per frame. Example: `skinning2d`.
+- **Screen-space 2D global illumination**: `Gi2d`, a post-processing effect that ray-marches per-pixel irradiance against analytic emitter/occluder discs (`GiEmitter2d`, `GiOccluder2d`) for soft shadows and colored light bleed with no light/shadow bookkeeping. Configurable rays, resolution scale and temporal blend, with an optional radiance-cascade solver (`set_radiance_cascades`) and jump-flood SDF occluders (`set_sdf_occluders`). Applied via `Window::render_2d_with`. Example: `global_illumination2d`.
+- **CRT post-processing**: `post_processing::Crt` (screen curvature, chromatic aberration, scanlines, vignette), run over a 2D scene with the new `Window::render_2d_with`. Example: `post_processing2d`. Chain it with other effects (e.g. `Gi2d` → `Crt`) via `render_2d_with_chain`; example: `effect_chain2d`.
+- Über-shader specialization now also covers the 2D object material (`ObjectMaterial2d`): objects using the default white texture automatically get an untextured shader variant (higher GPU occupancy), textured objects get the textured variant — no API change.
+
+### Off-screen rendering on the web + zero-copy egui display
+
+- `OffscreenSurface` now exists on wasm: creation and all GPU-side rendering (`render_3d`, `raytrace_3d`, ...) work in the browser. Only the CPU read-backs (`snap_*`, `render_image_*`) remain native-only (they must block on the GPU).
+- `OffscreenSurface::output_view` exposes the surface's final (post-tonemap) texture, and `Window::register_egui_texture` / `unregister_egui_texture` register any wgpu texture view with the window's egui renderer — so an offscreen surface can be displayed live in an egui UI with zero GPU→CPU copies, on native and web alike.
+- GPU-only AOV visualization: `Window::render_aov_3d` / `OffscreenSurface::render_aov_3d` render depth (fixed-range grayscale), normals or colorized segmentation as a display-ready image into the surface's output texture, with no read-back. The `robot_view` example uses all of the above.
+
+### Rendering & platform
+
+- Chain multiple post-processing effects (ping-pong): `Window::render_chain` / `render_3d_with_chain` / `render_2d_with_chain` and `OffscreenSurface::render_chain` take a slice of effects applied in order. The existing single-effect `render` / `render_2d_with` are retained as thin wrappers (an empty slice is the no-effect path).
+- Reflector captures render every phase, not just opaque surfaces: transparent (alpha < 1) objects are drawn into mirrors with the same weighted-blended OIT as the main pass, and refractive glass is drawn refracting the mirrored scene behind it (one snapshot layer).
+- `CanvasSetup::required_features` (a `wgpu::Features`) requests extra GPU device features on top of the ones kiss3d enables by default. Unsupported features are silently dropped (masked against the adapter) so device creation never fails on an unavailable one.
+
+## Bug Fixes
+
+- Fixed rendered content appearing see-through against the page (a white background) on browsers that composite the canvas with the page (Firefox): the on-screen surface now forces opaque output alpha, while offscreen / snapshot / embedding targets keep the scene's real alpha.
+- Fixed `GpuVector` not reallocating its buffer when an existing allocation lacked a newly-required usage flag.
+
 # v0.44.0
 
 ## Breaking Changes
@@ -37,7 +75,6 @@
 - Reflection probes (baked image or runtime cube capture), parallax-corrected: `Window::add_reflection_probe`, `capture_reflection_probe`, `set_reflection_probe_image`, `set_reflection_capture_layers`.
 - Screen-space reflections: `Window::set_ssr_enabled` / `ssr_settings_mut`, with per-object `Object3d::set_ssr(SsrMaterial)`.
 - Planar mirror reflectors integrated into the default PBR material: `SceneNode3d::add_reflector`, `Object3d::set_reflector` and `set_reflector_*`.
-- Reflector captures render every phase, not just opaque surfaces: transparent (alpha < 1) objects are drawn into mirrors with the same weighted-blended OIT as the main pass, and refractive glass is drawn refracting the mirrored scene behind it (one snapshot layer).
 - Screen-space ambient occlusion: `Window::set_ssao_enabled` / `ssao_settings_mut`.
 - Screen-space refractive transmission (glass): `Window::set_transmission_enabled` / `transmission_settings_mut`.
 - Examples: `reflections`, `mirror`, `mirror_sphere`.
@@ -113,12 +150,6 @@
 - Bumped `glamx` dependency: 0.2 → 0.3. ([#384](https://github.com/dimforge/kiss3d/pull/384))
 
 ## New Features
-
-### Off-screen rendering on the web + zero-copy egui display
-
-- `OffscreenSurface` now exists on wasm: creation and all GPU-side rendering (`render_3d`, `raytrace_3d`, ...) work in the browser. Only the CPU read-backs (`snap_*`, `render_image_*`) remain native-only (they must block on the GPU).
-- `OffscreenSurface::output_view` exposes the surface's final (post-tonemap) texture, and `Window::register_egui_texture` / `unregister_egui_texture` register any wgpu texture view with the window's egui renderer — so an offscreen surface can be displayed live in an egui UI with zero GPU→CPU copies, on native and web alike.
-- GPU-only AOV visualization: `Window::render_aov_3d` / `OffscreenSurface::render_aov_3d` render depth (fixed-range grayscale), normals or colorized segmentation as a display-ready image into the surface's output texture, with no read-back. The `robot_view` example uses all of the above.
 
 ### Off-screen Rendering ([#382](https://github.com/dimforge/kiss3d/pull/382))
 
