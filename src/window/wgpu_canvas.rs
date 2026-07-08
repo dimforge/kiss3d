@@ -126,6 +126,9 @@ pub struct WgpuCanvas {
     sample_count: u32,
     /// Texture for reading back pixels (for screenshots)
     readback_texture: wgpu::Texture,
+    /// Staging buffer reused across `read_pixels` calls, grown on demand, so
+    /// per-frame capture doesn't allocate (and free) a GPU buffer every call.
+    screenshot_staging: RefCell<Option<wgpu::Buffer>>,
     /// Pending events from web callbacks (WASM only)
     #[cfg(target_arch = "wasm32")]
     pending_events: Rc<RefCell<Vec<WindowEvent>>>,
@@ -665,6 +668,7 @@ impl WgpuCanvas {
             msaa_view,
             sample_count,
             readback_texture,
+            screenshot_staging: RefCell::new(None),
             #[cfg(target_arch = "wasm32")]
             pending_events,
             #[cfg(target_arch = "wasm32")]
@@ -775,6 +779,7 @@ impl WgpuCanvas {
             msaa_view,
             sample_count,
             readback_texture,
+            screenshot_staging: RefCell::new(None),
             #[cfg(target_arch = "wasm32")]
             pending_events: Rc::new(RefCell::new(Vec::new())),
             #[cfg(target_arch = "wasm32")]
@@ -1320,13 +1325,19 @@ impl WgpuCanvas {
         let padded_bytes_per_row = unpadded_bytes_per_row.div_ceil(align) * align;
         let buffer_size = padded_bytes_per_row * height;
 
-        // Create staging buffer
-        let staging_buffer = ctxt.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("screenshot_staging_buffer"),
-            size: buffer_size as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+        // Reuse the cached staging buffer when it is large enough; (re)create
+        // it otherwise. Capturing every frame (video export) then allocates
+        // exactly once instead of once per call.
+        let mut staging_slot = self.screenshot_staging.borrow_mut();
+        let staging_buffer = match staging_slot.take() {
+            Some(buffer) if buffer.size() >= buffer_size as u64 => buffer,
+            _ => ctxt.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("screenshot_staging_buffer"),
+                size: buffer_size as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            }),
+        };
 
         // Copy from readback texture to staging buffer
         let mut encoder = ctxt.create_command_encoder(Some("screenshot_copy_encoder"));
@@ -1357,7 +1368,7 @@ impl WgpuCanvas {
             },
         );
 
-        ctxt.submit(std::iter::once(encoder.finish()));
+        let submission = ctxt.submit_indexed(std::iter::once(encoder.finish()));
 
         // Map the buffer and read the data
         let buffer_slice = staging_buffer.slice(..);
@@ -1366,8 +1377,12 @@ impl WgpuCanvas {
             tx.send(result).unwrap();
         });
 
-        // Wait for the GPU to finish
-        let _ = ctxt.device.poll(wgpu::PollType::wait_indefinitely());
+        // Wait only for the copy submission (and, transitively, the work it
+        // depends on) instead of polling the device indefinitely.
+        let _ = ctxt.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(submission),
+            timeout: None,
+        });
         rx.recv().unwrap().unwrap();
 
         // Read the data
@@ -1384,27 +1399,28 @@ impl WgpuCanvas {
         );
 
         // wgpu has origin at top-left, but we want bottom-left origin for OpenGL compatibility
-        // So we read rows in reverse order
+        // So we read rows in reverse order.
+        //
+        // The mapped range is uncached (write-combined) memory: scalar reads
+        // from it run at ~10 MB/s. memcpy each row into a cached local buffer
+        // first, then convert — orders of magnitude faster than indexing the
+        // mapped slice per byte.
+        let mut row_buf = vec![0u8; unpadded_bytes_per_row];
         for row in (0..height).rev() {
             let row_start = row * padded_bytes_per_row;
-            for col in 0..width {
-                let pixel_start = row_start + col * bytes_per_pixel;
+            row_buf.copy_from_slice(&data[row_start..row_start + unpadded_bytes_per_row]);
+            for px in row_buf.chunks_exact(bytes_per_pixel) {
                 if is_bgra {
-                    // BGRA -> RGB
-                    out.push(data[pixel_start + 2]); // R
-                    out.push(data[pixel_start + 1]); // G
-                    out.push(data[pixel_start]); // B
+                    out.extend_from_slice(&[px[2], px[1], px[0]]);
                 } else {
-                    // RGBA -> RGB
-                    out.push(data[pixel_start]); // R
-                    out.push(data[pixel_start + 1]); // G
-                    out.push(data[pixel_start + 2]); // B
+                    out.extend_from_slice(&[px[0], px[1], px[2]]);
                 }
             }
         }
 
         drop(data);
         staging_buffer.unmap();
+        *staging_slot = Some(staging_buffer);
     }
 
     /// Gets the depth texture view for rendering.

@@ -278,6 +278,16 @@ impl Context {
         self.queue.submit(command_buffers);
     }
 
+    /// Submits command buffers to the GPU queue, returning the submission
+    /// index so callers can wait for exactly this submission (rather than the
+    /// whole device).
+    pub fn submit_indexed<I: IntoIterator<Item = wgpu::CommandBuffer>>(
+        &self,
+        command_buffers: I,
+    ) -> wgpu::SubmissionIndex {
+        self.queue.submit(command_buffers)
+    }
+
     /// Writes texture data to the GPU.
     ///
     /// # Arguments
