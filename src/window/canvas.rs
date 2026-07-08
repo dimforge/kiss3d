@@ -232,4 +232,16 @@ impl Canvas {
     pub fn read_pixels(&self, out: &mut Vec<u8>, x: usize, y: usize, width: usize, height: usize) {
         self.canvas.read_pixels(out, x, y, width, height)
     }
+
+    /// Starts a non-blocking readback of the readback texture; complete it
+    /// with [`Self::finish_read_pixels`]. See `WgpuCanvas::begin_read_pixels`.
+    pub fn begin_read_pixels(&self, x: usize, y: usize, width: usize, height: usize) {
+        self.canvas.begin_read_pixels(x, y, width, height)
+    }
+
+    /// Completes a readback started by [`Self::begin_read_pixels`], returning
+    /// the captured `(width, height)`, or `None` when none is in flight.
+    pub fn finish_read_pixels(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+        self.canvas.finish_read_pixels(out)
+    }
 }

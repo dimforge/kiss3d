@@ -1050,6 +1050,16 @@ impl Window {
         usr_window
     }
 
+    /// Creates a headless window with custom setup options: a full-featured
+    /// [`Window`] backed by no OS window and no swapchain, rendering straight
+    /// into an off-screen texture. Unlike [`OffscreenSurface`](crate::window::OffscreenSurface)
+    /// this exposes the whole `Window` API (custom renderers, ray tracer,
+    /// `snap*` readbacks, …), for callers that drive the render loop
+    /// themselves and never present to a display.
+    pub async fn new_headless_with_setup(width: u32, height: u32, setup: CanvasSetup) -> Window {
+        Self::do_new_headless(width, height, Some(setup)).await
+    }
+
     /// Creates a headless window: a render target backed by no actual window,
     /// for off-screen rendering. Powers [`OffscreenSurface`](crate::window::OffscreenSurface).
     pub(super) async fn do_new_headless(

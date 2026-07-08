@@ -104,6 +104,16 @@ enum PendingEvent {
     },
 }
 
+/// A GPU→CPU pixel readback still in flight (see `WgpuCanvas::begin_read_pixels`).
+struct PendingSnap {
+    buffer: wgpu::Buffer,
+    rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    submission: wgpu::SubmissionIndex,
+    width: usize,
+    height: usize,
+    padded_bytes_per_row: usize,
+}
+
 /// A unified canvas based on wgpu that works on both native and web platforms.
 #[allow(dead_code)]
 pub struct WgpuCanvas {
@@ -129,6 +139,8 @@ pub struct WgpuCanvas {
     /// Staging buffer reused across `read_pixels` calls, grown on demand, so
     /// per-frame capture doesn't allocate (and free) a GPU buffer every call.
     screenshot_staging: RefCell<Option<wgpu::Buffer>>,
+    /// Readback started by `begin_read_pixels`, completed by `finish_read_pixels`.
+    snap_pending: RefCell<Option<PendingSnap>>,
     /// Pending events from web callbacks (WASM only)
     #[cfg(target_arch = "wasm32")]
     pending_events: Rc<RefCell<Vec<WindowEvent>>>,
@@ -669,6 +681,7 @@ impl WgpuCanvas {
             sample_count,
             readback_texture,
             screenshot_staging: RefCell::new(None),
+            snap_pending: RefCell::new(None),
             #[cfg(target_arch = "wasm32")]
             pending_events,
             #[cfg(target_arch = "wasm32")]
@@ -780,6 +793,7 @@ impl WgpuCanvas {
             sample_count,
             readback_texture,
             screenshot_staging: RefCell::new(None),
+            snap_pending: RefCell::new(None),
             #[cfg(target_arch = "wasm32")]
             pending_events: Rc::new(RefCell::new(Vec::new())),
             #[cfg(target_arch = "wasm32")]
@@ -1315,6 +1329,25 @@ impl WgpuCanvas {
     /// Reads pixels from the readback texture into the provided buffer.
     /// Returns RGB data (3 bytes per pixel).
     pub fn read_pixels(&self, out: &mut Vec<u8>, x: usize, y: usize, width: usize, height: usize) {
+        self.begin_read_pixels(x, y, width, height);
+        self.finish_read_pixels(out);
+    }
+
+    /// Starts an asynchronous GPU→CPU readback of the readback texture and
+    /// returns immediately: it enqueues the texture→buffer copy and the buffer
+    /// map, but never waits on the GPU. Complete it — typically one frame
+    /// later, once the GPU has long finished the copy — with
+    /// [`Self::finish_read_pixels`]. Pipelining capture this way hides the
+    /// full CPU↔GPU sync that a blocking [`Self::read_pixels`] pays every
+    /// frame.
+    ///
+    /// A second `begin` before the previous readback was finished completes
+    /// and discards the previous one first (one readback in flight at a time).
+    pub fn begin_read_pixels(&self, x: usize, y: usize, width: usize, height: usize) {
+        if self.snap_pending.borrow().is_some() {
+            self.finish_read_pixels(&mut Vec::new());
+        }
+
         let ctxt = Context::get();
 
         // Calculate buffer size with alignment
@@ -1370,12 +1403,39 @@ impl WgpuCanvas {
 
         let submission = ctxt.submit_indexed(std::iter::once(encoder.finish()));
 
-        // Map the buffer and read the data
+        // Queue the map; completion is observed in `finish_read_pixels`.
         let buffer_slice = staging_buffer.slice(..);
         let (tx, rx) = std::sync::mpsc::channel();
         buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
             tx.send(result).unwrap();
         });
+
+        *self.snap_pending.borrow_mut() = Some(PendingSnap {
+            buffer: staging_buffer,
+            rx,
+            submission,
+            width,
+            height,
+            padded_bytes_per_row,
+        });
+    }
+
+    /// Completes a readback started by [`Self::begin_read_pixels`], filling
+    /// `out` with RGB data (3 bytes per pixel, rows bottom-to-top like
+    /// [`Self::read_pixels`]) and returning the captured `(width, height)`.
+    /// Returns `None` (and leaves `out` untouched) when no readback is in
+    /// flight. Blocks only until the copy's submission completes — a no-op
+    /// when a frame of GPU work has been submitted since the `begin`.
+    pub fn finish_read_pixels(&self, out: &mut Vec<u8>) -> Option<(u32, u32)> {
+        let PendingSnap {
+            buffer: staging_buffer,
+            rx,
+            submission,
+            width,
+            height,
+            padded_bytes_per_row,
+        } = self.snap_pending.borrow_mut().take()?;
+        let ctxt = Context::get();
 
         // Wait only for the copy submission (and, transitively, the work it
         // depends on) instead of polling the device indefinitely.
@@ -1385,7 +1445,11 @@ impl WgpuCanvas {
         });
         rx.recv().unwrap().unwrap();
 
+        let bytes_per_pixel = 4; // RGBA or BGRA
+        let unpadded_bytes_per_row = width * bytes_per_pixel;
+
         // Read the data
+        let buffer_slice = staging_buffer.slice(..);
         let data = buffer_slice.get_mapped_range();
 
         // Convert from BGRA/RGBA to RGB and handle row padding
@@ -1420,7 +1484,10 @@ impl WgpuCanvas {
 
         drop(data);
         staging_buffer.unmap();
-        *staging_slot = Some(staging_buffer);
+        // Return the buffer to the cache so the next `begin_read_pixels`
+        // (or blocking `read_pixels`) reuses it instead of allocating.
+        *self.screenshot_staging.borrow_mut() = Some(staging_buffer);
+        Some((width as u32, height as u32))
     }
 
     /// Gets the depth texture view for rendering.
