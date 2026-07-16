@@ -1,3 +1,14 @@
+# v0.45.1
+
+## New Features
+
+- Public headless `Window::new_headless_with_setup`: a full `Window` (custom renderers, ray tracer, `snap*`) rendering off-screen with no OS window or swapchain ([#398](https://github.com/dimforge/kiss3d/pull/398)).
+- Non-blocking pixel read-back: `Window::snap_begin` / `snap_finish` (and `Canvas::begin_read_pixels` / `finish_read_pixels`) overlap the framebuffer copy with GPU work instead of stalling like the blocking `snap` ([#398](https://github.com/dimforge/kiss3d/pull/398)).
+
+## Performance
+
+- ~18× faster `read_pixels` / `snap*`: convert rows from a cached copy of the write-combined mapped buffer, and reuse the read-back staging buffer across calls instead of reallocating each frame ([#397](https://github.com/dimforge/kiss3d/pull/397)).
+
 # v0.45.0
 
 ## Breaking Changes
