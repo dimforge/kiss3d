@@ -72,4 +72,29 @@ impl Window {
         let img = img_opt.expect("Buffer created from window was not big enough for image.");
         imageops::flip_vertical(&img)
     }
+
+    /// Starts a non-blocking capture of the last rendered frame.
+    ///
+    /// This enqueues the GPU→CPU copy of the framebuffer but does not wait for
+    /// it; collect the pixels with [`Self::snap_finish`], typically after
+    /// rendering the *next* frame, so the copy overlaps with useful GPU work
+    /// instead of stalling the pipeline the way the blocking [`Self::snap`]
+    /// does. One capture can be in flight at a time; a second `snap_begin`
+    /// completes and discards the previous one.
+    pub fn snap_begin(&self) {
+        let (width, height) = self.canvas.size();
+        self.canvas
+            .begin_read_pixels(0, 0, width as usize, height as usize);
+    }
+
+    /// Completes a capture started by [`Self::snap_begin`], returning the
+    /// frame as an image (top-left origin, like [`Self::snap_image`]), or
+    /// `None` when no capture is in flight.
+    pub fn snap_finish(&self) -> Option<ImageBuffer<Rgb<u8>, Vec<u8>>> {
+        let mut buf = Vec::new();
+        let (width, height) = self.canvas.finish_read_pixels(&mut buf)?;
+        let img = ImageBuffer::from_vec(width, height, buf)
+            .expect("readback buffer was not big enough for image");
+        Some(imageops::flip_vertical(&img))
+    }
 }
