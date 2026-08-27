@@ -1,3 +1,10 @@
+# Unreleased
+
+## Bug Fixes
+
+- Creating a second `Window` or `OffscreenSurface` on a thread that already has one no longer replaces the global mesh, texture and material managers. Objects created before the new surface kept the previous default material, which the per-frame `begin_frame` / `flush` no longer reached, so its per-object uniform buffer grew until wgpu rejected the dynamic offsets (a validation error after 256 draws). The managers are now created once per context and reused until the last window closes.
+- Added the `offscreen_shared_managers` example exercising a scene built before its offscreen surface, with shaded renders interleaved with depth and segmentation read-backs.
+
 # v0.46.0
 
 ## Breaking Changes
