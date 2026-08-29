@@ -53,8 +53,16 @@ impl Texture {
         address_mode: wgpu::AddressMode,
         filter: wgpu::FilterMode,
         generate_mipmaps: bool,
+        anisotropy: u16,
     ) -> Arc<Texture> {
         let ctxt = Context::get();
+        // wgpu only allows anisotropic filtering with linear filters on every
+        // axis, mip levels included.
+        let anisotropy_clamp = if generate_mipmaps && filter == wgpu::FilterMode::Linear {
+            anisotropy.clamp(1, 16)
+        } else {
+            1
+        };
 
         let mip_level_count = if generate_mipmaps {
             (width.max(height) as f32).log2().floor() as u32 + 1
@@ -159,6 +167,7 @@ impl Texture {
             } else {
                 wgpu::MipmapFilterMode::Nearest
             },
+            anisotropy_clamp,
             ..Default::default()
         });
 
@@ -262,6 +271,7 @@ impl Texture {
             wgpu::AddressMode::Repeat,
             wgpu::FilterMode::Linear,
             false,
+            1,
         )
     }
 
@@ -278,6 +288,7 @@ impl Texture {
             wgpu::AddressMode::Repeat,
             wgpu::FilterMode::Linear,
             false,
+            1,
         )
     }
 
@@ -294,6 +305,7 @@ impl Texture {
             wgpu::AddressMode::Repeat,
             wgpu::FilterMode::Linear,
             false,
+            1,
         )
     }
 
@@ -308,6 +320,7 @@ impl Texture {
             wgpu::AddressMode::Repeat,
             wgpu::FilterMode::Linear,
             false,
+            1,
         )
     }
 
@@ -324,6 +337,7 @@ impl Texture {
             wgpu::AddressMode::Repeat,
             wgpu::FilterMode::Linear,
             false,
+            1,
         )
     }
 
@@ -338,6 +352,7 @@ impl Texture {
             wgpu::AddressMode::Repeat,
             wgpu::FilterMode::Linear,
             false,
+            1,
         )
     }
 }
@@ -349,6 +364,7 @@ pub struct TextureManager {
     default_texture: Arc<Texture>,
     textures: HashMap<String, Arc<Texture>>,
     generate_mipmaps: bool,
+    anisotropy: u16,
 }
 
 impl Default for TextureManager {
@@ -366,6 +382,7 @@ impl TextureManager {
             textures: HashMap::new(),
             default_texture,
             generate_mipmaps: false,
+            anisotropy: 1,
         }
     }
 
@@ -422,10 +439,11 @@ impl TextureManager {
         filter: wgpu::FilterMode,
     ) -> Arc<Texture> {
         let generate_mipmaps = self.generate_mipmaps;
+        let anisotropy = self.anisotropy;
         self.textures
             .entry(name.to_string())
             .or_insert_with(|| {
-                TextureManager::load_texture_from_image(image, generate_mipmaps, filter)
+                TextureManager::load_texture_from_image(image, generate_mipmaps, filter, anisotropy)
             })
             .clone()
     }
@@ -468,6 +486,7 @@ impl TextureManager {
         srgb: bool,
     ) -> Arc<Texture> {
         let generate_mipmaps = self.generate_mipmaps;
+        let anisotropy = self.anisotropy;
         self.textures
             .entry(name.to_string())
             .or_insert_with(|| {
@@ -486,6 +505,7 @@ impl TextureManager {
                     wgpu::AddressMode::Repeat,
                     wgpu::FilterMode::Linear,
                     generate_mipmaps,
+                    anisotropy,
                 )
             })
             .clone()
@@ -496,6 +516,7 @@ impl TextureManager {
         image: DynamicImage,
         generate_mipmaps: bool,
         filter: wgpu::FilterMode,
+        anisotropy: u16,
     ) -> Arc<Texture> {
         let (width, height) = image.dimensions();
 
@@ -511,6 +532,7 @@ impl TextureManager {
             wgpu::AddressMode::ClampToEdge,
             filter,
             generate_mipmaps,
+            anisotropy,
         )
     }
 
@@ -519,10 +541,11 @@ impl TextureManager {
         path: &Path,
         generate_mipmaps: bool,
         filter: wgpu::FilterMode,
+        anisotropy: u16,
     ) -> Arc<Texture> {
         let image = image::open(path)
             .unwrap_or_else(|e| panic!("Unable to load texture from file {:?}: {:?}", path, e));
-        TextureManager::load_texture_from_image(image, generate_mipmaps, filter)
+        TextureManager::load_texture_from_image(image, generate_mipmaps, filter, anisotropy)
     }
 
     /// Allocates a new texture read from a file. If a texture with same name exists, nothing is
@@ -540,10 +563,11 @@ impl TextureManager {
 
     fn add_filtered(&mut self, path: &Path, name: &str, filter: wgpu::FilterMode) -> Arc<Texture> {
         let generate_mipmaps = self.generate_mipmaps;
+        let anisotropy = self.anisotropy;
         self.textures
             .entry(name.to_string())
             .or_insert_with(|| {
-                TextureManager::load_texture_from_file(path, generate_mipmaps, filter)
+                TextureManager::load_texture_from_file(path, generate_mipmaps, filter, anisotropy)
             })
             .clone()
     }
@@ -553,5 +577,19 @@ impl TextureManager {
     /// Mipmap generation is disabled by default.
     pub fn set_generate_mipmaps(&mut self, enabled: bool) {
         self.generate_mipmaps = enabled;
+    }
+
+    /// Sets the anisotropic filtering level (`1` = off, up to `16`) of textures
+    /// loaded from now on; does not affect already loaded textures. It only
+    /// applies to linearly filtered textures with mipmaps, so enable
+    /// [`Self::set_generate_mipmaps`] too. Anisotropy keeps textures seen at a
+    /// grazing angle (a floor) sharp where a plain mip chain blurs them.
+    pub fn set_anisotropy(&mut self, anisotropy: u16) {
+        self.anisotropy = anisotropy.clamp(1, 16);
+    }
+
+    /// The anisotropic filtering level applied to newly loaded textures.
+    pub fn anisotropy(&self) -> u16 {
+        self.anisotropy
     }
 }

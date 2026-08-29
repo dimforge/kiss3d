@@ -10,6 +10,8 @@
 - `ShadowMapper::set_atlas_layers` (`Window` / `OffscreenSurface::set_shadow_atlas_layers`)
   allocates fewer than the 16 shadow atlas layers, which makes a finer shadow resolution
   affordable when a scene only lights with one or two directional lights.
+- `TextureManager::set_anisotropy`: anisotropic filtering (up to 16x) for textures loaded with
+  mipmaps and linear filtering, which keeps floors and other grazing-angle textures sharp.
 - `Window` and `OffscreenSurface` expose the directional cascade layout that only the
   `ShadowMapper` had: `set_shadow_distance` / `shadow_distance` and
   `set_first_cascade_far_bound` / `first_cascade_far_bound`.
