@@ -1,5 +1,14 @@
 # Unreleased
 
+## New Features
+
+- `OffscreenSurface` renders with MSAA: `OffscreenSurface::set_samples` / `samples`, or
+  `CanvasSetup::samples` through `with_setup`. `OffscreenSurface::new` stays single-sampled.
+  Offscreen frames used to ignore the canvas sample count and always render one sample.
+- `OffscreenSurface::set_shadow_softness` / `shadow_softness` and `set_shadows_enabled` /
+  `shadows_enabled`, mirroring the `Window` methods.
+- Added the `offscreen_msaa` example: an antialiased, hard-shadowed offscreen render.
+
 ## Bug Fixes
 
 - Creating a second `Window` or `OffscreenSurface` on a thread that already has one no longer replaces the global mesh, texture and material managers. Objects created before the new surface kept the previous default material, which the per-frame `begin_frame` / `flush` no longer reached, so its per-object uniform buffer grew until wgpu rejected the dynamic offsets (a validation error after 256 draws). The managers are now created once per context and reused until the last window closes.

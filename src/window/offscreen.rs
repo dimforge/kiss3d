@@ -6,7 +6,7 @@ use crate::color::Color;
 use crate::post_processing::{PostProcessingEffect, Tonemap};
 use crate::renderer::{RayTracer, Renderer3d};
 use crate::scene::{SceneNode2d, SceneNode3d};
-use crate::window::{CanvasSetup, Window};
+use crate::window::{CanvasSetup, NumSamples, Window};
 use glamx::UVec2;
 #[cfg(not(target_arch = "wasm32"))]
 use image::{ImageBuffer, Luma, Rgb};
@@ -44,10 +44,15 @@ pub struct OffscreenSurface {
 }
 
 impl OffscreenSurface {
-    /// Creates a new off-screen surface of the given size, in pixels.
+    /// Creates a new off-screen surface of the given size, in pixels, without
+    /// antialiasing (see [`Self::set_samples`] or [`Self::with_setup`] for MSAA).
     pub async fn new(width: u32, height: u32) -> OffscreenSurface {
+        let setup = CanvasSetup {
+            samples: NumSamples::One,
+            ..Default::default()
+        };
         OffscreenSurface {
-            window: Window::do_new_headless(width, height, None).await,
+            window: Window::do_new_headless(width, height, Some(setup)).await,
         }
     }
 
@@ -348,6 +353,39 @@ impl OffscreenSurface {
     /// more memory). See [`Window::set_shadow_resolution`].
     pub fn set_shadow_resolution(&mut self, resolution: u32) {
         self.window.set_shadow_resolution(resolution);
+    }
+
+    /// Sets the shadow-edge softness (PCF blur): `1.0` is the default penumbra,
+    /// `0.0` hard edges. See [`Window::set_shadow_softness`].
+    pub fn set_shadow_softness(&mut self, softness: f32) {
+        self.window.set_shadow_softness(softness);
+    }
+
+    /// The current shadow-edge softness. See [`Window::shadow_softness`].
+    pub fn shadow_softness(&self) -> f32 {
+        self.window.shadow_softness()
+    }
+
+    /// Enables or disables shadow mapping. See [`Window::set_shadows_enabled`].
+    pub fn set_shadows_enabled(&mut self, enabled: bool) {
+        self.window.set_shadows_enabled(enabled);
+    }
+
+    /// Whether shadow mapping is enabled. See [`Window::shadows_enabled`].
+    pub fn shadows_enabled(&self) -> bool {
+        self.window.shadows_enabled()
+    }
+
+    /// Sets the number of MSAA samples of the rendered image (the default is
+    /// one, i.e. no antialiasing). Takes effect on the next rendered frame. See
+    /// [`Window::set_samples`].
+    pub fn set_samples(&mut self, samples: NumSamples) {
+        self.window.set_samples(samples);
+    }
+
+    /// The current number of MSAA samples (`1` = no antialiasing).
+    pub fn samples(&self) -> u32 {
+        self.window.samples()
     }
 
     /// Selects the tonemapping operator used by the HDR resolve pass.

@@ -1098,8 +1098,8 @@ impl Window {
         let (event_send, event_receive) = mpsc::channel();
         let canvas = Canvas::open_headless(width, height, setup, event_send).await;
         let (width, height) = canvas.size();
-        // A headless surface is never multisampled.
         let canvas_surface_format = canvas.surface_format();
+        let sample_count = canvas.sample_count();
 
         Context::increment_window_count();
         WindowCache::populate();
@@ -1127,8 +1127,7 @@ impl Window {
             text_renderer: TextRenderer::new(),
             #[cfg(feature = "egui")]
             egui_context: EguiContext::new(),
-            // Offscreen rendering is single-sampled (see `render_single_frame`).
-            hdr: HdrPipeline::new(width, height, 1, canvas_surface_format),
+            hdr: HdrPipeline::new(width, height, sample_count, canvas_surface_format),
             skybox: crate::renderer::Skybox::new(),
             ssao: None,
             ssao_enabled: false,
