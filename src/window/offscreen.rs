@@ -355,6 +355,17 @@ impl OffscreenSurface {
         self.window.set_shadow_resolution(resolution);
     }
 
+    /// Sets how many shadow atlas layers are allocated. See
+    /// [`Window::set_shadow_atlas_layers`].
+    pub fn set_shadow_atlas_layers(&mut self, layers: u32) {
+        self.window.set_shadow_atlas_layers(layers);
+    }
+
+    /// The number of shadow atlas layers allocated. See [`Window::shadow_atlas_layers`].
+    pub fn shadow_atlas_layers(&self) -> u32 {
+        self.window.shadow_atlas_layers()
+    }
+
     /// Sets the shadow-edge softness (PCF blur): `1.0` is the default penumbra,
     /// `0.0` hard edges. See [`Window::set_shadow_softness`].
     pub fn set_shadow_softness(&mut self, softness: f32) {

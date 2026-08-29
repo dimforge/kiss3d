@@ -767,6 +767,19 @@ impl Window {
         self.shadow_mapper.resolution()
     }
 
+    /// Sets how many shadow atlas layers are allocated (`1..=MAX_SHADOW_VIEWS`,
+    /// default 16). A directional light needs one layer per cascade, a spot
+    /// light one, a point light six; lights that do not fit cast no shadow.
+    /// Fewer layers make a higher [`Self::set_shadow_resolution`] affordable.
+    pub fn set_shadow_atlas_layers(&mut self, layers: u32) {
+        self.shadow_mapper.set_atlas_layers(layers);
+    }
+
+    /// Returns the number of shadow atlas layers allocated.
+    pub fn shadow_atlas_layers(&self) -> u32 {
+        self.shadow_mapper.atlas_layers()
+    }
+
     /// Sets the rasterizer shadow-edge softness (PCF blur).
     ///
     /// `1.0` (the default) is the standard penumbra; larger values blur the

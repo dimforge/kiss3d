@@ -7,6 +7,9 @@
   Offscreen frames used to ignore the canvas sample count and always render one sample.
 - `OffscreenSurface::set_shadow_softness` / `shadow_softness` and `set_shadows_enabled` /
   `shadows_enabled`, mirroring the `Window` methods.
+- `ShadowMapper::set_atlas_layers` (`Window` / `OffscreenSurface::set_shadow_atlas_layers`)
+  allocates fewer than the 16 shadow atlas layers, which makes a finer shadow resolution
+  affordable when a scene only lights with one or two directional lights.
 - `Window` and `OffscreenSurface` expose the directional cascade layout that only the
   `ShadowMapper` had: `set_shadow_distance` / `shadow_distance` and
   `set_first_cascade_far_bound` / `first_cascade_far_bound`.
