@@ -7,6 +7,9 @@
   Offscreen frames used to ignore the canvas sample count and always render one sample.
 - `OffscreenSurface::set_shadow_softness` / `shadow_softness` and `set_shadows_enabled` /
   `shadows_enabled`, mirroring the `Window` methods.
+- `Window` and `OffscreenSurface` expose the directional cascade layout that only the
+  `ShadowMapper` had: `set_shadow_distance` / `shadow_distance` and
+  `set_first_cascade_far_bound` / `first_cascade_far_bound`.
 - Added the `offscreen_msaa` example: an antialiased, hard-shadowed offscreen render.
 
 ## Bug Fixes

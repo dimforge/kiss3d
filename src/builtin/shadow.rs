@@ -1375,6 +1375,11 @@ impl ShadowMapper {
         self.first_cascade_far_bound = bound.max(0.01);
     }
 
+    /// Far view distance of the highest-resolution directional cascade.
+    pub fn first_cascade_far_bound(&self) -> f32 {
+        self.first_cascade_far_bound
+    }
+
     /// Sets the shadow atlas per-layer resolution, reallocating the atlas.
     pub fn set_resolution(&mut self, resolution: u32) {
         let resolution = resolution.max(1);

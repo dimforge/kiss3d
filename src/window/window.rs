@@ -781,6 +781,32 @@ impl Window {
         self.shadow_mapper.softness()
     }
 
+    /// Caps how far from the camera directional shadows reach (world units along
+    /// the view; `INFINITY`, the default, uses the camera far plane). The
+    /// cascades are fit to the camera frustum up to this distance, so a tighter
+    /// cap spends the shadow atlas on nearer geometry.
+    pub fn set_shadow_distance(&mut self, distance: f32) {
+        self.shadow_mapper.set_shadow_distance(distance);
+    }
+
+    /// Returns the directional-shadow distance cap.
+    pub fn shadow_distance(&self) -> f32 {
+        self.shadow_mapper.shadow_distance()
+    }
+
+    /// Sets the far view distance of the highest-resolution directional cascade
+    /// (it covers `[near, bound]`; the default is 12). Lower it for crisper
+    /// shadows on a small scene close to the camera, raise it so crisp shadows
+    /// reach further away.
+    pub fn set_first_cascade_far_bound(&mut self, bound: f32) {
+        self.shadow_mapper.set_first_cascade_far_bound(bound);
+    }
+
+    /// Returns the far view distance of the highest-resolution directional cascade.
+    pub fn first_cascade_far_bound(&self) -> f32 {
+        self.shadow_mapper.first_cascade_far_bound()
+    }
+
     /// The current HDR finishing settings (exposure, tonemap operator, bloom).
     ///
     /// The rasterizer renders into an HDR film and resolves it with these

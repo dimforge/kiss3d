@@ -366,6 +366,28 @@ impl OffscreenSurface {
         self.window.shadow_softness()
     }
 
+    /// Caps how far directional shadows reach. See [`Window::set_shadow_distance`].
+    pub fn set_shadow_distance(&mut self, distance: f32) {
+        self.window.set_shadow_distance(distance);
+    }
+
+    /// The directional-shadow distance cap. See [`Window::shadow_distance`].
+    pub fn shadow_distance(&self) -> f32 {
+        self.window.shadow_distance()
+    }
+
+    /// Far view distance of the highest-resolution directional cascade. See
+    /// [`Window::set_first_cascade_far_bound`].
+    pub fn set_first_cascade_far_bound(&mut self, bound: f32) {
+        self.window.set_first_cascade_far_bound(bound);
+    }
+
+    /// The far view distance of the highest-resolution directional cascade. See
+    /// [`Window::first_cascade_far_bound`].
+    pub fn first_cascade_far_bound(&self) -> f32 {
+        self.window.first_cascade_far_bound()
+    }
+
     /// Enables or disables shadow mapping. See [`Window::set_shadows_enabled`].
     pub fn set_shadows_enabled(&mut self, enabled: bool) {
         self.window.set_shadows_enabled(enabled);
