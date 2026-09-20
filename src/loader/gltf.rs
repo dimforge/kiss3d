@@ -97,7 +97,11 @@ fn build_model(
         .map(|node| {
             let (t, r, s) = node.transform().decomposed();
             let pose = Pose3::from_parts(Vec3::from_array(t), Quat::from_array(r));
-            SceneNode3d::new(Vec3::from_array(s), pose, None)
+            let mut scene_node = SceneNode3d::new(Vec3::from_array(s), pose, None);
+            if let Some(name) = node.name() {
+                scene_node.set_name(name);
+            }
+            scene_node
         })
         .collect();
 

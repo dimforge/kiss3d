@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 /// The data contained by a `SceneNode`.
 pub struct SceneNodeData3d {
+    name: Option<String>,
     local_scale: Vec3,
     local_transform: Pose3,
     world_scale: Vec3,
@@ -50,6 +51,12 @@ pub struct GltfModel {
 }
 
 impl SceneNodeData3d {
+    /// This node's optional name.
+    #[inline]
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
     // XXX: Because `node.borrow_mut().parent = Some(self.data.downgrade())`
     // causes a weird compiler error:
     //
@@ -576,6 +583,7 @@ impl SceneNode3d {
     /// A new `SceneNode` without a parent
     pub fn new(local_scale: Vec3, local_transform: Pose3, object: Option<Object3d>) -> SceneNode3d {
         let data = SceneNodeData3d {
+            name: None,
             local_scale,
             local_transform,
             world_transform: local_transform,
@@ -601,6 +609,69 @@ impl SceneNode3d {
     /// A new empty `SceneNode`
     pub fn empty() -> SceneNode3d {
         SceneNode3d::new(Vec3::ONE, Pose3::IDENTITY, None)
+    }
+
+    /// This node's optional name.
+    pub fn name(&self) -> Option<String> {
+        self.data().name.clone()
+    }
+
+    /// Sets this node's name.
+    pub fn set_name(&mut self, name: impl Into<String>) -> Self {
+        self.data_mut().name = Some(name.into());
+        self.clone()
+    }
+
+    /// Removes this node's name.
+    pub fn clear_name(&mut self) -> Self {
+        self.data_mut().name = None;
+        self.clone()
+    }
+
+    /// Iterates over this node's descendants in depth-first order.
+    ///
+    /// The node itself is not included. Each item is a cheap shared handle to
+    /// the existing scene node; no scene data is duplicated.
+    pub fn descendants(&self) -> impl Iterator<Item = SceneNode3d> {
+        let mut stack: Vec<_> = self.data().children.iter().rev().cloned().collect();
+
+        std::iter::from_fn(move || {
+            let node = stack.pop()?;
+            {
+                let data = node.data();
+                stack.extend(data.children.iter().rev().cloned());
+            }
+            Some(node)
+        })
+    }
+
+    /// Finds the first node in this subtree with the specified name.
+    ///
+    /// The node itself is included in the search.
+    pub fn find_by_name(&self, name: &str) -> Option<SceneNode3d> {
+        if self.data().name() == Some(name) {
+            return Some(self.clone());
+        }
+
+        self.descendants()
+            .find(|node| node.data().name() == Some(name))
+    }
+
+    /// Finds every node in this subtree with the specified name.
+    ///
+    /// The node itself is included in the search. glTF node names are not
+    /// required to be unique, so callers that need to handle duplicates should
+    /// prefer this over [`find_by_name`](Self::find_by_name).
+    pub fn find_all_by_name(&self, name: &str) -> Vec<SceneNode3d> {
+        let mut matches = Vec::new();
+        if self.data().name() == Some(name) {
+            matches.push(self.clone());
+        }
+        matches.extend(
+            self.descendants()
+                .filter(|node| node.data().name() == Some(name)),
+        );
+        matches
     }
 
     // ==================
@@ -3142,5 +3213,56 @@ fn node_global_matrix(node: &Rc<RefCell<SceneNodeData3d>>) -> Mat4 {
     match data.parent.as_ref().and_then(|p| p.upgrade()) {
         Some(parent) => node_global_matrix(&parent) * local,
         None => local,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SceneNode3d;
+
+    #[test]
+    fn names_are_shared_between_node_handles() {
+        let mut node = SceneNode3d::empty();
+        let alias = node.clone();
+
+        node.set_name("Island");
+
+        assert_eq!(alias.name().as_deref(), Some("Island"));
+    }
+
+    #[test]
+    fn descendants_are_depth_first_and_exclude_the_root() {
+        let mut root = SceneNode3d::empty();
+        let mut first = SceneNode3d::empty();
+        let mut nested = SceneNode3d::empty();
+        let mut second = SceneNode3d::empty();
+        first.set_name("first");
+        nested.set_name("nested");
+        second.set_name("second");
+        first.add_child(nested);
+        root.add_child(first);
+        root.add_child(second);
+
+        let names: Vec<_> = root
+            .descendants()
+            .map(|node| node.name().unwrap())
+            .collect();
+
+        assert_eq!(names, ["first", "nested", "second"]);
+    }
+
+    #[test]
+    fn name_lookup_handles_duplicate_names() {
+        let mut root = SceneNode3d::empty();
+        let mut first = SceneNode3d::empty();
+        let mut second = SceneNode3d::empty();
+        first.set_name("Island");
+        second.set_name("Island");
+        root.add_child(first);
+        root.add_child(second);
+
+        assert!(root.find_by_name("Island").is_some());
+        assert_eq!(root.find_all_by_name("Island").len(), 2);
+        assert!(root.find_by_name("Missing").is_none());
     }
 }
