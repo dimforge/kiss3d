@@ -118,6 +118,26 @@ impl OffscreenSurface {
             .await;
     }
 
+    /// Renders one frame through both post-processing chains: `film` on the HDR
+    /// film before bloom and the tonemap, `post` on the LDR image after them.
+    /// See [`Window::render_chains`].
+    #[allow(clippy::too_many_arguments)]
+    pub async fn render_chains(
+        &mut self,
+        scene: Option<&mut SceneNode3d>,
+        scene_2d: Option<&mut SceneNode2d>,
+        camera: Option<&mut dyn Camera3d>,
+        camera_2d: Option<&mut dyn Camera2d>,
+        renderer: Option<&mut dyn Renderer3d>,
+        film: &mut [&mut dyn PostProcessingEffect],
+        post: &mut [&mut dyn PostProcessingEffect],
+    ) {
+        let _ = self
+            .window
+            .render_chains(scene, scene_2d, camera, camera_2d, renderer, film, post)
+            .await;
+    }
+
     /// Renders one path-traced frame into the off-screen texture.
     ///
     /// Call repeatedly with the same [`RayTracer`] to accumulate samples (the
@@ -372,8 +392,27 @@ impl OffscreenSurface {
     #[cfg(feature = "egui")]
     pub fn draw_ui<F>(&mut self, ui_fn: F)
     where
-        F: FnOnce(&egui::Context),
+        F: FnMut(&egui::Context),
     {
         self.window.draw_ui(ui_fn);
+    }
+
+    /// Redraws the last UI on the frames that build none. See
+    /// [`Window::set_ui_retained`].
+    #[cfg(feature = "egui")]
+    pub fn set_ui_retained(&mut self, retained: bool) {
+        self.window.set_ui_retained(retained);
+    }
+
+    /// Whether the last UI is redrawn on a frame that builds none.
+    #[cfg(feature = "egui")]
+    pub fn ui_retained(&self) -> bool {
+        self.window.ui_retained()
+    }
+
+    /// Drops the UI built by the last `draw_ui`. See [`Window::clear_ui`].
+    #[cfg(feature = "egui")]
+    pub fn clear_ui(&mut self) {
+        self.window.clear_ui();
     }
 }

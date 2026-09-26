@@ -4,7 +4,7 @@ pub use self::animation::{AnimationChannel, AnimationClip, AnimationPlayer, Inte
 pub use self::object2d::{
     Blend2d, InstanceComputeBuffers2d, InstanceData2d, InstancesBuffer2d, Object2d, ObjectData2d,
     LINES_COLOR_USE_OBJECT_2D, LINES_WIDTH_USE_OBJECT_2D, POINTS_COLOR_USE_OBJECT_2D,
-    POINTS_SIZE_USE_OBJECT_2D,
+    POINTS_SIZE_USE_OBJECT_2D, UV_WHOLE_2D,
 };
 pub use self::object3d::{
     AlphaMode, Bsdf, InstanceComputeBuffers, InstanceData3d, InstancesBuffer3d, Object3d,

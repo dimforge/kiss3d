@@ -207,6 +207,7 @@ impl ObjectData2d {
 ///     lines_width: Some(2.0),  // 2px wireframe
 ///     points_color: Some([1.0, 1.0, 0.0, 1.0]),  // Yellow points
 ///     points_size: Some(5.0),  // 5px points
+///     uv: [0.0, 0.0, 1.0, 1.0],  // the whole image
 /// };
 /// ```
 pub struct InstanceData2d {
@@ -224,6 +225,10 @@ pub struct InstanceData2d {
     pub points_color: Option<[f32; 4]>,
     /// The point size in pixels for this instance. None = use object's point size.
     pub points_size: Option<f32>,
+    /// The rectangle of the texture this instance draws, as `[min_x, min_y,
+    /// max_x, max_y]` of the mesh's own UVs. `[0, 0, 1, 1]` draws them
+    /// unchanged, and a flip is a swapped pair.
+    pub uv: [f32; 4],
 }
 
 impl Default for InstanceData2d {
@@ -236,9 +241,13 @@ impl Default for InstanceData2d {
             lines_width: None,  // Use object's wireframe width
             points_color: None, // Use object's point color
             points_size: None,  // Use object's point size
+            uv: UV_WHOLE_2D,
         }
     }
 }
+
+/// The instance UV rectangle that draws the mesh's own coordinates.
+pub const UV_WHOLE_2D: [f32; 4] = [0.0, 0.0, 1.0, 1.0];
 
 /// Sentinel value for lines_width indicating "use object's value".
 pub const LINES_WIDTH_USE_OBJECT_2D: f32 = -1.0;
@@ -283,6 +292,10 @@ pub struct InstancesBuffer2d {
     pub points_colors: GPUVec<[f32; 4]>,
     /// GPU buffer of instance point sizes. Negative means use object's size.
     pub points_sizes: GPUVec<f32>,
+    /// GPU buffer of instance texture rectangles, `[min_x, min_y, max_x,
+    /// max_y]`. Lets one mesh serve a whole sheet: every instance picks its
+    /// own frame, so sprites on one image draw in one call.
+    pub uvs: GPUVec<[f32; 4]>,
 }
 
 impl Default for InstancesBuffer2d {
@@ -320,6 +333,11 @@ impl Default for InstancesBuffer2d {
             ),
             points_sizes: GPUVec::new(
                 vec![POINTS_SIZE_USE_OBJECT_2D], // Use object's point size by default
+                BufferType::Array,
+                AllocationType::StreamDraw,
+            ),
+            uvs: GPUVec::new(
+                vec![UV_WHOLE_2D],
                 BufferType::Array,
                 AllocationType::StreamDraw,
             ),
@@ -498,6 +516,13 @@ impl Object2d {
             .data_mut()
             .take()
             .unwrap_or_default();
+        let mut uv_data: Vec<_> = self
+            .instances
+            .borrow_mut()
+            .uvs
+            .data_mut()
+            .take()
+            .unwrap_or_default();
 
         pos_data.clear();
         col_data.clear();
@@ -506,6 +531,7 @@ impl Object2d {
         lines_width_data.clear();
         points_col_data.clear();
         points_size_data.clear();
+        uv_data.clear();
 
         pos_data.extend(instances.iter().map(|i| i.position));
         col_data.extend(instances.iter().map(|i| i.color));
@@ -541,7 +567,10 @@ impl Object2d {
         *self.instances.borrow_mut().lines_colors.data_mut() = Some(lines_col_data);
         *self.instances.borrow_mut().lines_widths.data_mut() = Some(lines_width_data);
         *self.instances.borrow_mut().points_colors.data_mut() = Some(points_col_data);
+        uv_data.extend(instances.iter().map(|i| i.uv));
+
         *self.instances.borrow_mut().points_sizes.data_mut() = Some(points_size_data);
+        *self.instances.borrow_mut().uvs.data_mut() = Some(uv_data);
     }
 
     /// Prepares this object's per-instance buffers to be written directly by a

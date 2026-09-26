@@ -948,6 +948,16 @@ impl ObjectMaterial2d {
                         },
                     ],
                 }),
+                // Buffer 5: Instance texture rectangles ([f32; 4])
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+                    step_mode: wgpu::VertexStepMode::Instance,
+                    attributes: &[wgpu::VertexAttribute {
+                        offset: 0,
+                        shader_location: 6, // inst_uv
+                        format: wgpu::VertexFormat::Float32x4,
+                    }],
+                }),
             ];
 
             let pipeline = Rc::new(
@@ -1466,6 +1476,7 @@ impl Material2d for ObjectMaterial2d {
         instances.lines_widths.load_to_gpu();
         instances.points_colors.load_to_gpu();
         instances.points_sizes.load_to_gpu();
+        instances.uvs.load_to_gpu();
 
         // Ensure mesh buffers are on GPU
         mesh.load_to_gpu();
@@ -1492,6 +1503,10 @@ impl Material2d for ObjectMaterial2d {
             None => return,
         };
         let inst_points_colors_buf = match instances.points_colors.buffer() {
+            Some(b) => b,
+            None => return,
+        };
+        let inst_uvs_buf = match instances.uvs.buffer() {
             Some(b) => b,
             None => return,
         };
@@ -1549,6 +1564,7 @@ impl Material2d for ObjectMaterial2d {
             render_pass.set_vertex_buffer(2, inst_positions_buf.slice(..));
             render_pass.set_vertex_buffer(3, inst_colors_buf.slice(..));
             render_pass.set_vertex_buffer(4, inst_deformations_buf.slice(..));
+            render_pass.set_vertex_buffer(5, inst_uvs_buf.slice(..));
 
             render_pass.set_index_buffer(faces_buf.slice(..), VERTEX_INDEX_FORMAT);
 

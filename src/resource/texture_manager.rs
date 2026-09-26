@@ -31,6 +31,113 @@ impl From<TextureWrapping> for wgpu::AddressMode {
     }
 }
 
+/// The whole of how one texture is sampled, and how its pixels are prepared
+/// before they reach the GPU.
+///
+/// One struct rather than a call per combination: a caller that reads its
+/// settings out of a file cannot pick from `add_image`, `add_image_pixelated`
+/// and `add_image_with_color_space` without giving some of them up.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct TextureSampling {
+    /// Wrapping across the horizontal axis.
+    pub wrap_u: TextureWrapping,
+    /// Wrapping across the vertical axis.
+    pub wrap_v: TextureWrapping,
+    /// Between texels when the texture is magnified.
+    pub mag_filter: wgpu::FilterMode,
+    /// Between texels when it is minified.
+    pub min_filter: wgpu::FilterMode,
+    /// Between mip levels, read only when `mipmaps` is set.
+    pub mipmap_filter: wgpu::MipmapFilterMode,
+    /// Build the mip chain on upload, box-filtered in linear light.
+    pub mipmaps: bool,
+    /// Samples per fetch, 1 to 16. wgpu refuses anything above 1 unless all
+    /// three filters are linear, so [`TextureSampling::sane`] lowers it.
+    pub anisotropy: u16,
+    /// Colour authored in sRGB, which the sampler decodes; data — a normal
+    /// map, a mask — sets this false and is returned raw.
+    pub srgb: bool,
+    /// Multiply RGB by alpha before upload, which stops a filtered edge
+    /// bleeding the transparent texels' colour into what is drawn.
+    ///
+    /// A premultiplied texture must be drawn with
+    /// [`Blend2d::PremultipliedAlpha`](crate::scene::Blend2d::PremultipliedAlpha);
+    /// under ordinary alpha blending it is multiplied a second time and comes
+    /// out dark.
+    pub premultiply: bool,
+}
+
+impl Default for TextureSampling {
+    /// What [`TextureManager::add_image`] has always done: clamped, bilinear,
+    /// no mip chain, sRGB colour.
+    fn default() -> Self {
+        TextureSampling {
+            wrap_u: TextureWrapping::ClampToEdge,
+            wrap_v: TextureWrapping::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            mipmaps: false,
+            anisotropy: 1,
+            srgb: true,
+            premultiply: false,
+        }
+    }
+}
+
+impl TextureSampling {
+    /// This sampling with whatever the device would refuse taken back out.
+    ///
+    /// wgpu validates anisotropy against the three filters and aborts the
+    /// process on a mismatch; a texture asked for more than the driver's
+    /// sixteen is a settings file, not a bug worth a crash.
+    pub fn sane(mut self) -> Self {
+        let linear = self.mag_filter == wgpu::FilterMode::Linear
+            && self.min_filter == wgpu::FilterMode::Linear
+            && self.mipmap_filter == wgpu::MipmapFilterMode::Linear;
+        self.anisotropy = if linear {
+            self.anisotropy.clamp(1, 16)
+        } else {
+            1
+        };
+        self
+    }
+
+    /// The pixel format this sampling reads its texels through.
+    fn format(self) -> wgpu::TextureFormat {
+        if self.srgb {
+            wgpu::TextureFormat::Rgba8UnormSrgb
+        } else {
+            wgpu::TextureFormat::Rgba8Unorm
+        }
+    }
+}
+
+/// sRGB transfer function (IEC 61966-2-1), decoding one stored byte.
+///
+/// Mip generation and premultiplication both average or scale colour, and
+/// both have to do it in linear light or the result comes out dark.
+fn srgb_to_linear(u: u8) -> f32 {
+    let c = u as f32 / 255.0;
+    if c <= 0.04045 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    }
+}
+
+/// The same transfer function the other way, back to a stored byte.
+fn linear_to_srgb(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let s = if c <= 0.0031308 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    };
+    (s * 255.0 + 0.5) as u8
+}
+
 /// A GPU texture with its view and sampler.
 pub struct Texture {
     /// The underlying wgpu texture.
@@ -41,10 +148,16 @@ pub struct Texture {
     pub sampler: wgpu::Sampler,
     /// Texture dimensions (width, height).
     pub size: (u32, u32),
+    /// Whether the uploaded RGB was multiplied by alpha, so a caller can pick
+    /// the blend mode that matches rather than guessing.
+    pub premultiplied: bool,
 }
 
 impl Texture {
-    /// Creates a new texture with the given data.
+    /// Creates a new texture with the given data, sampled the one way this
+    /// call has always offered: the same wrapping and filter on every axis.
+    ///
+    /// [`Texture::sampled`] takes the rest of the sampler.
     pub fn new(
         width: u32,
         height: u32,
@@ -54,6 +167,61 @@ impl Texture {
         filter: wgpu::FilterMode,
         generate_mipmaps: bool,
     ) -> Arc<Texture> {
+        let wrapping = match address_mode {
+            wgpu::AddressMode::MirrorRepeat => TextureWrapping::MirroredRepeat,
+            wgpu::AddressMode::Repeat => TextureWrapping::Repeat,
+            _ => TextureWrapping::ClampToEdge,
+        };
+        Self::build(
+            width,
+            height,
+            data,
+            format,
+            TextureSampling {
+                wrap_u: wrapping,
+                wrap_v: wrapping,
+                mag_filter: filter,
+                min_filter: filter,
+                mipmap_filter: if generate_mipmaps {
+                    wgpu::MipmapFilterMode::Linear
+                } else {
+                    wgpu::MipmapFilterMode::Nearest
+                },
+                mipmaps: generate_mipmaps,
+                srgb: format == wgpu::TextureFormat::Rgba8UnormSrgb,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Creates a new RGBA8 texture sampled exactly as `sampling` asks.
+    ///
+    /// `data` is straight (non-premultiplied) RGBA8; `sampling.premultiply`
+    /// is applied here, in linear light for an sRGB texture, so the sampler
+    /// returns colour already scaled by its alpha.
+    pub fn sampled(
+        width: u32,
+        height: u32,
+        data: &[u8],
+        sampling: TextureSampling,
+    ) -> Arc<Texture> {
+        let sampling = sampling.sane();
+        let format = sampling.format();
+        if sampling.premultiply {
+            let premultiplied = Self::premultiply_rgba(data, sampling.srgb);
+            return Self::build(width, height, &premultiplied, format, sampling);
+        }
+        Self::build(width, height, data, format, sampling)
+    }
+
+    fn build(
+        width: u32,
+        height: u32,
+        data: &[u8],
+        format: wgpu::TextureFormat,
+        sampling: TextureSampling,
+    ) -> Arc<Texture> {
+        let generate_mipmaps = sampling.mipmaps;
         let ctxt = Context::get();
 
         let mip_level_count = if generate_mipmaps {
@@ -149,16 +317,19 @@ impl Texture {
 
         let sampler = ctxt.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("texture_sampler"),
-            address_mode_u: address_mode,
-            address_mode_v: address_mode,
-            address_mode_w: address_mode,
-            mag_filter: filter,
-            min_filter: filter,
+            address_mode_u: sampling.wrap_u.into(),
+            address_mode_v: sampling.wrap_v.into(),
+            // Nothing here is a 3D texture, so w follows u rather than
+            // offering a key that samples nothing.
+            address_mode_w: sampling.wrap_u.into(),
+            mag_filter: sampling.mag_filter,
+            min_filter: sampling.min_filter,
             mipmap_filter: if generate_mipmaps {
-                wgpu::MipmapFilterMode::Linear
+                sampling.mipmap_filter
             } else {
                 wgpu::MipmapFilterMode::Nearest
             },
+            anisotropy_clamp: sampling.anisotropy,
             ..Default::default()
         });
 
@@ -167,7 +338,28 @@ impl Texture {
             view,
             sampler,
             size: (width, height),
+            premultiplied: sampling.premultiply,
         })
+    }
+
+    /// RGB scaled by alpha, which is what a premultiplied blend expects.
+    ///
+    /// An sRGB texture is scaled in linear light: the sampler decodes the
+    /// stored value before it is blended, so scaling the encoded byte would
+    /// leave the fringe it is here to remove.
+    fn premultiply_rgba(data: &[u8], srgb: bool) -> Vec<u8> {
+        let mut out = data.to_vec();
+        for texel in out.as_chunks_mut::<4>().0 {
+            let alpha = texel[3] as f32 / 255.0;
+            for channel in &mut texel[..3] {
+                *channel = if srgb {
+                    linear_to_srgb(srgb_to_linear(*channel) * alpha)
+                } else {
+                    ((*channel as f32) * alpha + 0.5) as u8
+                };
+            }
+        }
+        out
     }
 
     /// Downsamples an RGBA image by half using box filtering.
@@ -177,25 +369,6 @@ impl Texture {
     /// mip chains don't darken — the gamma-correct behavior. Data textures pass
     /// `srgb = false` and are averaged directly.
     fn downsample_rgba(data: &[u8], width: u32, height: u32, srgb: bool) -> Vec<u8> {
-        // sRGB transfer-function helpers (IEC 61966-2-1).
-        fn srgb_to_linear(u: u8) -> f32 {
-            let c = u as f32 / 255.0;
-            if c <= 0.04045 {
-                c / 12.92
-            } else {
-                ((c + 0.055) / 1.055).powf(2.4)
-            }
-        }
-        fn linear_to_srgb(c: f32) -> u8 {
-            let c = c.clamp(0.0, 1.0);
-            let s = if c <= 0.0031308 {
-                c * 12.92
-            } else {
-                1.055 * c.powf(1.0 / 2.4) - 0.055
-            };
-            (s * 255.0 + 0.5) as u8
-        }
-
         let new_width = (width / 2).max(1);
         let new_height = (height / 2).max(1);
         let mut new_data = vec![0u8; (new_width * new_height * 4) as usize];
@@ -430,6 +603,30 @@ impl TextureManager {
             .clone()
     }
 
+    /// Registers a texture sampled exactly as `sampling` asks: wrapping per
+    /// axis, a filter per magnification, minification and mip level,
+    /// anisotropy, the colour space and premultiplied alpha.
+    ///
+    /// The named calls above are the handful of combinations that came before
+    /// it; this is the whole sampler, for a caller reading its settings out of
+    /// a file. If a texture with the same name exists it is returned as it is,
+    /// so a caller changing a setting has to change the name too.
+    pub fn add_image_sampled(
+        &mut self,
+        image: DynamicImage,
+        name: &str,
+        sampling: TextureSampling,
+    ) -> Arc<Texture> {
+        self.textures
+            .entry(name.to_string())
+            .or_insert_with(|| {
+                let (width, height) = image.dimensions();
+                let rgba = image.to_rgba8();
+                Texture::sampled(width, height, rgba.as_raw(), sampling)
+            })
+            .clone()
+    }
+
     /// Allocates a new texture and tries to decode it from bytes array
     /// Panics if unable to do so
     /// If a texture with same name exists, nothing is created and the old texture is returned.
@@ -553,5 +750,67 @@ impl TextureManager {
     /// Mipmap generation is disabled by default.
     pub fn set_generate_mipmaps(&mut self, enabled: bool) {
         self.generate_mipmaps = enabled;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Texture, TextureSampling, TextureWrapping};
+
+    /// wgpu aborts the process on a sampler it considers invalid, so a
+    /// settings file asking for anisotropy on a pixel-art texture has to lose
+    /// the anisotropy rather than the run.
+    #[test]
+    fn anisotropy_needs_every_filter_linear() {
+        let pixelated = TextureSampling {
+            mag_filter: wgpu::FilterMode::Nearest,
+            anisotropy: 16,
+            ..Default::default()
+        };
+        assert_eq!(pixelated.sane().anisotropy, 1);
+
+        let smooth = TextureSampling {
+            anisotropy: 16,
+            ..Default::default()
+        };
+        assert_eq!(smooth.sane().anisotropy, 16);
+        assert_eq!(
+            TextureSampling {
+                anisotropy: 64,
+                ..Default::default()
+            }
+            .sane()
+            .anisotropy,
+            16,
+            "more than the device offers is clamped, not refused"
+        );
+    }
+
+    #[test]
+    fn the_default_sampling_is_what_add_image_always_did() {
+        let sampling = TextureSampling::default();
+        assert_eq!(sampling.wrap_u, TextureWrapping::ClampToEdge);
+        assert_eq!(sampling.mag_filter, wgpu::FilterMode::Linear);
+        assert!(sampling.srgb && !sampling.mipmaps && !sampling.premultiply);
+    }
+
+    /// A transparent texel keeps no colour to bleed into its neighbours, and
+    /// an opaque one is left exactly as it was authored.
+    #[test]
+    fn premultiplying_scales_colour_by_alpha() {
+        let straight = [255u8, 128, 0, 0, 255, 128, 0, 255];
+        let linear = Texture::premultiply_rgba(&straight, false);
+        assert_eq!(&linear[..4], &[0, 0, 0, 0]);
+        assert_eq!(&linear[4..], &[255, 128, 0, 255]);
+    }
+
+    /// Halved alpha in linear light is not a halved byte: scaling the stored
+    /// value instead would leave the fringe premultiplication removes.
+    #[test]
+    fn an_srgb_texture_is_scaled_in_linear_light() {
+        let straight = [255u8, 255, 255, 128];
+        let encoded = Texture::premultiply_rgba(&straight, true);
+        assert_eq!(&encoded[..3], &[188, 188, 188]);
+        assert_eq!(encoded[3], 128, "alpha is not itself scaled");
     }
 }

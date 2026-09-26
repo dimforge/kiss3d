@@ -45,24 +45,24 @@ pub(crate) fn compile_wesl(
     root: &str,
     features: &[(&str, bool)],
 ) -> String {
-    let mut resolver = wesl::VirtualResolver::new();
+    let mut resolver = wesl::resolver::VirtualResolver::new();
     for (path, src) in modules {
         resolver.add_module(
             path.parse().expect("invalid WESL module path"),
             (*src).into(),
         );
     }
-    let mut comp = wesl::Wesl::new("").set_custom_resolver(resolver);
-    comp.set_options(wesl::CompileOptions {
+    let mut options = wesl::CompileOptions {
         // wesl's own validation needs the `eval` crate feature (off); naga validates
         // at `create_shader_module` regardless.
         validate: false,
         ..Default::default()
-    });
+    };
     for (name, on) in features {
-        comp.set_feature(name, *on);
+        options.features.set(name, *on);
     }
-    comp.compile(&root.parse().expect("invalid WESL root module path"))
+    wesl::Compiler::new_with_resolver(options, resolver)
+        .compile_module(&root.parse().expect("invalid WESL root module path"))
         .unwrap_or_else(|e| panic!("WESL compilation of {} failed: {}", root, e))
         .to_string()
 }

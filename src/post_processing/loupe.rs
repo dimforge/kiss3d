@@ -29,7 +29,9 @@
 //! ```
 
 use crate::context::Context;
-use crate::post_processing::post_processing_effect::{PostProcessingContext, PostProcessingEffect};
+use crate::post_processing::post_processing_effect::{
+    FormatPipelines, PostProcessingContext, PostProcessingEffect,
+};
 use crate::resource::RenderTarget;
 use bytemuck::{Pod, Zeroable};
 use glamx::Vec2;
@@ -59,18 +61,20 @@ struct LoupeUniforms {
     border_color: [f32; 4],
 }
 
-/// An intermediate surface-format target the inner effect renders into, so the
-/// loupe can magnify the post-processed result. Allocated lazily, only when an
-/// inner effect is set.
+/// An intermediate target the inner effect renders into, so the loupe can
+/// magnify the post-processed result. Allocated lazily, only when an inner
+/// effect is set, and at the format the loupe itself was asked to write: the
+/// inner effect draws into this the way it would draw into the real output.
 struct MidTarget {
     view: wgpu::TextureView,
     sampler: wgpu::Sampler,
     width: u32,
     height: u32,
+    format: wgpu::TextureFormat,
 }
 
 impl MidTarget {
-    fn new(width: u32, height: u32) -> Self {
+    fn new(width: u32, height: u32, format: wgpu::TextureFormat) -> Self {
         let ctxt = Context::get();
         let texture = ctxt.create_texture(&wgpu::TextureDescriptor {
             label: Some("loupe_mid_texture"),
@@ -82,7 +86,7 @@ impl MidTarget {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: ctxt.surface_format,
+            format,
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
             view_formats: &[],
         });
@@ -96,13 +100,14 @@ impl MidTarget {
             sampler,
             width,
             height,
+            format,
         }
     }
 }
 
 /// Magnifier loupe post-processing effect.
 pub struct Loupe {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: FormatPipelines,
     bind_group_layout: wgpu::BindGroupLayout,
     vertex_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
@@ -114,6 +119,9 @@ pub struct Loupe {
     border_color: [f32; 3],
     inner: Option<Box<dyn PostProcessingEffect>>,
     mid: Option<MidTarget>,
+    /// The viewport size the intermediate target is built at, learned in
+    /// `update` and used by `draw`.
+    mid_size: (u32, u32),
 }
 
 impl Default for Loupe {
@@ -184,42 +192,45 @@ impl Loupe {
             }],
         };
 
-        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("loupe_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_buffer_layout)],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: ctxt.surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+        let pipeline = FormatPipelines::new(move |format| {
+            let ctxt = Context::get();
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("loupe_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(vertex_buffer_layout.clone())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         let vertices: [[f32; 2]; 4] = [[-1.0, -1.0], [1.0, -1.0], [-1.0, 1.0], [1.0, 1.0]];
@@ -256,6 +267,7 @@ impl Loupe {
             border_color: [1.0, 0.9, 0.2],
             inner: None,
             mid: None,
+            mid_size: (1, 1),
         }
     }
 
@@ -317,10 +329,9 @@ impl PostProcessingEffect for Loupe {
     fn update(&mut self, dt: f32, w: f32, h: f32, znear: f32, zfar: f32) {
         if let Some(inner) = &mut self.inner {
             inner.update(dt, w, h, znear, zfar);
-            let (iw, ih) = (w.max(1.0) as u32, h.max(1.0) as u32);
-            if self.mid.as_ref().map(|m| (m.width, m.height)) != Some((iw, ih)) {
-                self.mid = Some(MidTarget::new(iw, ih));
-            }
+            // The intermediate target is built in `draw`, which is where the
+            // format it has to match is known.
+            self.mid_size = (w.max(1.0) as u32, h.max(1.0) as u32);
         } else {
             self.mid = None;
         }
@@ -353,8 +364,21 @@ impl PostProcessingEffect for Loupe {
     }
 
     fn draw(&mut self, target: &RenderTarget, context: &mut PostProcessingContext) {
+        let pipeline = self.pipeline.get(context.output_format);
         let ctxt = Context::get();
         ctxt.write_buffer(&self.uniform_buffer, 0, bytemuck::bytes_of(&self.uniforms));
+
+        // The inner effect writes the same format the loupe was asked for.
+        if self.inner.is_some() {
+            let (iw, ih) = self.mid_size;
+            let stale = self
+                .mid
+                .as_ref()
+                .is_none_or(|m| (m.width, m.height, m.format) != (iw, ih, context.output_format));
+            if stale {
+                self.mid = Some(MidTarget::new(iw, ih, context.output_format));
+            }
+        }
 
         // Source for the loupe: the inner effect's output when wrapping one (rendered
         // into our intermediate target first), otherwise the raw resolved scene.
@@ -363,6 +387,7 @@ impl PostProcessingEffect for Loupe {
                 let mut inner_ctx = PostProcessingContext {
                     encoder: context.encoder,
                     output_view: &mid.view,
+                    output_format: mid.format,
                 };
                 inner.draw(target, &mut inner_ctx);
                 (&mid.view, &mid.sampler)
@@ -411,7 +436,7 @@ impl PostProcessingEffect for Loupe {
                 multiview_mask: None,
             });
 
-        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_pipeline(&pipeline);
         render_pass.set_bind_group(0, &bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
         render_pass.draw(0..4, 0..1);

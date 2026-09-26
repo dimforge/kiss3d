@@ -446,8 +446,8 @@ impl Window {
     pub fn draw_inspector(
         &mut self,
         inspector: &mut Inspector,
-        scene: Option<&mut SceneNode3d>,
-        scene_2d: Option<&mut SceneNode2d>,
+        mut scene: Option<&mut SceneNode3d>,
+        mut scene_2d: Option<&mut SceneNode2d>,
         mut raytracer: Option<&mut RayTracer>,
     ) {
         // One-time seeding of UI state from the live window.
@@ -481,8 +481,8 @@ impl Window {
         self.draw_ui(|ctx| {
             inspector.ui(
                 ctx,
-                scene,
-                scene_2d,
+                scene.as_deref_mut(),
+                scene_2d.as_deref_mut(),
                 &mut settings,
                 raytracer.as_deref_mut(),
                 timings.as_ref(),

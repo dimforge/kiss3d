@@ -627,6 +627,9 @@ struct VertexInput {
     @location(0) position: vec3<f32>,
     @location(1) tex_coord: vec2<f32>,
     @location(2) normal: vec3<f32>,
+    // Only on a mesh that carries them (glTF COLOR_0, `GpuMesh3d::set_colors`);
+    // the vertex layout leaves the slot out otherwise.
+    @if(vertex_colors) @location(8) color: vec4<f32>,
 }
 
 // === GPU vertex deformation: skinning + morph targets (deform variant only) ===
@@ -808,7 +811,10 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     out.view_pos = view_pos.xyz / view_pos.w;
 
     out.tex_coord = vertex.tex_coord;
-    out.vert_color = instance.inst_color;
+    // Per-vertex colour tints the instance colour, which the fragment stage
+    // already multiplies into the base colour.
+    @if(vertex_colors)  out.vert_color = instance.inst_color * vertex.color;
+    @if(!vertex_colors) out.vert_color = instance.inst_color;
 
     return out;
 }
@@ -873,7 +879,10 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput, @builtin(vertex_index) 
     }
 
     out.tex_coord = vertex.tex_coord;
-    out.vert_color = instance.inst_color;
+    // Per-vertex colour tints the instance colour, which the fragment stage
+    // already multiplies into the base colour.
+    @if(vertex_colors)  out.vert_color = instance.inst_color * vertex.color;
+    @if(!vertex_colors) out.vert_color = instance.inst_color;
 
     return out;
 }

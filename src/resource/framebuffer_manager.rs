@@ -26,6 +26,9 @@ pub struct OffscreenBuffers {
     pub width: u32,
     /// Height of the render target.
     pub height: u32,
+    /// The colour format the textures were made with. A target reused at
+    /// another format has to be remade, not just resized.
+    pub format: wgpu::TextureFormat,
 }
 
 impl RenderTarget {
@@ -76,7 +79,7 @@ impl RenderTarget {
                 // Screen resizing is handled by the canvas/surface
             }
             RenderTarget::Offscreen(o) => {
-                if o.width != width || o.height != height {
+                if o.width != width || o.height != height || o.format != surface_format {
                     // Recreate textures with new size
                     **o = OffscreenBuffers::new(width, height, surface_format, true);
                 }
@@ -111,9 +114,12 @@ impl OffscreenBuffers {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format,
+            // COPY_DST: a film-stage post chain is seeded with a copy of the
+            // HDR film, which is a texture this one never renders into.
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
 
@@ -162,6 +168,7 @@ impl OffscreenBuffers {
             sampler,
             width,
             height,
+            format,
         }
     }
 }

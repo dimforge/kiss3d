@@ -39,10 +39,18 @@ jobs:
         run: cargo build --verbose -p kiss3d;
       - name: Build kiss3d (+ egui)
         run: cargo build --verbose -p kiss3d --features egui;
+      # `serde` derives over types the graphics crates own, so it only builds
+      # while their own serde features are pulled in with it.
+      - name: Build kiss3d (+ serde)
+        run: cargo build --verbose -p kiss3d --features serde;
       - name: Build examples (+ egui)
         run: cargo build --verbose --examples --features egui;
       - name: Run tests
         run: cargo test
+      # The egui integration (key translation, the command modifier) is behind
+      # the feature, so its tests only exist in a build that enables it.
+      - name: Run tests (+ egui)
+        run: cargo test --features egui
   build-wasm:
     runs-on: ubuntu-latest
     env:

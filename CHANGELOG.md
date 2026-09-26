@@ -1,3 +1,80 @@
+# Unreleased
+
+## Breaking Changes
+
+- `Window::draw_ui` (and `OffscreenSurface::draw_ui`) takes an `FnMut` rather than an `FnOnce`, and
+  may run it more than once per frame: egui discards and re-runs a pass that only measured
+  something, so a closure that mutates state has to tolerate being replayed.
+- `PostProcessingContext` gained an `output_format` field, and the built-in effects now build their
+  pipelines per format. A custom effect that constructs the context itself, or that built one
+  pipeline against the surface format, has to follow; `FormatPipelines` does the caching.
+- `RenderContext2d` gained `screen` and `screen_generation` fields, and `OffscreenBuffers` a
+  `format` field.
+- The `serde` feature now also enables `wgpu/serde`, which `TextureSampling` needs to derive over
+  wgpu's own types.
+
+## New Features
+
+- `Window::render_chains` (and `OffscreenSurface::render_chains`) runs a second post-processing
+  chain on the HDR film, before bloom and the tonemap, so an effect works in linear light and what
+  it writes is what blooms. `PostProcessingContext::output_format` says which format an effect
+  draws into, and `FormatPipelines` keeps one pipeline per format, so the same effect can be handed
+  to either chain. Added the `film_chain` example.
+- `Material2d::reads_screen`: a 2D material can sample the frame drawn so far. The 2D pass is split
+  around each object that asks, with the film copied into `RenderContext2d::screen` first;
+  `screen_generation` changes when that copy is a new texture, so a bind group over it is rebuilt.
+  Added the `screen_read2d` example.
+- Per-vertex colours: `GpuMesh3d::set_colors` / `colors` / `has_colors`, which the default material
+  multiplies into its base colour and the glTF loader fills in from `COLOR_0`. A mesh that carries
+  none is unaffected and allocates no buffer. Added the `vertex_colors` example.
+- `TextureSampling`, with `TextureManager::add_image_sampled` and `Texture::sampled`, states a
+  texture's whole sampler at once: wrapping per axis, the magnification, minification and mip
+  filters, anisotropy, the colour space and premultiplied alpha. `TextureSampling::sane` drops what
+  the device would refuse rather than aborting the process, and `Texture::premultiplied` says which
+  blend mode the result wants.
+- Input-method text: `ImeEvent`, `Window::ime_events` and `Window::set_ime_allowed`. egui's text
+  fields consume the same events on their own.
+- `Window::safe_area` reports the display's insets in pixels, non-zero on iOS.
+- `kiss3d::window::take_launch_url` (iOS) returns the URL the app was opened from, once.
+- `Window::set_ui_retained` / `ui_retained` / `clear_ui` redraw the last egui pass on the frames
+  that build none, so a host can run its widgets only when something changed. Off by default: an
+  app that draws its UI conditionally expects a frame that draws none to show none.
+- egui's pointer shape is applied to the window, and a pass egui asks to discard (a new `Area`, a
+  `Grid`, a `Resize`) is re-run before the frame is shown rather than showing the gap.
+- `Canvas::set_cursor_icon` and `HdrPipeline::scene_texture`.
+- `Window::keyboard_height` reports how many pixels of the window the on-screen keyboard covers,
+  from the bottom. Non-zero on Android and iOS, so a mobile app can lift what the keyboard would
+  bury.
+- `Window::set_exclusive_fullscreen` takes the current monitor's largest video mode at its highest
+  refresh rate, and `set_maximized` / `is_maximized` join the existing `set_fullscreen` /
+  `is_fullscreen`.
+- `kiss3d::wgpu` re-exports the wgpu the crate itself was built against. The material traits are
+  written in wgpu types, so an implementor naming them through this cannot drift to another
+  version.
+- egui now hears punctuation, digits, the numpad, the function keys and the clipboard keys, not
+  only the letters and the navigation keys, so an app can bind a chord to any of them.
+
+## Bug Fixes
+
+- On the web, the surface is presented opaque wherever the platform offers it: a WebGPU canvas
+  lists premultiplied alpha first, and the page showed through every pixel left at alpha 0.
+- A canvas the page supplies keeps the layout and the scrolling the page gave it; only a canvas
+  kiss3d had to create still sizes the document around itself.
+- egui reads an event's own modifiers rather than the polled key states, so a chord tapped and
+  released inside one frame is no longer seen unmodified. ⌘ is the command modifier on an Apple
+  platform reached through a browser too, not only on native macOS.
+- On the web on macOS, a key pressed while ⌘ is held is released when ⌘ is, rather than staying
+  pressed for good: macOS sends no keyup of its own for it.
+- A render target reused at another colour format is remade rather than only resized.
+- Auto-exposure meters what the film-stage chain wrote, not the film it started from.
+
+## Performance
+
+- The screenshot read-back texture is built on the first capture instead of with every window, and
+  a resize drops it rather than rebuilding one nothing has asked for.
+- The film-stage render targets are allocated on the first frame a film chain is passed, so a run
+  that never passes one costs nothing.
+
 # v0.46.0
 
 ## Breaking Changes

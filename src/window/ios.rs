@@ -9,6 +9,7 @@
 //! `while window.render().await` loop yield back to UIKit between frames —
 //! the iOS analogue of the wasm path awaiting `requestAnimationFrame`.
 
+use super::wgpu_canvas::{push_lifecycle, LifecycleEvent};
 use std::cell::Cell;
 use std::future::Future;
 use std::pin::Pin;
@@ -17,8 +18,16 @@ use std::task::{Context as TaskContext, Poll, Waker};
 
 use objc2::rc::Retained;
 use objc2::{define_class, msg_send, MainThreadMarker, MainThreadOnly};
-use objc2_foundation::{NSObjectProtocol, NSString};
-use objc2_ui_kit::{UIKeyInput, UITextInputTraits, UIView};
+use objc2_core_foundation::CGRect;
+use objc2_foundation::{
+    NSDictionary, NSNotification, NSNotificationCenter, NSObject, NSObjectProtocol, NSString,
+    NSValue, NSURL,
+};
+use objc2_ui_kit::{
+    NSValueUIGeometryExtensions, UIApplicationDidFinishLaunchingNotification, UIFont,
+    UIFontTextStyleBody, UIKeyInput, UIKeyboardFrameEndUserInfoKey,
+    UIKeyboardWillChangeFrameNotification, UITextInputTraits, UIView,
+};
 use winit::application::ApplicationHandler;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowAttributes, WindowId};
@@ -107,8 +116,19 @@ impl IosApp {
 impl ApplicationHandler for IosApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         event_loop.set_control_flow(ControlFlow::Poll);
+        if self.started {
+            push_lifecycle(LifecycleEvent::Resumed);
+        }
         self.started = true;
         self.poll(event_loop);
+    }
+
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        push_lifecycle(LifecycleEvent::Suspended);
+    }
+
+    fn memory_warning(&mut self, _event_loop: &ActiveEventLoop) {
+        push_lifecycle(LifecycleEvent::LowMemory);
     }
 
     fn window_event(
@@ -134,6 +154,10 @@ impl ApplicationHandler for IosApp {
 /// `UIApplicationMain` owns the process.
 pub fn run_ios(fut: impl Future<Output = ()> + 'static) {
     let event_loop = EventLoop::new().expect("Failed to create event loop");
+    if let Some(mtm) = MainThreadMarker::new() {
+        observe_launch_url(mtm);
+        observe_keyboard(mtm);
+    }
     let mut app = IosApp {
         fut: Some(Box::pin(fut)),
         started: false,
@@ -209,24 +233,198 @@ define_class!(
     }
 );
 
-/// Show or hide the system keyboard for `window`.
-pub(crate) fn set_keyboard_visible(window: &Window, visible: bool) {
+thread_local! {
+    /// The URL the app was launched with, if it was launched from one.
+    static LAUNCH_URL: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+    /// The observer is kept alive for the life of the process: the
+    /// notification centre does not retain it, and a dropped observer is a
+    /// dangling pointer the next notification would follow.
+    static LAUNCH_OBSERVER: std::cell::RefCell<Option<Retained<LaunchObserver>>> =
+        const { std::cell::RefCell::new(None) };
+    /// Where the keyboard will end up, in screen coordinates, as UIKit last
+    /// announced it; `None` before it has ever moved.
+    static KEYBOARD_FRAME: Cell<Option<CGRect>> = const { Cell::new(None) };
+    /// Kept alive for the reason `LAUNCH_OBSERVER` is.
+    static KEYBOARD_OBSERVER: std::cell::RefCell<Option<Retained<KeyboardObserver>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+// UIKit hands the launch URL to the application delegate, and winit owns the
+// delegate. Rather than take it over, this listens for the notification the
+// same launch posts: its `userInfo` carries the very dictionary the delegate
+// is given, so the URL is read without owning anything.
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "Kiss3dLaunchObserver"]
+    struct LaunchObserver;
+
+    unsafe impl NSObjectProtocol for LaunchObserver {}
+
+    impl LaunchObserver {
+        #[unsafe(method(didFinishLaunching:))]
+        #[expect(
+            deprecated,
+            reason = "the scene lifecycle it defers to is not one a kiss3d app adopts"
+        )]
+        fn did_finish_launching(&self, notification: &NSNotification) {
+            let Some(info): Option<Retained<NSDictionary>> = notification.userInfo() else {
+                return;
+            };
+            let key: &NSString = unsafe { objc2_ui_kit::UIApplicationLaunchOptionsURLKey };
+            let Some(object) = info.objectForKey(key) else {
+                return;
+            };
+            // The value under that key is documented as an NSURL.
+            let url: &NSURL = unsafe { &*ptr::from_ref(&*object).cast::<NSURL>() };
+            if let Some(text) = unsafe { url.absoluteString() } {
+                LAUNCH_URL.with(|cell| *cell.borrow_mut() = Some(text.to_string()));
+            }
+        }
+    }
+);
+
+// Every keyboard move posts `UIKeyboardWillChangeFrameNotification` with the
+// frame it is heading for, hides included: a hidden keyboard's frame sits
+// below the screen, so one handler covers show, hide, rotate and resize.
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "Kiss3dKeyboardObserver"]
+    struct KeyboardObserver;
+
+    unsafe impl NSObjectProtocol for KeyboardObserver {}
+
+    impl KeyboardObserver {
+        #[unsafe(method(keyboardWillChangeFrame:))]
+        fn will_change_frame(&self, notification: &NSNotification) {
+            let Some(info): Option<Retained<NSDictionary>> = notification.userInfo() else {
+                return;
+            };
+            let key: &NSString = unsafe { UIKeyboardFrameEndUserInfoKey };
+            let Some(object) = info.objectForKey(key) else {
+                return;
+            };
+            // Documented as an NSValue wrapping a CGRect.
+            let value: &NSValue = unsafe { &*ptr::from_ref(&*object).cast::<NSValue>() };
+            let frame = unsafe { value.CGRectValue() };
+            KEYBOARD_FRAME.with(|cell| cell.set(Some(frame)));
+        }
+    }
+);
+
+fn observe_keyboard(mtm: MainThreadMarker) {
+    let observer: Retained<KeyboardObserver> =
+        unsafe { msg_send![KeyboardObserver::alloc(mtm), init] };
+    unsafe {
+        NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+            &observer,
+            objc2::sel!(keyboardWillChangeFrame:),
+            Some(UIKeyboardWillChangeFrameNotification),
+            None,
+        );
+    }
+    KEYBOARD_OBSERVER.with(|cell| *cell.borrow_mut() = Some(observer));
+}
+
+/// How far up `window` the keyboard reaches, in points; zero while it is down.
+///
+/// The frame is converted into the view's own coordinates, as Apple asks: a
+/// screen-space frame is wrong under rotation and in a window smaller than
+/// the screen.
+/// The `UIView` winit put this window's content in, with the marker proving
+/// the thread UIKit may be touched from.
+///
+/// `None` off the main thread, which winit callbacks (and so the app future)
+/// never leave, or on a window that is not a UIKit one.
+fn ui_view(window: &Window) -> Option<(MainThreadMarker, &UIView)> {
     use wgpu::rwh::{HasWindowHandle, RawWindowHandle};
 
-    // Everything here is UIKit: reachable only from the main thread, which
-    // is the only thread winit callbacks (and therefore the app future) run
-    // on. The guard is belt and braces, not a code path.
-    let Some(mtm) = MainThreadMarker::new() else {
-        return;
-    };
-    let Ok(handle) = window.window_handle() else {
-        return;
-    };
+    let mtm = MainThreadMarker::new()?;
+    let handle = window.window_handle().ok()?;
     let RawWindowHandle::UiKit(ui_kit) = handle.as_raw() else {
-        return;
+        return None;
     };
     // Valid while `window` is alive, which the borrow guarantees.
-    let parent: &UIView = unsafe { ui_kit.ui_view.cast().as_ref() };
+    Some((mtm, unsafe { ui_kit.ui_view.cast().as_ref() }))
+}
+
+pub(crate) fn keyboard_height(window: &Window) -> f64 {
+    let Some(frame) = KEYBOARD_FRAME.with(Cell::get) else {
+        return 0.0;
+    };
+    let Some((_, view)) = ui_view(window) else {
+        return 0.0;
+    };
+    let local = view.convertRect_fromView(frame, None);
+    let bottom = view.bounds().size.height;
+    (bottom - local.origin.y).clamp(0.0, local.size.height.max(0.0))
+}
+
+/// Start listening for the launch URL. Called before `UIApplicationMain`
+/// takes the thread, which is the only moment early enough to hear the
+/// notification it posts.
+///
+/// `UIApplicationLaunchOptionsURLKey` is deprecated in favour of the UIScene
+/// lifecycle, and deliberately used anyway: the key is empty only for an app
+/// that declares a `UIApplicationSceneManifest`, and a kiss3d app declares
+/// none. Adopting scenes to read a URL would mean taking over the window
+/// lifecycle winit owns.
+fn observe_launch_url(mtm: MainThreadMarker) {
+    let observer: Retained<LaunchObserver> = unsafe { msg_send![LaunchObserver::alloc(mtm), init] };
+    unsafe {
+        NSNotificationCenter::defaultCenter().addObserver_selector_name_object(
+            &observer,
+            objc2::sel!(didFinishLaunching:),
+            Some(UIApplicationDidFinishLaunchingNotification),
+            None,
+        );
+    }
+    LAUNCH_OBSERVER.with(|cell| *cell.borrow_mut() = Some(observer));
+}
+
+/// The URL this app was launched with, taken once.
+///
+/// Empty unless the app was opened from a link. It is taken rather than read
+/// so a game that asks twice does not act on the same launch twice.
+pub fn take_launch_url() -> Option<String> {
+    LAUNCH_URL.with(|cell| cell.borrow_mut().take())
+}
+
+/// `[left, top, right, bottom]` in points; zeros before the view is laid out.
+pub(crate) fn safe_area(window: &Window) -> [f64; 4] {
+    let Some((_, view)) = ui_view(window) else {
+        return [0.0; 4];
+    };
+    let insets = view.safeAreaInsets();
+    [insets.left, insets.top, insets.right, insets.bottom]
+}
+
+/// How much larger than standard the reader asked their text to be.
+///
+/// Dynamic Type, as the ratio of the body style's point size to the 17 points
+/// it is at the default setting. 1.0 where UIKit cannot be asked.
+pub(crate) fn text_scale() -> f32 {
+    /// The body style's size at the default Dynamic Type setting.
+    const STANDARD_BODY: f64 = 17.0;
+    if MainThreadMarker::new().is_none() {
+        return 1.0;
+    }
+    let font = unsafe { UIFont::preferredFontForTextStyle(UIFontTextStyleBody) };
+    let size = unsafe { font.pointSize() };
+    if size > 0.0 {
+        (size / STANDARD_BODY) as f32
+    } else {
+        1.0
+    }
+}
+
+/// Show or hide the system keyboard for `window`.
+pub(crate) fn set_keyboard_visible(window: &Window, visible: bool) {
+    let Some((mtm, parent)) = ui_view(window) else {
+        return;
+    };
 
     KEY_VIEW.with(|cell| {
         let mut cell = cell.borrow_mut();

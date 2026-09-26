@@ -34,7 +34,7 @@ path = "src/lib.rs"
 # falls back to a path text field).
 egui = ["dep:egui", "dep:egui-wgpu", "dep:rfd"]
 recording = ["dep:ffmpeg-the-third"]
-serde = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde"]
+serde = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde", "wgpu/serde"]
 # If enabled, switching between the ray-tracer and the rasterizer is possible while kipping
 # only the `.render_3d` call (instead of having to manually switch between `.render_3d` and
 # `.raytrace_3d`. This is mainly for debugging and experiments comparing the rasterizer and
@@ -59,7 +59,7 @@ rusttype     = { version = "0.9", features = ["gpu_cache"] }
 serde        = { version = "1", features = ["derive"], optional = true }
 wgpu         = "30"
 winit        = "0.30"
-wesl = "0.4"
+wesl = "0.5"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "1"
@@ -83,8 +83,9 @@ android-activity = "0.6.1"
 # summons UIKit's keyboard itself through a hidden UIKeyInput view (window/ios.rs).
 [target.'cfg(target_os = "ios")'.dependencies]
 objc2 = "0.6"
-objc2-foundation = "0.3"
-objc2-ui-kit = { version = "0.3", features = ["UIResponder", "UIView", "UITextInput"] }
+objc2-core-foundation = { version = "0.3", features = ["CFCGTypes"] }
+objc2-foundation = { version = "0.3", features = ["NSValue"] }
+objc2-ui-kit = { version = "0.3", features = ["UIApplication", "UIGeometry", "UIResponder", "UIView", "UITextInput", "UIWindow", "objc2-core-foundation"] }
 
 [target.wasm32-unknown-unknown.dependencies]
 oneshot = { version = "0.2.0", features = ["async"] }
@@ -105,6 +106,7 @@ web-sys = { version = "0.3", features = [
     "TouchList",
     "HtmlCanvasElement",
     "HtmlElement",
+    "Navigator",
     "Window",
     "UiEvent",
     "Event",

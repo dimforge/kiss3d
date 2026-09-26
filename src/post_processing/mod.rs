@@ -14,7 +14,7 @@ pub use crate::post_processing::hdr::{
 pub use crate::post_processing::loupe::{Loupe, LoupeCorner};
 pub use crate::post_processing::oculus_stereo::OculusStereo;
 pub use crate::post_processing::post_processing_effect::{
-    PostProcessingContext, PostProcessingEffect,
+    FormatPipelines, PostProcessingContext, PostProcessingEffect,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use crate::post_processing::sobel_edge_highlight::SobelEdgeHighlight;

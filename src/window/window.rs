@@ -48,9 +48,20 @@ pub(super) static DEFAULT_SHADOW_RESOLUTION: u32 = 2048u32;
 /// Structure representing a window and a 3D scene.
 ///
 /// This is the main interface with the 3d engine.
+/// The single-sample film copy a screen-reading 2D material samples.
+pub(super) struct ScreenCopy2d {
+    pub(super) view: wgpu::TextureView,
+    pub(super) width: u32,
+    pub(super) height: u32,
+    pub(super) generation: u64,
+}
+
 pub struct Window {
     pub(super) events: Rc<Receiver<WindowEvent>>,
     pub(super) unhandled_events: Rc<RefCell<Vec<WindowEvent>>>,
+    pub(super) ime_events: Rc<RefCell<Vec<crate::event::ImeEvent>>>,
+    /// Made on the first frame a material asks; remade when the film resizes.
+    pub(super) screen_2d: Option<ScreenCopy2d>,
     pub(super) ambient_intensity: f32,
     pub(super) ambient_color: Color,
     pub(super) fog: crate::light::Fog,
@@ -107,6 +118,11 @@ pub struct Window {
     /// buffers when chaining more than one post-processing effect: each effect reads
     /// one and writes the other, and the last writes the final frame.
     pub(super) post_process_render_target_b: RenderTarget,
+    /// The same pair at [`HDR_FORMAT`](crate::post_processing::HDR_FORMAT), for a
+    /// chain that runs on the film before bloom and the tonemap rather than on the
+    /// LDR image after them. Made the first frame such a chain is passed, so a run
+    /// that never passes one allocates neither.
+    pub(super) film_render_targets: Option<(RenderTarget, RenderTarget)>,
     /// Offscreen render target used when the window is hidden, so `snap` and
     /// recording work without a presentable surface. Created on first use.
     pub(super) offscreen_output_target: Option<RenderTarget>,
@@ -337,6 +353,27 @@ impl Window {
         self.canvas.set_fullscreen(fullscreen);
     }
 
+    /// Enters exclusive fullscreen, the current monitor's largest video mode
+    /// at its highest refresh rate, or leaves fullscreen entirely: passing
+    /// `false` also leaves the borderless fullscreen of [`Self::set_fullscreen`].
+    ///
+    /// # Platform-specific
+    /// Where the platform offers no video modes, as on the web, this is
+    /// borderless fullscreen.
+    pub fn set_exclusive_fullscreen(&self, exclusive: bool) {
+        self.canvas.set_exclusive_fullscreen(exclusive);
+    }
+
+    /// Maximizes the window, or restores it.
+    pub fn set_maximized(&self, maximized: bool) {
+        self.canvas.set_maximized(maximized);
+    }
+
+    /// Whether the window is currently maximized.
+    pub fn is_maximized(&self) -> bool {
+        self.canvas.is_maximized()
+    }
+
     /// Shows or hides the platform's on-screen keyboard.
     ///
     /// # Platform-specific
@@ -358,6 +395,34 @@ impl Window {
     /// the canvas.
     pub fn dropped_files(&self) -> Vec<std::path::PathBuf> {
         self.canvas.take_dropped_files()
+    }
+
+    /// This frame's composed text, preedits and commits in order; empty until
+    /// [`Self::set_ime_allowed`]. egui's fields hear the same events on their own.
+    pub fn ime_events(&self) -> Vec<crate::event::ImeEvent> {
+        self.ime_events.borrow().clone()
+    }
+
+    /// Let the platform compose text through its input method.
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        self.canvas.set_ime_allowed(allowed);
+    }
+
+    /// `[left, top, right, bottom]` insets in pixels; zero everywhere but iOS.
+    pub fn safe_area(&self) -> [f32; 4] {
+        self.canvas.safe_area()
+    }
+
+    /// How many pixels of the window the on-screen keyboard covers, from the
+    /// bottom; zero with it down, and zero everywhere but Android and iOS.
+    pub fn keyboard_height(&self) -> f32 {
+        self.canvas.keyboard_height()
+    }
+
+    /// How much larger than standard the reader asked their text to be: iOS
+    /// Dynamic Type today, and 1.0 where the platform has not been asked.
+    pub fn text_scale(&self) -> f32 {
+        self.canvas.text_scale()
     }
 
     /// Sets the cursor position in window coordinates.
@@ -841,6 +906,15 @@ impl Window {
         self.hdr.settings_mut().bloom_enabled = enabled;
     }
 
+    /// Compile the finishing passes the current settings will draw with.
+    ///
+    /// Bloom and auto-exposure are built on demand, so call this after writing
+    /// the settings: a frame that waits for a shader compiler is a frame
+    /// somebody sees, and this puts that wait where the settings changed.
+    pub fn prepare_post(&self) {
+        self.hdr.prepare();
+    }
+
     /// Sets the bloom brightness threshold and additive intensity.
     pub fn set_bloom(&mut self, threshold: f32, intensity: f32) {
         let s = self.hdr.settings_mut();
@@ -1030,6 +1104,8 @@ impl Window {
             canvas,
             events: Rc::new(event_receive),
             unhandled_events: Rc::new(RefCell::new(Vec::new())),
+            ime_events: Rc::new(RefCell::new(Vec::new())),
+            screen_2d: None,
             ambient_intensity: 0.2,
             ambient_color: crate::color::WHITE,
             fog: crate::light::Fog::default(),
@@ -1060,6 +1136,7 @@ impl Window {
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             post_process_render_target_b: framebuffer_manager
                 .new_render_target(width, height, false),
+            film_render_targets: None,
             offscreen_output_target: None,
             aov_renderer: None,
             hidden: hide,
@@ -1116,6 +1193,8 @@ impl Window {
             canvas,
             events: Rc::new(event_receive),
             unhandled_events: Rc::new(RefCell::new(Vec::new())),
+            ime_events: Rc::new(RefCell::new(Vec::new())),
+            screen_2d: None,
             ambient_intensity: 0.2,
             ambient_color: crate::color::WHITE,
             fog: crate::light::Fog::default(),
@@ -1147,6 +1226,7 @@ impl Window {
             post_process_render_target: framebuffer_manager.new_render_target(width, height, true),
             post_process_render_target_b: framebuffer_manager
                 .new_render_target(width, height, false),
+            film_render_targets: None,
             offscreen_output_target: None,
             aov_renderer: None,
             // A headless window has no surface; always render off-screen.

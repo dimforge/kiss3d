@@ -100,6 +100,17 @@ impl Canvas {
         self.canvas.poll_events()
     }
 
+    /// Wait for an event, a [`super::Waker`] or `timeout`, then poll; see
+    /// [`WgpuCanvas::wait_events`].
+    pub fn wait_events(&mut self, timeout: Option<std::time::Duration>) -> bool {
+        self.canvas.wait_events(timeout)
+    }
+
+    /// What ends a [`Self::wait_events`] from another thread.
+    pub fn waker(&self) -> Option<super::Waker> {
+        self.canvas.waker()
+    }
+
     /// Resizes the canvas render targets.
     pub fn resize(&mut self, width: u32, height: u32) {
         self.canvas.resize(width, height)
@@ -189,6 +200,21 @@ impl Canvas {
         self.canvas.set_fullscreen(fullscreen);
     }
 
+    /// Enter or leave exclusive fullscreen on the current monitor.
+    pub fn set_exclusive_fullscreen(&self, exclusive: bool) {
+        self.canvas.set_exclusive_fullscreen(exclusive);
+    }
+
+    /// Maximize the window, or restore it.
+    pub fn set_maximized(&self, maximized: bool) {
+        self.canvas.set_maximized(maximized);
+    }
+
+    /// Whether the window is currently maximized.
+    pub fn is_maximized(&self) -> bool {
+        self.canvas.is_maximized()
+    }
+
     /// Show or hide the platform's on-screen keyboard (mobile; no-op elsewhere).
     pub fn set_keyboard_visible(&self, visible: bool) {
         self.canvas.set_keyboard_visible(visible);
@@ -204,6 +230,31 @@ impl Canvas {
         self.canvas.take_dropped_files()
     }
 
+    /// Composed text the input method reported since the last call.
+    pub fn take_ime_events(&self) -> Vec<crate::event::ImeEvent> {
+        self.canvas.take_ime_events()
+    }
+
+    /// Let the platform compose text through its input method.
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        self.canvas.set_ime_allowed(allowed);
+    }
+
+    /// The display's insets in pixels as `[left, top, right, bottom]`.
+    pub fn safe_area(&self) -> [f32; 4] {
+        self.canvas.safe_area()
+    }
+
+    /// The reader's own preferred text size, as a multiplier of standard.
+    pub fn text_scale(&self) -> f32 {
+        self.canvas.text_scale()
+    }
+
+    /// Pixels of the window the on-screen keyboard covers, from the bottom.
+    pub fn keyboard_height(&self) -> f32 {
+        self.canvas.keyboard_height()
+    }
+
     /// Set the cursor position.
     pub fn set_cursor_position(&self, x: f64, y: f64) {
         self.canvas.set_cursor_position(x, y);
@@ -212,6 +263,11 @@ impl Canvas {
     /// Toggle the cursor visibility.
     pub fn hide_cursor(&self, hide: bool) {
         self.canvas.hide_cursor(hide);
+    }
+
+    /// Set the shape the pointer takes over this window.
+    pub fn set_cursor_icon(&self, icon: winit::window::CursorIcon) {
+        self.canvas.set_cursor_icon(icon);
     }
 
     /// Hide the window.

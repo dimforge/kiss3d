@@ -297,6 +297,11 @@ pub struct RenderContext2d {
     pub viewport_width: u32,
     /// The viewport height in pixels.
     pub viewport_height: u32,
+    /// The frame so far, a single-sample copy of the HDR film refreshed just
+    /// before each [`Material2d::reads_screen`] object draws; else `None`.
+    pub screen: Option<wgpu::TextureView>,
+    /// Bumped when `screen` is a new texture, so bind groups over it rebuild.
+    pub screen_generation: u64,
 }
 
 /// Context for 2D renderers that need to create their own render passes.
@@ -329,6 +334,12 @@ pub struct RenderContext2dEncoder<'a> {
 pub trait Material2d {
     /// Creates per-object GPU data for this material.
     fn create_gpu_data(&self) -> Box<dyn GpuData>;
+
+    /// Whether this material samples [`RenderContext2d::screen`]; the 2D pass
+    /// is split around each object that does, the film copied before it.
+    fn reads_screen(&self) -> bool {
+        false
+    }
 
     /// Called at the start of each frame before any objects are prepared.
     ///

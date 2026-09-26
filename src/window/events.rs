@@ -42,6 +42,22 @@ impl Window {
         EventManager::new(self.events.clone(), self.unhandled_events.clone())
     }
 
+    /// Sleeps until the window system has an event, a [`Waker`] from
+    /// [`Self::waker`] fires, or `timeout` passes, and queues what arrived for
+    /// [`Self::events`] without drawing. `None` waits for as long as it takes.
+    /// Answers whether anything arrived. The web and iOS cannot block here.
+    ///
+    /// [`Waker`]: crate::window::Waker
+    pub fn wait_events(&mut self, timeout: Option<std::time::Duration>) -> bool {
+        self.canvas.wait_events(timeout)
+    }
+
+    /// What ends a [`Self::wait_events`] from another thread; `None` where
+    /// the platform owns the loop.
+    pub fn waker(&self) -> Option<crate::window::Waker> {
+        self.canvas.waker()
+    }
+
     /// Gets the current state of a keyboard key.
     ///
     /// # Arguments
@@ -94,6 +110,33 @@ impl Window {
 
         unhandled_events.borrow_mut().clear();
         self.canvas.poll_events();
+        let ime = self.canvas.take_ime_events();
+        #[cfg(feature = "egui")]
+        for event in &ime {
+            use crate::event::ImeEvent;
+            // egui counts the caret in characters where winit counts bytes.
+            let event = match event {
+                ImeEvent::Preedit { text, cursor } => egui::ImeEvent::Preedit {
+                    text: text.clone(),
+                    active_range_chars: cursor.map(|(start, end)| {
+                        // Counting the chars that start before the byte index
+                        // rather than slicing at it: an index that is not a
+                        // char boundary rounds down instead of panicking.
+                        let chars = |byte: usize| {
+                            text.char_indices().take_while(|(at, _)| *at < byte).count()
+                        };
+                        chars(start)..chars(end)
+                    }),
+                },
+                ImeEvent::Commit(text) => egui::ImeEvent::Commit(text.clone()),
+                ImeEvent::Enabled | ImeEvent::Disabled => continue,
+            };
+            self.egui_context
+                .raw_input
+                .events
+                .push(egui::Event::Ime(event));
+        }
+        *self.ime_events.borrow_mut() = ime;
     }
 
     pub(crate) fn handle_event(

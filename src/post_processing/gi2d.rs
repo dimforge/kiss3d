@@ -29,7 +29,9 @@
 use crate::camera::Camera2d;
 use crate::color::Color;
 use crate::context::Context;
-use crate::post_processing::post_processing_effect::{PostProcessingContext, PostProcessingEffect};
+use crate::post_processing::post_processing_effect::{
+    FormatPipelines, PostProcessingContext, PostProcessingEffect,
+};
 use crate::post_processing::HDR_FORMAT;
 use crate::resource::RenderTarget;
 use bytemuck::{Pod, Zeroable};
@@ -188,7 +190,7 @@ impl GiTexture {
 /// Screen-space 2D global-illumination post-processing effect (see the [module docs](crate::post_processing)).
 pub struct Gi2d {
     field_pipeline: wgpu::RenderPipeline,
-    composite_pipeline: wgpu::RenderPipeline,
+    composite_pipeline: FormatPipelines,
     jfa_seed_pipeline: wgpu::RenderPipeline,
     jfa_step_pipeline: wgpu::RenderPipeline,
     jfa_resolve_pipeline: wgpu::RenderPipeline,
@@ -220,7 +222,7 @@ pub struct Gi2d {
 
     // Radiance-cascade resources.
     cascade_pipeline: wgpu::RenderPipeline,
-    cascade_composite_pipeline: wgpu::RenderPipeline,
+    cascade_composite_pipeline: FormatPipelines,
     cascade: [GiTexture; 2],
     /// Current allocated size of the (decoupled) cascade textures.
     cascade_tex_size: (u32, u32),
@@ -379,58 +381,12 @@ impl Gi2d {
             ),
         );
 
-        let vertex_buffer_layout = Some(wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &[wgpu::VertexAttribute {
-                offset: 0,
-                shader_location: 0,
-                format: wgpu::VertexFormat::Float32x2,
-            }],
-        });
-
         let make_pipeline = |label: &str,
                              layout: &wgpu::PipelineLayout,
                              shader: &wgpu::ShaderModule,
                              fs_entry: &str,
                              format: wgpu::TextureFormat| {
-            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(label),
-                layout: Some(layout),
-                vertex: wgpu::VertexState {
-                    module: shader,
-                    entry_point: Some("vs_main"),
-                    buffers: std::slice::from_ref(&vertex_buffer_layout),
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: shader,
-                    entry_point: Some(fs_entry),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                    compilation_options: Default::default(),
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleStrip,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: None,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    unclipped_depth: false,
-                    conservative: false,
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState {
-                    count: 1,
-                    mask: !0,
-                    alpha_to_coverage_enabled: false,
-                },
-                multiview_mask: None,
-                cache: None,
-            })
+            make_gi2d_pipeline(label, layout, shader, fs_entry, format)
         };
 
         let field_pipeline = make_pipeline(
@@ -440,13 +396,17 @@ impl Gi2d {
             "fs_main",
             HDR_FORMAT,
         );
-        let composite_pipeline = make_pipeline(
-            "gi2d_composite_pipeline",
-            &composite_layout,
-            &composite_shader,
-            "fs_main",
-            ctxt.surface_format,
-        );
+        // Written into whatever chain the effect is handed to: the LDR one
+        // takes the surface format, the film one takes `HDR_FORMAT`.
+        let composite_pipeline = FormatPipelines::new(move |format| {
+            make_gi2d_pipeline(
+                "gi2d_composite_pipeline",
+                &composite_layout,
+                &composite_shader,
+                "fs_main",
+                format,
+            )
+        });
         let jfa_seed_pipeline = make_pipeline(
             "gi2d_jfa_seed_pipeline",
             &jfa_seed_layout,
@@ -511,13 +471,15 @@ impl Gi2d {
             "fs_main",
             HDR_FORMAT,
         );
-        let cascade_composite_pipeline = make_pipeline(
-            "gi2d_cascade_composite_pipeline",
-            &cascade_composite_layout,
-            &cascade_composite_shader,
-            "fs_main",
-            ctxt.surface_format,
-        );
+        let cascade_composite_pipeline = FormatPipelines::new(move |format| {
+            make_gi2d_pipeline(
+                "gi2d_cascade_composite_pipeline",
+                &cascade_composite_layout,
+                &cascade_composite_shader,
+                "fs_main",
+                format,
+            )
+        });
 
         // Per-level cascade uniform pool (filled each frame for the levels in use).
         let mut cascade_param_buffers = Vec::with_capacity(MAX_CASCADES);
@@ -1006,6 +968,7 @@ impl Gi2d {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         output_view: &wgpu::TextureView,
+        output_format: wgpu::TextureFormat,
         scene_view: &wgpu::TextureView,
         scene_sampler: &wgpu::Sampler,
     ) {
@@ -1119,11 +1082,12 @@ impl Gi2d {
             ],
         });
         let c0_bg = self.tex_only_bind_group(&self.cascade[0].view);
+        let composite = self.cascade_composite_pipeline.get(output_format);
         self.fullscreen_pass(
             encoder,
             "gi2d_cascade_composite_pass",
             output_view,
-            &self.cascade_composite_pipeline,
+            &composite,
             &[&scene_bg, &c0_bg, &self.cascade_composite_bind_group],
         );
     }
@@ -1158,6 +1122,7 @@ impl PostProcessingEffect for Gi2d {
             self.render_cascades(
                 context.encoder,
                 context.output_view,
+                context.output_format,
                 scene_view,
                 scene_sampler,
             );
@@ -1209,11 +1174,12 @@ impl PostProcessingEffect for Gi2d {
             ],
         });
         let gi_bind_group = self.tex_bind_group(&self.history[next].view, "gi2d_field_bg");
+        let composite = self.composite_pipeline.get(context.output_format);
         self.fullscreen_pass(
             context.encoder,
             "gi2d_composite_pass",
             context.output_view,
-            &self.composite_pipeline,
+            &composite,
             &[
                 &scene_bind_group,
                 &gi_bind_group,
@@ -1227,4 +1193,62 @@ impl PostProcessingEffect for Gi2d {
         self.history_valid = true;
         self.frame_index = self.frame_index.wrapping_add(1);
     }
+}
+
+/// One of the fixed-function full-screen pipelines this effect runs, drawing
+/// `fs_entry` into an attachment of `format`.
+fn make_gi2d_pipeline(
+    label: &str,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    fs_entry: &str,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    let ctxt = Context::get();
+    let vertex_buffer_layout = Some(wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<QuadVertex>() as wgpu::BufferAddress,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &[wgpu::VertexAttribute {
+            offset: 0,
+            shader_location: 0,
+            format: wgpu::VertexFormat::Float32x2,
+        }],
+    });
+    ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_main"),
+            buffers: std::slice::from_ref(&vertex_buffer_layout),
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fs_entry),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleStrip,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: None,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            unclipped_depth: false,
+            conservative: false,
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState {
+            count: 1,
+            mask: !0,
+            alpha_to_coverage_enabled: false,
+        },
+        multiview_mask: None,
+        cache: None,
+    })
 }

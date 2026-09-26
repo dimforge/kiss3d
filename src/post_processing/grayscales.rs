@@ -1,7 +1,9 @@
 //! Post-processing effect to draw everything in grey-levels.
 
 use crate::context::Context;
-use crate::post_processing::post_processing_effect::{PostProcessingContext, PostProcessingEffect};
+use crate::post_processing::post_processing_effect::{
+    FormatPipelines, PostProcessingContext, PostProcessingEffect,
+};
 use crate::resource::RenderTarget;
 use bytemuck::{Pod, Zeroable};
 
@@ -14,7 +16,7 @@ struct QuadVertex {
 
 /// Post processing effect which turns everything to gray scales.
 pub struct Grayscales {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: FormatPipelines,
     bind_group_layout: wgpu::BindGroupLayout,
     vertex_buffer: wgpu::Buffer,
 }
@@ -79,42 +81,45 @@ impl Grayscales {
             }],
         };
 
-        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("grayscales_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_buffer_layout)],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: ctxt.surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+        let pipeline = FormatPipelines::new(move |format| {
+            let ctxt = Context::get();
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("grayscales_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(vertex_buffer_layout.clone())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // Create full-screen quad vertices
@@ -151,6 +156,7 @@ impl PostProcessingEffect for Grayscales {
     fn update(&mut self, _: f32, _: f32, _: f32, _: f32, _: f32) {}
 
     fn draw(&mut self, target: &RenderTarget, context: &mut PostProcessingContext) {
+        let pipeline = self.pipeline.get(context.output_format);
         let ctxt = Context::get();
 
         // Get the source texture and sampler from the render target
@@ -196,7 +202,7 @@ impl PostProcessingEffect for Grayscales {
                     multiview_mask: None,
                 });
 
-            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, &bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
             render_pass.draw(0..4, 0..1);

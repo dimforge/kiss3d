@@ -16,7 +16,9 @@ pub use crate::resource::mesh3d::{GpuMesh3d, MorphTargets, SkinVertexData};
 pub use crate::resource::mesh_manager2d::MeshManager2d;
 pub use crate::resource::mesh_manager3d::MeshManager3d;
 pub use crate::resource::pipeline_cache::{multisample_state, PipelineCache};
-pub use crate::resource::texture_manager::{Texture, TextureManager, TextureWrapping};
+pub use crate::resource::texture_manager::{
+    Texture, TextureManager, TextureSampling, TextureWrapping,
+};
 
 mod dynamic_buffer;
 mod framebuffer_manager;

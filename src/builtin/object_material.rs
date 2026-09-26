@@ -475,11 +475,11 @@ pub struct ObjectMaterial {
     /// backend has no spare bind group (web / WebGL2) — deform then falls back to the
     /// plain path.
     deform_pipeline_layout: Option<wgpu::PipelineLayout>,
-    /// Opaque-surface pipeline builder: `(layout, module, _skinned, cull, label, samples)`.
+    /// Opaque-surface pipeline builder: `(layout, module, vertex_colors, cull, label, samples)`.
     build_opaque: SurfacePipelineBuilder,
     /// Weighted-blended OIT pipeline builder (same signature as `build_opaque`).
     build_oit: SurfacePipelineBuilder,
-    /// Depth + view-position prepass pipeline builder: `(layout, module, _skinned, samples)`.
+    /// Depth + view-position prepass pipeline builder: `(layout, module, vertex_colors, samples)`.
     build_prepass: PrepassPipelineBuilder,
     /// WESL-compiled shader modules, keyed by feature mask (lazily compiled, cached).
     shader_modules: RefCell<HashMap<ShaderFeatures, Rc<wgpu::ShaderModule>>>,
@@ -607,8 +607,9 @@ pub struct ObjectMaterial {
 }
 
 /// Builds an opaque-surface or OIT pipeline from a compiled module:
-/// `(pipeline_layout, shader_module, _skinned, cull_mode, label, sample_count)`.
-/// Captures nothing; the deform variant differs only in the module + layout passed.
+/// `(pipeline_layout, shader_module, vertex_colors, cull_mode, label, sample_count)`.
+/// Captures nothing; the deform variant differs only in the module + layout passed,
+/// while `vertex_colors` adds the per-vertex colour buffer to the vertex layout.
 type SurfacePipelineBuilder = Rc<
     dyn Fn(
         &wgpu::PipelineLayout,
@@ -621,7 +622,7 @@ type SurfacePipelineBuilder = Rc<
 >;
 
 /// Builds the depth + view-position prepass pipeline:
-/// `(pipeline_layout, shader_module, _skinned, sample_count)`.
+/// `(pipeline_layout, shader_module, vertex_colors, sample_count)`.
 type PrepassPipelineBuilder =
     Rc<dyn Fn(&wgpu::PipelineLayout, &wgpu::ShaderModule, bool, u32) -> wgpu::RenderPipeline>;
 
@@ -665,10 +666,12 @@ impl ShaderFeatures {
     const ANISOTROPY: u32 = 1 << 13;
     const TRANSMISSION: u32 = 1 << 14;
     const REFLECTOR: u32 = 1 << 15;
+    // Per-mesh geometry.
+    const VERTEX_COLORS: u32 = 1 << 16;
 
     /// `(WESL feature name, bit)` — names MUST match the `@if(...)` flags in
     /// `default.wgsl`.
-    const TABLE: [(&'static str, u32); 16] = [
+    const TABLE: [(&'static str, u32); 17] = [
         ("deform", Self::DEFORM),
         ("clustered", Self::CLUSTERED),
         ("shadows", Self::SHADOWS),
@@ -685,6 +688,7 @@ impl ShaderFeatures {
         ("anisotropy", Self::ANISOTROPY),
         ("transmission", Self::TRANSMISSION),
         ("reflector", Self::REFLECTOR),
+        ("vertex_colors", Self::VERTEX_COLORS),
     ];
 
     #[inline]
@@ -750,7 +754,9 @@ enum PipelineKind {
 ///
 /// We use separate buffers for instance data (positions, colors, deformations)
 /// instead of interleaving them, to avoid per-frame data conversion overhead.
-fn surface_vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>; 6] {
+fn surface_vertex_buffer_layouts(
+    vertex_colors: bool,
+) -> [Option<wgpu::VertexBufferLayout<'static>>; 7] {
     // Buffer 0: Vertex positions
     const POSITIONS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
         offset: 0,
@@ -779,6 +785,13 @@ fn surface_vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>
     const INST_COLOR: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
         offset: 0,
         shader_location: 4,
+        format: wgpu::VertexFormat::Float32x4,
+    }];
+    // Buffer 6: Per-vertex colors, only on a mesh that carries them; the slot is
+    // left empty otherwise rather than costing every mesh a white buffer.
+    const COLORS: [wgpu::VertexAttribute; 1] = [wgpu::VertexAttribute {
+        offset: 0,
+        shader_location: 8,
         format: wgpu::VertexFormat::Float32x4,
     }];
     // Buffer 5: Instance deformations (3x Vector3<f32> = 3 columns of a 3x3 matrix),
@@ -831,6 +844,11 @@ fn surface_vertex_buffer_layouts() -> [Option<wgpu::VertexBufferLayout<'static>>
             array_stride: std::mem::size_of::<[f32; 9]>() as wgpu::BufferAddress,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &INST_DEF,
+        }),
+        vertex_colors.then_some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<[f32; 4]>() as wgpu::BufferAddress,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &COLORS,
         }),
     ]
 }
@@ -1234,24 +1252,24 @@ impl ObjectMaterial {
         });
 
         // Shared opaque-surface pipeline builder, parameterized by the pipeline
-        // layout and the (WESL-specialized) shader module. The `skinned` flag is
-        // vestigial — deform data is read from group-4 storage by index, so the
-        // vertex layout is identical; the deform variant differs only in the module +
-        // layout passed. Stored on the material and invoked lazily per
+        // layout and the (WESL-specialized) shader module. Deform data is read from
+        // group-4 storage by index, so the deform variant differs only in the module
+        // + layout passed; `vertex_colors` is the one flag that changes the vertex
+        // layout. Stored on the material and invoked lazily per
         // `(features, sample_count)` by `surface_pipeline`.
         let build_opaque = std::rc::Rc::new(
             |layout: &wgpu::PipelineLayout,
              shader: &wgpu::ShaderModule,
-             skinned: bool,
+             vertex_colors: bool,
              cull_mode: Option<wgpu::Face>,
              label: &'static str,
              sample_count: u32| {
                 let ctxt = Context::get();
                 // The deformed pipelines share the plain vertex layout: skin
                 // joints/weights and morph deltas come from group-4 storage buffers,
-                // not vertex attributes. `skinned` only selects the shader + layout.
-                let _ = skinned;
-                let plain_layouts = surface_vertex_buffer_layouts();
+                // not vertex attributes, so the deform variant only selects the
+                // shader + layout. Per-vertex colours do add a buffer.
+                let plain_layouts = surface_vertex_buffer_layouts(vertex_colors);
                 let buffers: &[Option<wgpu::VertexBufferLayout>] = &plain_layouts;
                 ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -1304,16 +1322,16 @@ impl ObjectMaterial {
         let build_oit = std::rc::Rc::new(
             |layout: &wgpu::PipelineLayout,
              shader: &wgpu::ShaderModule,
-             skinned: bool,
+             vertex_colors: bool,
              cull_mode: Option<wgpu::Face>,
              label: &'static str,
              sample_count: u32| {
                 let ctxt = Context::get();
                 // The deformed pipelines share the plain vertex layout: skin
                 // joints/weights and morph deltas come from group-4 storage buffers,
-                // not vertex attributes. `skinned` only selects the shader + layout.
-                let _ = skinned;
-                let plain_layouts = surface_vertex_buffer_layouts();
+                // not vertex attributes, so the deform variant only selects the
+                // shader + layout. Per-vertex colours do add a buffer.
+                let plain_layouts = surface_vertex_buffer_layouts(vertex_colors);
                 let buffers: &[Option<wgpu::VertexBufferLayout>] = &plain_layouts;
                 ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -1393,14 +1411,14 @@ impl ObjectMaterial {
         let build_prepass = std::rc::Rc::new(
             |layout: &wgpu::PipelineLayout,
              shader: &wgpu::ShaderModule,
-             skinned: bool,
+             vertex_colors: bool,
              sample_count: u32| {
                 let ctxt = Context::get();
                 // The deformed pipelines share the plain vertex layout: skin
                 // joints/weights and morph deltas come from group-4 storage buffers,
-                // not vertex attributes. `skinned` only selects the shader + layout.
-                let _ = skinned;
-                let plain_layouts = surface_vertex_buffer_layouts();
+                // not vertex attributes, so the deform variant only selects the
+                // shader + layout. Per-vertex colours do add a buffer.
+                let plain_layouts = surface_vertex_buffer_layouts(vertex_colors);
                 let buffers: &[Option<wgpu::VertexBufferLayout>] = &plain_layouts;
                 ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some("object_material_prepass_pipeline"),
@@ -2173,11 +2191,14 @@ impl ObjectMaterial {
         } else {
             &self.pipeline_layout
         };
+        // The prepass reaches here with its features already collapsed by
+        // `prepass_key`, so it never asks for the colour slot.
+        let vertex_colors = features.has(ShaderFeatures::VERTEX_COLORS);
         let pipeline = match kind {
             PipelineKind::OpaqueCull => (self.build_opaque)(
                 layout,
                 &module,
-                false,
+                vertex_colors,
                 Some(wgpu::Face::Back),
                 "object_material_pipeline_cull",
                 sample_count,
@@ -2185,7 +2206,7 @@ impl ObjectMaterial {
             PipelineKind::OpaqueNoCull => (self.build_opaque)(
                 layout,
                 &module,
-                false,
+                vertex_colors,
                 None,
                 "object_material_pipeline_no_cull",
                 sample_count,
@@ -2193,7 +2214,7 @@ impl ObjectMaterial {
             PipelineKind::OitCull => (self.build_oit)(
                 layout,
                 &module,
-                false,
+                vertex_colors,
                 Some(wgpu::Face::Back),
                 "object_material_oit_pipeline_cull",
                 sample_count,
@@ -2201,12 +2222,14 @@ impl ObjectMaterial {
             PipelineKind::OitNoCull => (self.build_oit)(
                 layout,
                 &module,
-                false,
+                vertex_colors,
                 None,
                 "object_material_oit_pipeline_no_cull",
                 sample_count,
             ),
-            PipelineKind::Prepass => (self.build_prepass)(layout, &module, false, sample_count),
+            PipelineKind::Prepass => {
+                (self.build_prepass)(layout, &module, vertex_colors, sample_count)
+            }
         };
         let pipeline = Rc::new(pipeline);
         self.surface_pipelines
@@ -2254,6 +2277,7 @@ impl ObjectMaterial {
         data: &ObjectData3d,
         use_deform: bool,
         shadows_active: bool,
+        vertex_colors: bool,
     ) -> ShaderFeatures {
         let f = ShaderFeatures::default()
             // Structural / capability.
@@ -2278,6 +2302,7 @@ impl ObjectMaterial {
             .with(ShaderFeatures::ANISOTROPY, data.anisotropy() != 0.0)
             .with(ShaderFeatures::TRANSMISSION, data.transmission() > 0.0)
             .with(ShaderFeatures::REFLECTOR, data.reflector().is_some())
+            .with(ShaderFeatures::VERTEX_COLORS, vertex_colors)
     }
 
     /// Builds the combined material-texture bind group (group 2): albedo at
@@ -3140,6 +3165,10 @@ impl Material3d for ObjectMaterial {
         mesh.normals().write().unwrap().load_to_gpu();
         mesh.faces().write().unwrap().load_to_gpu();
 
+        // Per-vertex colours, on the meshes that carry them; the shader variant
+        // and the vertex layout follow whether this is `Some`.
+        let colors_buf = mesh.colors_buffer();
+
         let coords_buffer = mesh.coords().read().unwrap();
         let uvs_buffer = mesh.uvs().read().unwrap();
         let normals_buffer = mesh.normals().read().unwrap();
@@ -3270,7 +3299,8 @@ impl Material3d for ObjectMaterial {
                 (crate::resource::RenderPhase::Transmission, false)
                 | (crate::resource::RenderPhase::Opaque, false) => PipelineKind::OpaqueNoCull,
             };
-            let mut features = self.object_features(data, use_deform, shadows_active);
+            let mut features =
+                self.object_features(data, use_deform, shadows_active, colors_buf.is_some());
             // The prepass ignores all shading features; collapse to the structural key
             // so it stays a single module per deform-ness.
             if kind == PipelineKind::Prepass {
@@ -3305,6 +3335,13 @@ impl Material3d for ObjectMaterial {
             render_pass.set_vertex_buffer(3, inst_positions_buf.slice(..));
             render_pass.set_vertex_buffer(4, inst_colors_buf.slice(..));
             render_pass.set_vertex_buffer(5, inst_deformations_buf.slice(..));
+
+            // Slot 6 exists only on the variant built for a mesh that carries
+            // per-vertex colours; the prepass collapses that feature away and
+            // ignores the slot.
+            if let Some(colors_buf) = &colors_buf {
+                render_pass.set_vertex_buffer(6, colors_buf.slice(..));
+            }
 
             render_pass.set_index_buffer(faces_buf.slice(..), VERTEX_INDEX_FORMAT);
 

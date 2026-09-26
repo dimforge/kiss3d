@@ -205,6 +205,13 @@ fn build_primitive(prim: &gltf::Primitive, buffers: &[gltf::buffer::Data]) -> Op
 
     let mut mesh = GpuMesh3d::new(positions, faces, normals, uvs, false);
 
+    // COLOR_0: an optional per-vertex tint the material multiplies into its base
+    // colour. glTF stores it as RGB or RGBA, in u8, u16 or f32; `into_rgba_f32`
+    // normalizes all of that, opaque alpha included.
+    if let Some(colors) = reader.read_colors(0) {
+        mesh.set_colors(colors.into_rgba_f32().collect());
+    }
+
     // Skinning attributes: present together on skinned primitives. JOINTS_0 is
     // widened from u8/u16 to u32 so a single vertex format covers every mesh.
     if let (Some(joints), Some(weights)) = (reader.read_joints(0), reader.read_weights(0)) {

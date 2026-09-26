@@ -107,6 +107,10 @@ pub extern crate egui;
 
 pub use glamx;
 
+// The material traits are written in wgpu types, so an implementor must name
+// them: re-exported so it uses this crate's wgpu and cannot drift to another.
+pub use wgpu;
+
 // Re-export the procedural macro and its runtime dependencies
 pub use kiss3d_macro::main;
 

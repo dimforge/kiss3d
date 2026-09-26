@@ -7,7 +7,9 @@
 use std::f32;
 
 use crate::context::Context;
-use crate::post_processing::post_processing_effect::{PostProcessingContext, PostProcessingEffect};
+use crate::post_processing::post_processing_effect::{
+    FormatPipelines, PostProcessingContext, PostProcessingEffect,
+};
 use crate::resource::RenderTarget;
 use bytemuck::{Pod, Zeroable};
 
@@ -30,7 +32,7 @@ struct WavesUniforms {
 ///
 /// It deforms the displayed scene with a wave effect.
 pub struct Waves {
-    pipeline: wgpu::RenderPipeline,
+    pipeline: FormatPipelines,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     #[allow(dead_code)]
     uniform_bind_group_layout: wgpu::BindGroupLayout,
@@ -120,42 +122,45 @@ impl Waves {
             }],
         };
 
-        let pipeline = ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("waves_pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("vs_main"),
-                buffers: &[Some(vertex_buffer_layout)],
-                compilation_options: Default::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_main"),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: ctxt.surface_format,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-                compilation_options: Default::default(),
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleStrip,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: None,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                unclipped_depth: false,
-                conservative: false,
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState {
-                count: 1,
-                mask: !0,
-                alpha_to_coverage_enabled: false,
-            },
-            multiview_mask: None,
-            cache: None,
+        let pipeline = FormatPipelines::new(move |format| {
+            let ctxt = Context::get();
+            ctxt.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("waves_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    buffers: &[Some(vertex_buffer_layout.clone())],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleStrip,
+                    strip_index_format: None,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: None,
+                    polygon_mode: wgpu::PolygonMode::Fill,
+                    unclipped_depth: false,
+                    conservative: false,
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState {
+                    count: 1,
+                    mask: !0,
+                    alpha_to_coverage_enabled: false,
+                },
+                multiview_mask: None,
+                cache: None,
+            })
         });
 
         // Create full-screen quad vertices
@@ -215,6 +220,7 @@ impl PostProcessingEffect for Waves {
     }
 
     fn draw(&mut self, target: &RenderTarget, context: &mut PostProcessingContext) {
+        let pipeline = self.pipeline.get(context.output_format);
         let ctxt = Context::get();
 
         // Get the source texture and sampler from the render target
@@ -268,7 +274,7 @@ impl PostProcessingEffect for Waves {
                     multiview_mask: None,
                 });
 
-            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_pipeline(&pipeline);
             render_pass.set_bind_group(0, &texture_bind_group, &[]);
             render_pass.set_bind_group(1, &self.uniform_bind_group, &[]);
             render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));

@@ -51,6 +51,7 @@ struct InstanceInput {
     @location(3) inst_color: vec4<f32>,
     @location(4) inst_def_0: vec2<f32>, // deformation matrix column 0
     @location(5) inst_def_1: vec2<f32>, // deformation matrix column 1
+    @location(6) inst_uv: vec4<f32>,    // texture rectangle: min.xy, max.xy
 }
 
 // Vertex output / Fragment input
@@ -91,7 +92,7 @@ fn vs_main(vertex: VertexInput, instance: InstanceInput) -> VertexOutput {
     projected_pos.z = 0.0;
 
     out.clip_position = vec4<f32>(projected_pos, 1.0);
-    out.tex_coord = vertex.tex_coord;
+    out.tex_coord = mix(instance.inst_uv.xy, instance.inst_uv.zw, vertex.tex_coord);
     out.vert_color = instance.inst_color;
 
     return out;

@@ -10,6 +10,8 @@ pub struct EguiRenderer {
     renderer: egui_wgpu::Renderer,
     shapes: Vec<egui::epaint::ClippedShape>,
     textures_delta: egui::TexturesDelta,
+    cursor: egui::CursorIcon,
+    retain_shapes: bool,
 }
 
 impl EguiRenderer {
@@ -80,6 +82,8 @@ impl EguiRenderer {
             renderer,
             shapes: Vec::new(),
             textures_delta: Default::default(),
+            cursor: egui::CursorIcon::Default,
+            retain_shapes: false,
         }
     }
 
@@ -95,17 +99,66 @@ impl EguiRenderer {
 
     /// Begin a new frame with the given raw input.
     pub fn begin_frame(&mut self, raw_input: RawInput) {
+        // The pass about to run replaces last pass's shapes, so this is where
+        // they are dropped once they have been rendered too (see
+        // `set_retain_shapes`).
+        self.shapes.clear();
         self.egui_ctx.begin_pass(raw_input);
+    }
+
+    /// Whether a pass's shapes survive being rendered, so a frame that runs no
+    /// pass at all draws the last one again. Off by default.
+    ///
+    /// Turning it on lets a host run its UI only on the frames something
+    /// changed. It also means a UI stops being drawn only when the next pass
+    /// draws something else: a caller that shows its UI conditionally wants
+    /// this off, or has to call [`Self::clear_shapes`] when it hides it.
+    pub fn set_retain_shapes(&mut self, retain: bool) {
+        self.retain_shapes = retain;
+    }
+
+    /// Whether rendered shapes are kept for the frames that run no pass.
+    pub fn retains_shapes(&self) -> bool {
+        self.retain_shapes
+    }
+
+    /// Drops the shapes of the last pass, so a retaining host stops drawing
+    /// the UI it last built. A no-op unless [`Self::set_retain_shapes`] is on,
+    /// since otherwise rendering them already dropped them.
+    pub fn clear_shapes(&mut self) {
+        self.shapes.clear();
+    }
+
+    /// What the last pass asked the pointer to look like over the widget it
+    /// was on. `Default` whenever nothing under it asked for anything else.
+    pub fn cursor(&self) -> egui::CursorIcon {
+        self.cursor
     }
 
     /// End the current frame and prepare for rendering.
     pub fn end_frame(&mut self) {
         let output = self.egui_ctx.end_pass();
+        self.cursor = output.platform_output.cursor_icon;
         self.shapes = output.shapes;
         // Append rather than replace: if a previous frame's render was skipped
         // (e.g. failed to acquire surface texture), we must not lose its texture
         // deltas (such as the font atlas glyph upload).
         self.textures_delta.append(output.textures_delta);
+    }
+
+    /// Throw the open pass away and begin it again with `raw_input`, as
+    /// `Context::run` does when a pass asks to be discarded: its shapes are
+    /// dropped, its texture uploads kept (the font atlas may have grown), and
+    /// its pass count carried over so egui knows how many it has run.
+    pub fn rerun_frame(&mut self, raw_input: RawInput) {
+        let output = self.egui_ctx.end_pass();
+        self.textures_delta.append(output.textures_delta);
+        let passes = output.platform_output.num_completed_passes;
+        // `end_pass` took the viewport's output; `will_discard` reads the
+        // count back off the fresh one.
+        self.egui_ctx
+            .output_mut(|output| output.num_completed_passes = passes);
+        self.egui_ctx.begin_pass(raw_input);
     }
 
     /// Registers a native wgpu texture view with egui, returning a
@@ -225,7 +278,9 @@ impl EguiRenderer {
         }
 
         self.textures_delta.clear();
-        self.shapes.clear();
+        if !self.retain_shapes {
+            self.shapes.clear();
+        }
     }
 }
 

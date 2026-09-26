@@ -35,6 +35,9 @@ pub enum WindowEvent {
     CharModifiers(char, Modifiers),
     /// A touch event occurred (id, x, y, action, modifiers).
     Touch(u64, f64, f64, TouchAction, Modifiers),
+    /// The system is short of memory: what can be rebuilt is worth freeing.
+    /// Sent on iOS and Android; a desktop pages instead.
+    LowMemory,
 }
 
 use WindowEvent::*;

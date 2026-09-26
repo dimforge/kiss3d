@@ -23,6 +23,11 @@ pub struct GpuMesh3d {
     normals: Arc<RwLock<GPUVec<Vec3>>>,
     uvs: Arc<RwLock<GPUVec<Vec2>>>,
     edges: Option<Arc<RwLock<GPUVec<[VertexIndex; 2]>>>>,
+    /// Optional per-vertex colors (glTF `COLOR_0`), present only on meshes
+    /// that carry them. A material that reads them multiplies its albedo by
+    /// this; one that does not is unaffected, and a mesh without them costs
+    /// no buffer at all.
+    colors: Option<Arc<RwLock<GPUVec<[f32; 4]>>>>,
     /// Optional per-vertex skinning attributes (glTF `JOINTS_0`/`WEIGHTS_0`),
     /// present only on skinned meshes. Drives GPU vertex skinning.
     skin_vertices: Option<SkinVertexData>,
@@ -268,6 +273,7 @@ impl GpuMesh3d {
             normals,
             uvs,
             edges: None,
+            colors: None,
             skin_vertices: None,
             morph: None,
         }
@@ -282,6 +288,45 @@ impl GpuMesh3d {
     /// Whether this mesh carries per-vertex skinning attributes.
     pub fn has_skin_vertices(&self) -> bool {
         self.skin_vertices.is_some()
+    }
+
+    /// Attaches per-vertex colors to this mesh. Used by a loader for glTF's
+    /// `COLOR_0`, and by any caller that tints a mesh vertex by vertex.
+    ///
+    /// One color per vertex, in the same order as `coords`; a shorter list is
+    /// padded with opaque white so a partly-colored mesh still draws.
+    pub fn set_colors(&mut self, colors: Vec<[f32; 4]>) {
+        let vertices = self
+            .coords
+            .read()
+            .ok()
+            .and_then(|coords| coords.data().as_ref().map(Vec::len))
+            .unwrap_or(colors.len());
+        let mut colors = colors;
+        colors.resize(vertices, [1.0; 4]);
+        self.colors = Some(Arc::new(RwLock::new(GPUVec::new(
+            colors,
+            BufferType::Array,
+            AllocationType::StaticDraw,
+        ))));
+    }
+
+    /// Whether this mesh carries per-vertex colors.
+    pub fn has_colors(&self) -> bool {
+        self.colors.is_some()
+    }
+
+    /// The per-vertex colors, for a material that binds them itself.
+    pub fn colors(&self) -> Option<&Arc<RwLock<GPUVec<[f32; 4]>>>> {
+        self.colors.as_ref()
+    }
+
+    /// Returns the per-vertex color buffer, uploading it first. `None` when
+    /// the mesh carries no colors.
+    pub fn colors_buffer(&self) -> Option<wgpu::Buffer> {
+        let colors = self.colors.as_ref()?;
+        colors.write().ok()?.load_to_gpu();
+        colors.read().ok()?.buffer().cloned()
     }
 
     /// Attaches morph-target deltas to this mesh, marking it as morphable. Used by

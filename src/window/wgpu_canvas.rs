@@ -1,5 +1,7 @@
 //! Unified wgpu-based canvas for both native and web platforms.
 
+#[cfg(any(target_os = "android", test))]
+use std::cell::Cell;
 use std::cell::RefCell;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
@@ -87,6 +89,21 @@ thread_local! {
     static EVENT_LOOP: RefCell<Option<EventLoop<()>>> = const { RefCell::new(None) };
 }
 
+/// Ends a [`WgpuCanvas::wait_events`] from any thread.
+#[derive(Clone, Debug)]
+pub struct Waker(
+    #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+    winit::event_loop::EventLoopProxy<()>,
+);
+
+impl Waker {
+    /// Wake the waiting loop; harmless once it has gone.
+    pub fn wake(&self) {
+        #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+        let _ = self.0.send_event(());
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 thread_local! {
     // Shared event storage for multi-window support. Events are stored per window_id
@@ -96,6 +113,9 @@ thread_local! {
     // Files dropped onto a window, kept out of PendingEvent because WindowEvent
     // is Copy and a PathBuf is not. Drained by `take_dropped_files`.
     static DROPPED_FILES: RefCell<Vec<(winit::window::WindowId, std::path::PathBuf)>> =
+        const { RefCell::new(Vec::new()) };
+    /// Composed text per window, drained by `take_ime_events` like dropped files.
+    static IME_EVENTS: RefCell<Vec<(winit::window::WindowId, crate::event::ImeEvent)>> =
         const { RefCell::new(Vec::new()) };
 }
 
@@ -109,14 +129,56 @@ thread_local! {
 thread_local! {
     static ANDROID_APP: RefCell<Option<winit::platform::android::activity::AndroidApp>> =
         const { RefCell::new(None) };
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+thread_local! {
     static LIFECYCLE_EVENTS: RefCell<Vec<LifecycleEvent>> = const { RefCell::new(Vec::new()) };
 }
 
-#[cfg(target_os = "android")]
+/// What the application, rather than a window, was told, kept until
+/// `poll_events` hands it on.
+#[cfg(not(target_arch = "wasm32"))]
+#[cfg_attr(not(any(target_os = "android", target_os = "ios")), allow(dead_code))]
 #[derive(Clone, Copy, Debug)]
-enum LifecycleEvent {
+pub(crate) enum LifecycleEvent {
     Resumed,
     Suspended,
+    LowMemory,
+}
+
+/// Queue an application event for the next `poll_events`.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn push_lifecycle(event: LifecycleEvent) {
+    LIFECYCLE_EVENTS.with(|events| events.borrow_mut().push(event));
+}
+
+#[cfg(any(target_os = "android", test))]
+thread_local! {
+    // The least of the window NativeActivity's content rect has ever left
+    // uncovered at this window height: the navigation bar, where the system
+    // draws one over the window. Reset when the height changes, since a
+    // rotation moves the bar.
+    static ANDROID_RESTING: Cell<(i32, i32)> = const { Cell::new((0, i32::MAX)) };
+}
+
+/// The keyboard's share of what the content rect leaves uncovered.
+///
+/// NativeActivity reports one rect for everything the system covers, keyboard
+/// and navigation bar alike. The bar's share is the smallest cover seen at
+/// this height, so what is left above it is the keyboard.
+#[cfg(any(target_os = "android", test))]
+fn android_keyboard(height: i32, covered: i32) -> f32 {
+    ANDROID_RESTING.with(|resting| {
+        let (at, least) = resting.get();
+        let least = if at == height {
+            least.min(covered)
+        } else {
+            covered
+        };
+        resting.set((height, least));
+        (covered - least).max(0) as f32
+    })
 }
 
 /// Stores the `AndroidApp` handle that `android_main` received, so opening a
@@ -225,8 +287,21 @@ pub(crate) fn collect_window_event(window_id: winit::window::WindowId, event: Wi
         WinitWindowEvent::ModifiersChanged(new_modifiers) => {
             vec![PendingEvent::Modifiers(new_modifiers.state())]
         }
+        WinitWindowEvent::Focused(focused) => {
+            vec![PendingEvent::WindowEvent(WindowEvent::Focus(focused))]
+        }
+        // Minimised, covered or on another space: out of sight, as a
+        // backgrounded app is.
+        WinitWindowEvent::Occluded(hidden) => {
+            vec![PendingEvent::WindowEvent(WindowEvent::Iconify(hidden))]
+        }
         WinitWindowEvent::DroppedFile(path) => {
             DROPPED_FILES.with(|dropped| dropped.borrow_mut().push((window_id, path)));
+            vec![]
+        }
+        WinitWindowEvent::Ime(ime) => {
+            let event = crate::event::ImeEvent::from_winit(ime);
+            IME_EVENTS.with(|events| events.borrow_mut().push((window_id, event)));
             vec![]
         }
         _ => vec![],
@@ -273,8 +348,11 @@ pub struct WgpuCanvas {
     msaa_view: Option<wgpu::TextureView>,
     /// Number of samples for MSAA
     sample_count: u32,
-    /// Texture for reading back pixels (for screenshots)
-    readback_texture: wgpu::Texture,
+    /// Texture for reading back pixels (for screenshots), made on the first
+    /// capture. It is as large as the surface, and a run that never takes a
+    /// shot never pays for it; a resize drops it rather than rebuilding one
+    /// nothing has asked for.
+    readback_texture: std::cell::RefCell<Option<wgpu::Texture>>,
     /// Staging buffer reused across `read_pixels` calls, grown on demand, so
     /// per-frame capture doesn't allocate (and free) a GPU buffer every call.
     screenshot_staging: RefCell<Option<wgpu::Buffer>>,
@@ -387,44 +465,49 @@ impl WgpuCanvas {
             let document = web_window.document().expect("Failed to get document");
 
             // Try to find an existing canvas with the configured id, or create one
-            let canvas = document
+            let page_canvas = document
                 .get_element_by_id(&canvas_setup.canvas_id)
-                .and_then(|elem| elem.dyn_into::<web_sys::HtmlCanvasElement>().ok())
-                .unwrap_or_else(|| {
-                    // Create a new canvas element
-                    let canvas = document
-                        .create_element("canvas")
-                        .expect("Failed to create canvas element")
-                        .dyn_into::<web_sys::HtmlCanvasElement>()
-                        .expect("Failed to cast to HtmlCanvasElement");
-                    canvas.set_id(&canvas_setup.canvas_id);
+                .and_then(|elem| elem.dyn_into::<web_sys::HtmlCanvasElement>().ok());
+            let created = page_canvas.is_none();
+            let canvas = page_canvas.unwrap_or_else(|| {
+                // Create a new canvas element
+                let canvas = document
+                    .create_element("canvas")
+                    .expect("Failed to create canvas element")
+                    .dyn_into::<web_sys::HtmlCanvasElement>()
+                    .expect("Failed to cast to HtmlCanvasElement");
+                canvas.set_id(&canvas_setup.canvas_id);
 
-                    // Append to body
-                    if let Some(body) = document.body() {
-                        body.append_child(&canvas)
-                            .expect("Failed to append canvas to body");
+                // Append to body
+                if let Some(body) = document.body() {
+                    body.append_child(&canvas)
+                        .expect("Failed to append canvas to body");
+                }
+
+                canvas
+            });
+
+            // A canvas kiss3d had to create is the whole page: size the
+            // document around it. One the page supplied sits in a layout the
+            // page owns, which keeps its margins and its scrolling.
+            if created {
+                if let Some(html) = document.document_element() {
+                    if let Some(html) = html.dyn_ref::<web_sys::HtmlElement>() {
+                        let style = html.style();
+                        let _ = style.set_property("margin", "0");
+                        let _ = style.set_property("padding", "0");
+                        let _ = style.set_property("width", "100%");
+                        let _ = style.set_property("height", "100%");
                     }
-
-                    canvas
-                });
-
-            // Style html and body to fill 100%
-            if let Some(html) = document.document_element() {
-                if let Some(html) = html.dyn_ref::<web_sys::HtmlElement>() {
-                    let style = html.style();
+                }
+                if let Some(body) = document.body() {
+                    let style = body.style();
                     let _ = style.set_property("margin", "0");
                     let _ = style.set_property("padding", "0");
                     let _ = style.set_property("width", "100%");
                     let _ = style.set_property("height", "100%");
+                    let _ = style.set_property("overflow", "hidden");
                 }
-            }
-            if let Some(body) = document.body() {
-                let style = body.style();
-                let _ = style.set_property("margin", "0");
-                let _ = style.set_property("padding", "0");
-                let _ = style.set_property("width", "100%");
-                let _ = style.set_property("height", "100%");
-                let _ = style.set_property("overflow", "hidden");
             }
 
             let window_attrs = window_attrs.with_canvas(Some(canvas));
@@ -590,7 +673,16 @@ impl WgpuCanvas {
             width,
             height,
             present_mode,
-            alpha_mode: surface_caps.alpha_modes[0],
+            // Opaque where offered: a WebGPU canvas lists premultiplied first,
+            // and the page would show through every pixel left at alpha 0.
+            alpha_mode: if surface_caps
+                .alpha_modes
+                .contains(&wgpu::CompositeAlphaMode::Opaque)
+            {
+                wgpu::CompositeAlphaMode::Opaque
+            } else {
+                surface_caps.alpha_modes[0]
+            },
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -615,9 +707,8 @@ impl WgpuCanvas {
             (None, None)
         };
 
-        // Create readback texture for screenshots
-        let readback_texture =
-            Self::create_readback_texture(&ctxt.device, width, height, surface_format);
+        // The readback texture is built on the first capture, not here.
+        let readback_texture = std::cell::RefCell::new(None);
 
         // Set up WASM event listeners
         #[cfg(target_arch = "wasm32")]
@@ -862,6 +953,21 @@ impl WgpuCanvas {
                     pending
                         .borrow_mut()
                         .push(WindowEvent::Key(key, Action::Press, modifiers));
+                    // macOS sends no keyup for a key released while ⌘ is held,
+                    // which would leave that key pressed for good. Remember it
+                    // and release it when ⌘ itself goes up, so it still reads
+                    // as held for as long as it really is.
+                    if modifiers.contains(Modifiers::Super)
+                        && apple_platform()
+                        && !is_modifier_key(key)
+                    {
+                        SUPER_HELD_KEYS.with(|held| {
+                            let mut held = held.borrow_mut();
+                            if !held.contains(&key) {
+                                held.push(key);
+                            }
+                        });
+                    }
                     // Emit a Char event for single-character (printable) keys so
                     // egui text fields receive text input. Skip when a command
                     // modifier is held so shortcuts (e.g. Ctrl+A) don't insert text,
@@ -883,11 +989,18 @@ impl WgpuCanvas {
                 let pending = pending_events.clone();
                 let closure = Closure::<dyn FnMut(_)>::new(move |event: web_sys::KeyboardEvent| {
                     let key = translate_web_key(&event.code());
-                    pending.borrow_mut().push(WindowEvent::Key(
-                        key,
-                        Action::Release,
-                        event.modifiers(),
-                    ));
+                    let modifiers = event.modifiers();
+                    pending
+                        .borrow_mut()
+                        .push(WindowEvent::Key(key, Action::Release, modifiers));
+                    // ⌘ is up, so the keys it swallowed the keyup of are too.
+                    if !modifiers.contains(Modifiers::Super) {
+                        let swallowed = SUPER_HELD_KEYS.with(|held| held.take());
+                        let mut pending = pending.borrow_mut();
+                        for key in swallowed {
+                            pending.push(WindowEvent::Key(key, Action::Release, modifiers));
+                        }
+                    }
                 });
                 let _ = web_window
                     .add_event_listener_with_callback("keyup", closure.as_ref().unchecked_ref());
@@ -948,15 +1061,26 @@ impl WgpuCanvas {
                 ..wgpu::InstanceDescriptor::new_without_display_handle()
             });
 
-            let adapter = instance
-                .request_adapter(&wgpu::RequestAdapterOptions {
-                    power_preference: wgpu::PowerPreference::default(),
-                    compatible_surface: None,
-                    force_fallback_adapter: false,
-                    apply_limit_buckets: false,
-                })
-                .await
-                .expect("Failed to find an appropriate adapter");
+            let ask = async |fallback: bool| {
+                instance
+                    .request_adapter(&wgpu::RequestAdapterOptions {
+                        power_preference: wgpu::PowerPreference::default(),
+                        compatible_surface: None,
+                        force_fallback_adapter: fallback,
+                        apply_limit_buckets: false,
+                    })
+                    .await
+                    .ok()
+            };
+            // A machine with no GPU driver still has a software one: WARP on
+            // Windows, lavapipe where Mesa is installed. Slow, and the only
+            // way a surface-less render runs on a CI box at all.
+            let adapter = match ask(false).await {
+                Some(adapter) => adapter,
+                None => ask(true)
+                    .await
+                    .expect("Failed to find an appropriate adapter, software one included"),
+            };
 
             let required_features = device_features(&adapter, canvas_setup.required_features);
             let (device, queue) = adapter
@@ -1011,8 +1135,7 @@ impl WgpuCanvas {
         } else {
             (None, None)
         };
-        let readback_texture =
-            Self::create_readback_texture(&ctxt.device, width, height, surface_format);
+        let readback_texture = std::cell::RefCell::new(None);
 
         WgpuCanvas {
             window: None,
@@ -1101,8 +1224,8 @@ impl WgpuCanvas {
             self.msaa_view = Some(msaa_view);
         }
 
-        self.readback_texture =
-            Self::create_readback_texture(&ctxt.device, width, height, self.surface_config.format);
+        // Dropped, not rebuilt: the next capture makes one at the new size.
+        self.readback_texture.replace(None);
     }
 
     /// Changes the MSAA sample count, recreating the size-dependent attachments
@@ -1201,6 +1324,22 @@ impl WgpuCanvas {
         (texture, view)
     }
 
+    /// The readback texture, built at the surface's current size the first
+    /// time a capture asks for it. Cloning is cheap: a `wgpu::Texture` is a
+    /// handle.
+    fn readback_texture(&self) -> wgpu::Texture {
+        let mut slot = self.readback_texture.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(Self::create_readback_texture(
+                &Context::get().device,
+                self.surface_config.width,
+                self.surface_config.height,
+                self.surface_config.format,
+            ));
+        }
+        slot.as_ref().expect("just built").clone()
+    }
+
     fn create_readback_texture(
         device: &wgpu::Device,
         width: u32,
@@ -1228,10 +1367,38 @@ impl WgpuCanvas {
 
     /// Polls events from the window system.
     pub fn poll_events(&mut self) {
+        self.pump_events(Some(std::time::Duration::ZERO));
+    }
+
+    /// Blocks until the window system has an event, a [`Waker`] wakes it, or
+    /// `timeout` passes, then polls as [`Self::poll_events`] does; `None`
+    /// waits for as long as it takes. Answers whether anything arrived. The
+    /// web and iOS own their loops and cannot block here, so there it polls.
+    pub fn wait_events(&mut self, timeout: Option<std::time::Duration>) -> bool {
+        self.pump_events(timeout)
+    }
+
+    /// Something that ends a [`Self::wait_events`] from another thread.
+    /// `None` where the loop is not kiss3d's to pump.
+    pub fn waker(&self) -> Option<Waker> {
+        #[cfg(not(any(target_arch = "wasm32", target_os = "ios")))]
+        {
+            EVENT_LOOP.with(|cell| cell.borrow().as_ref().map(|el| Waker(el.create_proxy())))
+        }
+        #[cfg(any(target_arch = "wasm32", target_os = "ios"))]
+        {
+            None
+        }
+    }
+
+    fn pump_events(&mut self, timeout: Option<std::time::Duration>) -> bool {
         // A headless canvas has no window and no event loop; nothing to poll.
         if self.window.is_none() {
-            return;
+            return false;
         }
+        let mut arrived = false;
+        #[cfg(any(target_arch = "wasm32", target_os = "ios"))]
+        let _ = timeout;
 
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -1243,7 +1410,9 @@ impl WgpuCanvas {
             {
                 use winit::platform::pump_events::EventLoopExtPumpEvents;
 
-                struct EventCollector;
+                struct EventCollector {
+                    arrived: bool,
+                }
 
                 impl ApplicationHandler for EventCollector {
                     fn resumed(&mut self, _event_loop: &ActiveEventLoop) {
@@ -1263,34 +1432,51 @@ impl WgpuCanvas {
                         });
                     }
 
+                    fn memory_warning(&mut self, _event_loop: &ActiveEventLoop) {
+                        push_lifecycle(LifecycleEvent::LowMemory);
+                    }
+
                     fn window_event(
                         &mut self,
                         _event_loop: &ActiveEventLoop,
                         window_id: winit::window::WindowId,
                         event: WinitWindowEvent,
                     ) {
+                        self.arrived = true;
                         collect_window_event(window_id, event);
+                    }
+
+                    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+                        self.arrived = true;
                     }
                 }
 
-                let timeout = Some(std::time::Duration::ZERO);
                 EVENT_LOOP.with(|event_loop_cell| {
                     if let Some(ref mut event_loop) = *event_loop_cell.borrow_mut() {
-                        let mut collector = EventCollector;
+                        let mut collector = EventCollector { arrived: false };
                         let _ = event_loop.pump_app_events(timeout, &mut collector);
+                        arrived = collector.arrived;
                     }
                 });
             }
 
-            // Android: the native window lives only between Resumed and
-            // Suspended, so the surface must die and be reborn with it. While
-            // it is gone `get_current_texture` returns None and frames skip.
-            #[cfg(target_os = "android")]
+            // Told to the app as window events: an app in the background is
+            // an iconified window. Android: the native window lives only
+            // between Resumed and Suspended, so the surface must die and be
+            // reborn with it; while it is gone frames skip.
+            #[cfg(not(target_arch = "wasm32"))]
             {
                 let lifecycle: Vec<LifecycleEvent> =
                     LIFECYCLE_EVENTS.with(|events| events.borrow_mut().drain(..).collect());
                 for event in lifecycle {
+                    let _ = self.out_events.send(match event {
+                        LifecycleEvent::LowMemory => WindowEvent::LowMemory,
+                        LifecycleEvent::Suspended => WindowEvent::Iconify(true),
+                        LifecycleEvent::Resumed => WindowEvent::Iconify(false),
+                    });
+                    #[cfg(target_os = "android")]
                     match event {
+                        LifecycleEvent::LowMemory => {}
                         LifecycleEvent::Suspended => {
                             self.surface = None;
                         }
@@ -1345,6 +1531,7 @@ impl WgpuCanvas {
                     .remove(&self.window_id.unwrap())
                     .unwrap_or_default()
             });
+            arrived |= !events.is_empty();
 
             for event in events {
                 match event {
@@ -1400,13 +1587,9 @@ impl WgpuCanvas {
                             self.msaa_view = Some(new_msaa_view);
                         }
 
-                        // Recreate readback texture
-                        self.readback_texture = Self::create_readback_texture(
-                            &ctxt.device,
-                            width,
-                            height,
-                            self.surface_config.format,
-                        );
+                        // Dropped, not rebuilt: the next capture makes one
+                        // at the new size.
+                        self.readback_texture.replace(None);
                     }
                 }
             }
@@ -1453,13 +1636,9 @@ impl WgpuCanvas {
                     self.msaa_view = Some(new_msaa_view);
                 }
 
-                // Recreate readback texture
-                self.readback_texture = Self::create_readback_texture(
-                    &ctxt.device,
-                    current_size.width,
-                    current_size.height,
-                    self.surface_config.format,
-                );
+                // Dropped, not rebuilt: the next capture makes one at the
+                // new size.
+                self.readback_texture.replace(None);
 
                 let _ = self.out_events.send(WindowEvent::FramebufferSize(
                     current_size.width,
@@ -1469,6 +1648,7 @@ impl WgpuCanvas {
 
             // Process pending events from web callbacks
             let events: Vec<WindowEvent> = self.pending_events.borrow_mut().drain(..).collect();
+            arrived |= !events.is_empty();
             for event in events {
                 match &event {
                     WindowEvent::CursorPos(x, y, _) => {
@@ -1485,6 +1665,7 @@ impl WgpuCanvas {
                 let _ = self.out_events.send(event);
             }
         }
+        arrived
     }
 
     /// Gets the current surface texture for rendering.
@@ -1542,7 +1723,7 @@ impl WgpuCanvas {
                 aspect: wgpu::TextureAspect::All,
             },
             wgpu::TexelCopyTextureInfo {
-                texture: &self.readback_texture,
+                texture: &self.readback_texture(),
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -1613,7 +1794,7 @@ impl WgpuCanvas {
 
         encoder.copy_texture_to_buffer(
             wgpu::TexelCopyTextureInfo {
-                texture: &self.readback_texture,
+                texture: &self.readback_texture(),
                 mip_level: 0,
                 origin: wgpu::Origin3d {
                     x: x as u32,
@@ -1824,6 +2005,47 @@ impl WgpuCanvas {
         }
     }
 
+    /// Enter exclusive fullscreen on the current monitor, in its largest
+    /// video mode at the highest refresh rate, or leave fullscreen entirely.
+    /// Falls back to borderless where the platform offers no video modes, as
+    /// the web does.
+    pub fn set_exclusive_fullscreen(&self, exclusive: bool) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        if !exclusive {
+            window.set_fullscreen(None);
+            return;
+        }
+        let mode = window.current_monitor().and_then(|monitor| {
+            monitor.video_modes().max_by_key(|mode| {
+                let size = mode.size();
+                (
+                    u64::from(size.width) * u64::from(size.height),
+                    mode.refresh_rate_millihertz(),
+                )
+            })
+        });
+        window.set_fullscreen(Some(match mode {
+            Some(mode) => winit::window::Fullscreen::Exclusive(mode),
+            None => winit::window::Fullscreen::Borderless(None),
+        }));
+    }
+
+    /// Maximize the window, or restore it.
+    pub fn set_maximized(&self, maximized: bool) {
+        if let Some(window) = &self.window {
+            window.set_maximized(maximized);
+        }
+    }
+
+    /// Whether the window is currently maximized.
+    pub fn is_maximized(&self) -> bool {
+        self.window
+            .as_ref()
+            .is_some_and(|window| window.is_maximized())
+    }
+
     /// Whether the window is currently fullscreen.
     pub fn is_fullscreen(&self) -> bool {
         self.window
@@ -1858,6 +2080,93 @@ impl WgpuCanvas {
         Vec::new()
     }
 
+    /// Composed text since the last call; empty until `set_ime_allowed(true)`.
+    pub fn take_ime_events(&self) -> Vec<crate::event::ImeEvent> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(window) = &self.window else {
+                return Vec::new();
+            };
+            let id = window.id();
+            IME_EVENTS.with(|events| {
+                let mut events = events.borrow_mut();
+                let (mine, others): (Vec<_>, Vec<_>) =
+                    events.drain(..).partition(|(window, _)| *window == id);
+                *events = others;
+                mine.into_iter().map(|(_, event)| event).collect()
+            })
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Vec::new()
+        }
+    }
+
+    /// Let the platform compose text through its input method.
+    pub fn set_ime_allowed(&self, allowed: bool) {
+        if let Some(window) = &self.window {
+            window.set_ime_allowed(allowed);
+        }
+    }
+
+    /// How many pixels of the window the on-screen keyboard covers, from the
+    /// bottom; zero with it down, and zero everywhere but Android and iOS.
+    pub fn keyboard_height(&self) -> f32 {
+        #[cfg(target_os = "android")]
+        {
+            let Some(window) = &self.window else {
+                return 0.0;
+            };
+            let height = window.inner_size().height as i32;
+            let Some(content) =
+                ANDROID_APP.with(|app| app.borrow().as_ref().map(|a| a.content_rect()))
+            else {
+                return 0.0;
+            };
+            android_keyboard(height, height - content.bottom)
+        }
+        #[cfg(target_os = "ios")]
+        {
+            let Some(window) = &self.window else {
+                return 0.0;
+            };
+            (super::ios::keyboard_height(window) * window.scale_factor()) as f32
+        }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            0.0
+        }
+    }
+
+    /// `[left, top, right, bottom]` insets in pixels; zero everywhere but iOS.
+    pub fn safe_area(&self) -> [f32; 4] {
+        #[cfg(target_os = "ios")]
+        {
+            let Some(window) = &self.window else {
+                return [0.0; 4];
+            };
+            let scale = window.scale_factor();
+            super::ios::safe_area(window).map(|points| (points * scale) as f32)
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            [0.0; 4]
+        }
+    }
+
+    /// How much larger than standard the reader asked their text to be: iOS
+    /// Dynamic Type today, and 1.0 on every platform not yet asked.
+    pub fn text_scale(&self) -> f32 {
+        #[cfg(target_os = "ios")]
+        {
+            super::ios::text_scale()
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            1.0
+        }
+    }
+
     /// Set the cursor grabbing behaviour.
     pub fn set_cursor_grab(&self, grab: bool) {
         use winit::window::CursorGrabMode;
@@ -1882,6 +2191,13 @@ impl WgpuCanvas {
     pub fn hide_cursor(&self, hide: bool) {
         if let Some(window) = &self.window {
             window.set_cursor_visible(!hide);
+        }
+    }
+
+    /// Set the shape the pointer takes over this window.
+    pub fn set_cursor_icon(&self, icon: winit::window::CursorIcon) {
+        if let Some(window) = &self.window {
+            window.set_cursor(icon);
         }
     }
 
@@ -1978,7 +2294,9 @@ fn translate_mouse_button(button: winit::event::MouseButton) -> MouseButton {
         winit::event::MouseButton::Left => MouseButton::Button1,
         winit::event::MouseButton::Right => MouseButton::Button2,
         winit::event::MouseButton::Middle => MouseButton::Button3,
-        _ => MouseButton::Button4,
+        winit::event::MouseButton::Back => MouseButton::Button4,
+        winit::event::MouseButton::Forward => MouseButton::Button5,
+        winit::event::MouseButton::Other(_) => MouseButton::Button6,
     }
 }
 
@@ -2127,6 +2445,10 @@ fn translate_key(physical_key: PhysicalKey) -> Key {
             KeyCode::Copy => Key::Copy,
             KeyCode::Paste => Key::Paste,
             KeyCode::Cut => Key::Cut,
+            KeyCode::CapsLock => Key::Capital,
+            KeyCode::IntlRo => Key::AbntC1,
+            KeyCode::ContextMenu => Key::Apps,
+            KeyCode::NumpadEqual => Key::NumpadEquals,
             _ => Key::Unknown,
         }
     } else {
@@ -2146,7 +2468,7 @@ trait WebModifiers {
 /// Builds a mask from a `getModifierState`-style query.
 ///
 /// See <https://developer.mozilla.org/en-US/docs/Web/API/KeyboardEvent/getModifierState>.
-#[cfg(target_arch = "wasm32")]
+#[cfg(any(target_arch = "wasm32", test))]
 fn web_modifiers(state: impl Fn(&str) -> bool) -> Modifiers {
     let mut res = Modifiers::empty();
     if state("Shift") {
@@ -2205,7 +2527,42 @@ fn translate_web_mouse_button(button: i16) -> MouseButton {
     }
 }
 
+/// Whether the browser runs on an Apple platform, where ⌘ is the command
+/// key. A page can only tell from the user agent; iPadOS reports itself as a
+/// Mac, which is right, since its keyboards carry ⌘ too.
 #[cfg(target_arch = "wasm32")]
+pub(crate) fn apple_platform() -> bool {
+    thread_local! {
+        static APPLE: bool = web_sys::window()
+            .and_then(|w| w.navigator().user_agent().ok())
+            .is_some_and(|ua| ua.contains("Mac"));
+    }
+    APPLE.with(|apple| *apple)
+}
+
+thread_local! {
+    /// Keys pressed while ⌘ was held on an Apple platform. macOS never sends
+    /// their keyup, so their release is synthesized when ⌘ goes up.
+    #[cfg(target_arch = "wasm32")]
+    static SUPER_HELD_KEYS: RefCell<Vec<Key>> = const { RefCell::new(Vec::new()) };
+}
+
+#[cfg(target_arch = "wasm32")]
+fn is_modifier_key(key: Key) -> bool {
+    matches!(
+        key,
+        Key::LShift
+            | Key::RShift
+            | Key::LControl
+            | Key::RControl
+            | Key::LAlt
+            | Key::RAlt
+            | Key::LWin
+            | Key::RWin
+    )
+}
+
+#[cfg(any(target_arch = "wasm32", test))]
 fn translate_web_key(code: &str) -> Key {
     match code {
         "Digit1" => Key::Key1,
@@ -2307,6 +2664,51 @@ fn translate_web_key(code: &str) -> Key {
         "Semicolon" => Key::Semicolon,
         "Slash" => Key::Slash,
         "Tab" => Key::Tab,
+        "F13" => Key::F13,
+        "F14" => Key::F14,
+        "F15" => Key::F15,
+        "F16" => Key::F16,
+        "F17" => Key::F17,
+        "F18" => Key::F18,
+        "F19" => Key::F19,
+        "F20" => Key::F20,
+        "F21" => Key::F21,
+        "F22" => Key::F22,
+        "F23" => Key::F23,
+        "F24" => Key::F24,
+        "CapsLock" => Key::Capital,
+        "ScrollLock" => Key::Scroll,
+        "PrintScreen" => Key::Snapshot,
+        "Pause" => Key::Pause,
+        "IntlBackslash" => Key::OEM102,
+        "IntlYen" => Key::Yen,
+        "IntlRo" => Key::AbntC1,
+        "ContextMenu" => Key::Apps,
+        "NumpadEqual" => Key::NumpadEquals,
+        "NumpadComma" => Key::NumpadComma,
+        "MediaPlayPause" => Key::PlayPause,
+        "MediaStop" => Key::MediaStop,
+        "MediaTrackNext" => Key::NextTrack,
+        "MediaTrackPrevious" => Key::PrevTrack,
+        "MediaSelect" => Key::MediaSelect,
+        "AudioVolumeMute" => Key::Mute,
+        "AudioVolumeDown" => Key::VolumeDown,
+        "AudioVolumeUp" => Key::VolumeUp,
+        "BrowserBack" => Key::NavigateBackward,
+        "BrowserForward" => Key::NavigateForward,
+        "BrowserHome" => Key::WebHome,
+        "BrowserRefresh" => Key::WebRefresh,
+        "BrowserSearch" => Key::WebSearch,
+        "LaunchMail" => Key::Mail,
+        "Power" => Key::Power,
+        "Sleep" => Key::Sleep,
+        "WakeUp" => Key::Wake,
+        "KanaMode" => Key::Kana,
+        "Convert" => Key::Convert,
+        "NonConvert" => Key::NoConvert,
+        "Copy" => Key::Copy,
+        "Paste" => Key::Paste,
+        "Cut" => Key::Cut,
         _ => Key::Unknown,
     }
 }
@@ -2324,6 +2726,49 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// The navigation bar covers the window whether or not the keyboard is up,
+    /// so the first cover seen at a height is taken as the bar alone and only
+    /// what a later one adds is the keyboard. A rotation changes the height,
+    /// which starts the measurement again.
+    #[test]
+    fn the_android_keyboard_is_what_covers_more_than_the_navigation_bar() {
+        // 1080-tall window whose navigation bar takes the bottom 60.
+        assert_eq!(android_keyboard(1080, 60), 0.0, "the bar alone is not it");
+        assert_eq!(android_keyboard(1080, 660), 600.0, "the keyboard is up");
+        assert_eq!(android_keyboard(1080, 60), 0.0, "and down again");
+        // A rotation: the new height is measured from scratch, so its first
+        // cover is the bar again rather than 600 pixels of phantom keyboard.
+        assert_eq!(android_keyboard(1920, 40), 0.0);
+        assert_eq!(android_keyboard(1920, 440), 400.0);
+    }
+
+    /// The editor's chords are punctuation and function keys, and both
+    /// backends read the physical code, so a shifted `\` is still `Backslash`.
+    #[test]
+    fn a_chord_key_arrives_as_its_physical_code() {
+        for (code, web, want) in [
+            (KeyCode::Backslash, "Backslash", Key::Backslash),
+            (KeyCode::Comma, "Comma", Key::Comma),
+            (KeyCode::Equal, "Equal", Key::Equals),
+            (KeyCode::Slash, "Slash", Key::Slash),
+            (KeyCode::F5, "F5", Key::F5),
+        ] {
+            assert_eq!(translate_key(PhysicalKey::Code(code)), want);
+            assert_eq!(translate_web_key(web), want);
+        }
+    }
+
+    /// Both keys reach the event as themselves. Folding them into one command
+    /// modifier is the egui layer's job, in `egui_modifiers`.
+    #[test]
+    fn control_and_super_both_reach_the_event() {
+        let held = translate_modifiers(ModifiersState::SUPER | ModifiersState::SHIFT);
+        assert!(held.contains(Modifiers::Super) && held.contains(Modifiers::Shift));
+        assert!(translate_modifiers(ModifiersState::CONTROL).contains(Modifiers::Control));
+        let web = web_modifiers(|key| key == "Meta" || key == "Shift");
+        assert!(web.contains(Modifiers::Super) && web.contains(Modifiers::Shift));
     }
 
     // Regression test for https://github.com/dimforge/kiss3d/issues/380:

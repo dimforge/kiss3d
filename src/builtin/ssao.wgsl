@@ -65,7 +65,13 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let px = textureSampleLevel(t_viewpos, s_pt, in.uv + vec2<f32>(u.inv_resolution.x, 0.0), 0.0).xyz;
     let py = textureSampleLevel(t_viewpos, s_pt, in.uv + vec2<f32>(0.0, u.inv_resolution.y), 0.0).xyz;
     var n = normalize(cross(px - p, py - p));
-    if n.z < 0.0 {
+    // Face the normal at the eye by the direction to the point, not by the z
+    // axis. `p` runs from the eye to the surface, so a front face has
+    // dot(n, p) < 0. Testing n.z instead decides nothing on a surface seen at a
+    // glancing angle -- ground under a standing camera -- where n.z is zero to
+    // within rounding, and half the pixels get a hemisphere pointing into the
+    // ground, which then occludes itself.
+    if dot(n, p) > 0.0 {
         n = -n;
     }
 
@@ -77,6 +83,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let tbn = mat3x3<f32>(t, b, n);
 
     var occlusion = 0.0;
+    // Samples that land off the screen are unknown, not unoccluded, so they
+    // leave the average as well as the sum. Counting them as clear lightens the
+    // AO towards every edge of the frame, by more the wider the radius reaches.
+    var taken = 0.0;
     for (var i = 0; i < 16; i = i + 1) {
         let sample_pos = p + (tbn * kernel(i)) * u.radius;
         let clip = u.proj * vec4<f32>(sample_pos, 1.0);
@@ -88,7 +98,10 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if suv.x < 0.0 || suv.x > 1.0 || suv.y < 0.0 || suv.y > 1.0 {
             continue;
         }
+        taken = taken + 1.0;
         let sampled = textureSampleLevel(t_viewpos, s_pt, suv, 0.0);
+        // Sky at the sample's pixel: nothing there to occlude it, which is a
+        // measurement, so it stays in the average.
         if sampled.a < 0.5 {
             continue;
         }
@@ -100,6 +113,6 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         }
     }
 
-    let ao = clamp(1.0 - (occlusion / 16.0) * u.intensity, 0.0, 1.0);
+    let ao = clamp(1.0 - (occlusion / max(taken, 1.0)) * u.intensity, 0.0, 1.0);
     return vec4<f32>(pow(ao, u.power));
 }
