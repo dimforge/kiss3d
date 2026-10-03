@@ -276,6 +276,11 @@ impl PolylineRenderer3d {
         !self.segments.is_empty()
     }
 
+    /// Drops the segments queued for the next frame.
+    pub(crate) fn clear(&mut self) {
+        self.segments.clear();
+    }
+
     /// Adds a polyline to be drawn during the next frame.
     /// Takes a reference to avoid allocations - segments are built immediately.
     /// Polylines are not persistent between frames.

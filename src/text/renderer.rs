@@ -267,6 +267,12 @@ impl TextRenderer {
     /// Adds a piece of text to be drawn during the next frame. The text is not persistent between
     /// frames. This method must be called for each text to draw, and at each update loop
     /// iteration.
+    /// Drops the text queued for the next frame.
+    pub(crate) fn clear(&mut self) {
+        self.contexts.clear();
+        self.text.clear();
+    }
+
     pub fn draw_text(&mut self, text: &str, pos: Vec2, scale: f32, font: &Arc<Font>, color: Color) {
         self.text.push_str(text);
         self.contexts.push(TextRenderContext {

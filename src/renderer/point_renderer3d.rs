@@ -168,6 +168,11 @@ impl PointRenderer3d {
         !self.points.is_empty()
     }
 
+    /// Drops the points queued for the next frame.
+    pub(crate) fn clear(&mut self) {
+        self.points.clear();
+    }
+
     /// Adds a point to be drawn during the next frame. Points are not persistent between frames.
     /// This method must be called for each point to draw, and at each update loop iteration.
     pub fn draw_point(&mut self, pt: Vec3, color: Color, size: f32) {

@@ -222,7 +222,10 @@ impl Window {
         } else {
             match self.acquire_next_frame() {
                 Some(frame) => Some(frame),
-                None => return !self.should_close(),
+                None => {
+                    self.discard_queued_draws();
+                    return !self.should_close();
+                }
             }
         };
 
@@ -1350,7 +1353,10 @@ impl Window {
         } else {
             match self.acquire_next_frame() {
                 Some(frame) => Some(frame),
-                None => return !self.should_close(),
+                None => {
+                    self.discard_queued_draws();
+                    return !self.should_close();
+                }
             }
         };
 
@@ -1554,6 +1560,16 @@ impl Window {
         super::ios::next_frame().await;
 
         !self.should_close()
+    }
+
+    /// Drops the lines, points and text queued for a frame that is skipped.
+    /// Otherwise they pile up while no frame is drawn (e.g. a window on another macOS Space).
+    fn discard_queued_draws(&mut self) {
+        self.polyline_renderer.clear();
+        self.polyline_renderer_2d.clear();
+        self.point_renderer.clear();
+        self.point_renderer_2d.clear();
+        self.text_renderer.clear();
     }
 
     /// Acquires the surface texture for the next frame.
