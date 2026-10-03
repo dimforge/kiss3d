@@ -85,6 +85,7 @@ fn load(data: &[u8], srgb: bool, invert: bool, flip_green: bool) -> Arc<Texture>
         wgpu::AddressMode::ClampToEdge,
         wgpu::FilterMode::Linear,
         true,
+        1,
     )
 }
 
