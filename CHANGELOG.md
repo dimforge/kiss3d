@@ -1,26 +1,28 @@
-# Unreleased
+# v0.47.0
+
+## Breaking Changes
+
+- `GpuMesh3d::coords_buffer` / `faces_buffer` / `normals_buffer` / `uvs_buffer` now return `Option<wgpu::Buffer>` (a cloned handle) instead of `Option<&wgpu::Buffer>`; they previously always returned `None` ([#408](https://github.com/dimforge/kiss3d/pull/408)).
 
 ## New Features
 
-- `OffscreenSurface` renders with MSAA: `OffscreenSurface::set_samples` / `samples`, or
-  `CanvasSetup::samples` through `with_setup`. `OffscreenSurface::new` stays single-sampled.
-  Offscreen frames used to ignore the canvas sample count and always render one sample.
-- `OffscreenSurface::set_shadow_softness` / `shadow_softness` and `set_shadows_enabled` /
-  `shadows_enabled`, mirroring the `Window` methods.
-- `ShadowMapper::set_atlas_layers` (`Window` / `OffscreenSurface::set_shadow_atlas_layers`)
-  allocates fewer than the 16 shadow atlas layers, which makes a finer shadow resolution
-  affordable when a scene only lights with one or two directional lights.
-- `TextureManager::set_anisotropy`: anisotropic filtering (up to 16x) for textures loaded with
-  mipmaps and linear filtering, which keeps floors and other grazing-angle textures sharp.
-- `Window` and `OffscreenSurface` expose the directional cascade layout that only the
-  `ShadowMapper` had: `set_shadow_distance` / `shadow_distance` and
-  `set_first_cascade_far_bound` / `first_cascade_far_bound`.
-- Added the `offscreen_msaa` example: an antialiased, hard-shadowed offscreen render.
+- Android and iOS support: `#[kiss3d::main]` generates the platform entry points (`android_main`, `window::run_ios`), the Android surface is dropped and recreated across suspend/resume, and touches drive egui. See `examples/android` and `examples/ios` ([#408](https://github.com/dimforge/kiss3d/pull/408)).
+- `Window::set_keyboard_visible` shows the on-screen keyboard on Android and iOS (no-op elsewhere) ([#408](https://github.com/dimforge/kiss3d/pull/408)).
+- `Window::set_fullscreen` / `is_fullscreen` and `Window::dropped_files` (also on `Canvas`) ([#408](https://github.com/dimforge/kiss3d/pull/408)).
+- `MaterialManager3d::for_each`; per-frame inputs (IBL, reflection probes, SSAO, transmission background, clustered lights, clip plane) now reach every registered material, not just the default one ([#408](https://github.com/dimforge/kiss3d/pull/408)).
+- `Context::supports_deform`: skinning/morph targets are disabled on devices with fewer than 5 vertex storage buffers (WebGL2, Android GLES), whose meshes now draw in rest pose instead of failing validation ([#408](https://github.com/dimforge/kiss3d/pull/408)).
+- `OffscreenSurface` supports MSAA via `set_samples` / `samples` or `CanvasSetup::samples` (previously always single-sampled) ([#413](https://github.com/dimforge/kiss3d/pull/413)).
+- `OffscreenSurface` gains `set_shadow_softness` / `set_shadows_enabled` and their getters, mirroring `Window` ([#413](https://github.com/dimforge/kiss3d/pull/413)).
+- `set_shadow_atlas_layers` (`Window`, `OffscreenSurface`, `ShadowMapper::set_atlas_layers`) to allocate fewer than 16 shadow atlas layers ([#413](https://github.com/dimforge/kiss3d/pull/413)).
+- `set_shadow_distance` / `set_first_cascade_far_bound` and getters on `Window` and `OffscreenSurface` ([#413](https://github.com/dimforge/kiss3d/pull/413)).
+- `TextureManager::set_anisotropy`: anisotropic filtering (up to 16x) for mipmapped, linearly filtered textures ([#413](https://github.com/dimforge/kiss3d/pull/413)).
+- New `offscreen_msaa` example ([#413](https://github.com/dimforge/kiss3d/pull/413)).
 
 ## Bug Fixes
 
-- Creating a second `Window` or `OffscreenSurface` on a thread that already has one no longer replaces the global mesh, texture and material managers. Objects created before the new surface kept the previous default material, which the per-frame `begin_frame` / `flush` no longer reached, so its per-object uniform buffer grew until wgpu rejected the dynamic offsets (a validation error after 256 draws). The managers are now created once per context and reused until the last window closes.
-- Added the `offscreen_shared_managers` example exercising a scene built before its offscreen surface, with shaded renders interleaved with depth and segmentation read-backs.
+- Creating a second `Window` or `OffscreenSurface` on the same thread no longer replaces the global mesh/texture/material managers, which caused a wgpu validation error after 256 draws of objects created earlier. New `offscreen_shared_managers` example ([#413](https://github.com/dimforge/kiss3d/pull/413)).
+- Downlevel GL (Android GLES): clustered lighting now also requires `BUFFER_BINDINGS_NOT_16_BYTE_ALIGNED`, and the surface only requests `COPY_SRC` when supported ([#408](https://github.com/dimforge/kiss3d/pull/408)).
+- On macOS, egui now receives ⌘ as its `command` modifier instead of Ctrl.
 
 # v0.46.0
 
