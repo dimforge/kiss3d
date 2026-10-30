@@ -1145,7 +1145,9 @@ impl SceneNode2d {
             lo = lo.min(*v);
             hi = hi.max(*v);
         }
-        let extent = (hi - lo).max(Vec2::splat(f32::EPSILON));
+        // `<f32>` is the primitive type: with `use std::f32;` in scope, a plain
+        // `f32::EPSILON` names the deprecated module constant instead.
+        let extent = (hi - lo).max(Vec2::splat(<f32>::EPSILON));
         let span = max - min;
 
         self.modify_uvs(&mut |uvs| {
