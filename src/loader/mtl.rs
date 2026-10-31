@@ -68,13 +68,13 @@ pub fn parse(string: &str) -> Vec<MtlMaterial> {
             // alpha
             "d" => curr_material.alpha = parse_scalar(l, words),
             // ambient map
-            "map_Ka" => curr_material.ambient_texture = Some(parse_name(l, words)),
+            "map_Ka" => curr_material.ambient_texture = Some(parse_map_name(l, words)),
             // diffuse texture map
-            "map_Kd" => curr_material.diffuse_texture = Some(parse_name(l, words)),
+            "map_Kd" => curr_material.diffuse_texture = Some(parse_map_name(l, words)),
             // specular texture map
-            "map_Ks" => curr_material.specular_texture = Some(parse_name(l, words)),
+            "map_Ks" => curr_material.specular_texture = Some(parse_map_name(l, words)),
             // specular texture map
-            "map_d" | "map_opacity" => curr_material.opacity_map = Some(parse_name(l, words)),
+            "map_d" | "map_opacity" => curr_material.opacity_map = Some(parse_map_name(l, words)),
             _ => {
                 log::warn!("unknown line {} ignored: `{}'", l, line);
             }
@@ -88,9 +88,37 @@ pub fn parse(string: &str) -> Vec<MtlMaterial> {
     res
 }
 
-fn parse_name<'a>(_: usize, ws: Words<'a>) -> String {
+fn parse_name<'a>(_: usize, ws: impl Iterator<Item = &'a str>) -> String {
     let res: Vec<&'a str> = ws.collect();
     res.join(" ")
+}
+
+/// Parses the file name of a texture map statement, skipping its options
+/// (e.g. `map_Kd -s 2 2 1 -clamp on wood.jpg` gives `wood.jpg`).
+fn parse_map_name<'a>(l: usize, ws: Words<'a>) -> String {
+    let words: Vec<&'a str> = ws.collect();
+    let mut i = 0;
+
+    while i < words.len() {
+        let nargs = match words[i] {
+            "-blendu" | "-blendv" | "-cc" | "-clamp" | "-bm" | "-boost" | "-texres"
+            | "-imfchan" | "-type" => 1,
+            "-mm" => 2,
+            // `-o`, `-s` and `-t` take one required and two optional numbers.
+            "-o" | "-s" | "-t" => {
+                let n = words[i + 1..]
+                    .iter()
+                    .take(3)
+                    .take_while(|w| f32::from_str(w).is_ok())
+                    .count();
+                n.max(1)
+            }
+            _ => break,
+        };
+        i += 1 + nargs;
+    }
+
+    parse_name(l, words[i.min(words.len())..].iter().copied())
 }
 
 fn parse_color(l: usize, mut ws: Words) -> [f32; 3] {
@@ -192,5 +220,31 @@ impl MtlMaterial {
             shininess,
             alpha,
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::parse;
+
+    #[test]
+    fn map_statements_skip_options() {
+        let mtl = "newmtl floor\n\
+                   map_Kd -s -15.000000 -15.000000 -3.700000 wood_tile.jpg\n\
+                   map_Ka -o 0.5 -clamp on -bm 1.0 ambient tex.png\n\
+                   map_Ks -s 2 spec.png\n\
+                   map_d -imfchan m alpha.png\n";
+        let mats = parse(mtl);
+        assert_eq!(mats.len(), 1);
+        assert_eq!(mats[0].diffuse_texture.as_deref(), Some("wood_tile.jpg"));
+        assert_eq!(mats[0].ambient_texture.as_deref(), Some("ambient tex.png"));
+        assert_eq!(mats[0].specular_texture.as_deref(), Some("spec.png"));
+        assert_eq!(mats[0].opacity_map.as_deref(), Some("alpha.png"));
+    }
+
+    #[test]
+    fn map_statements_without_options() {
+        let mats = parse("newmtl a\nmap_Kd my texture.jpg\n");
+        assert_eq!(mats[0].diffuse_texture.as_deref(), Some("my texture.jpg"));
     }
 }
