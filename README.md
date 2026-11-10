@@ -117,3 +117,16 @@ For immediate mode GUI support, enable the `egui` feature:
 [dependencies]
 kiss3d = { version = "0.40", features = ["egui"] }
 ```
+
+#### DRM/KMS output (Linux)
+
+To show a scene on a display without a window system (for example on a console-only Raspberry Pi),
+enable the `drm` feature and use `DrmWindow`. It renders on the GPU and shows each frame through
+DRM/KMS. It takes no input yet, and the user needs access to `/dev/dri/card*` (usually the `video`
+group). Run it from a text console, not from inside a desktop session. On small GPUs, turn shadows
+off with `window.set_shadows_enabled(false)`.
+```toml
+[dependencies]
+kiss3d = { version = "0.47", features = ["drm"] }
+```
+`DrmWindow::new_auto()` picks the first `/dev/dri/card*` that can drive a display; `DrmWindow::new(path)` uses a specific device. See `examples/drm_cube.rs`.

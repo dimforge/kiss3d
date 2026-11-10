@@ -3,6 +3,8 @@
 mod aov;
 mod canvas;
 mod drawing;
+#[cfg(all(feature = "drm", target_os = "linux"))]
+mod drm;
 #[cfg(feature = "egui")]
 mod egui_integration;
 mod events;
@@ -20,6 +22,8 @@ mod window;
 mod window_cache;
 
 pub use canvas::{Canvas, CanvasSetup, NumSamples};
+#[cfg(all(feature = "drm", target_os = "linux"))]
+pub use drm::{DrmError, DrmWindow};
 #[cfg(feature = "egui")]
 pub use inspector::{Inspector, InspectorTab};
 #[cfg(target_os = "ios")]

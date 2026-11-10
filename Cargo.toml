@@ -29,6 +29,10 @@ include = [
 name = "kiss3d"
 path = "src/lib.rs"
 
+[[example]]
+name = "drm_cube"
+required-features = ["drm"]
+
 [features]
 # `rfd` powers the inspector's native "Open…" image dialogs (unused on wasm, which
 # falls back to a path text field).
@@ -40,6 +44,9 @@ serde = ["dep:serde", "glamx/serde", "bitflags/serde", "rgb/serde"]
 # `.raytrace_3d`. This is mainly for debugging and experiments comparing the rasterizer and
 # the raytracer.
 rt_switcher = []
+# Shows a headless `Window`'s frames on a display through DRM/KMS, with no window system
+# (e.g. a console-only Raspberry Pi). Linux only; a no-op elsewhere.
+drm = ["dep:drm"]
 
 [dependencies]
 bitflags     = "2"
@@ -63,6 +70,10 @@ wesl = "0.4"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 pollster = "1"
+
+# DRM/KMS only exists on Linux.
+[target.'cfg(target_os = "linux")'.dependencies]
+drm = { version = "0.15.0", optional = true }
 
 # rfd has desktop and wasm backends only; on iOS/Android its dialog traits have
 # no implementation and the crate does not compile. The inspector falls back to

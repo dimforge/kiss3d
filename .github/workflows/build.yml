@@ -43,6 +43,27 @@ jobs:
         run: cargo build --verbose --examples --features egui;
       - name: Run tests
         run: cargo test
+  # The DRM/KMS output only exists on Linux and is behind a feature that the jobs above
+  # do not enable. Showing frames needs a display, so CI only compiles, lints and runs
+  # the unit tests.
+  build-drm:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -D warnings
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get install -y cmake libxcb-composite0-dev
+      - name: Clippy (+ drm)
+        run: cargo clippy --features drm --examples
+      - name: Build kiss3d (+ drm)
+        run: cargo build --verbose -p kiss3d --features drm
+      - name: Build examples (+ drm)
+        run: cargo build --verbose --examples --features drm
+      - name: Cargo doc (+ drm)
+        run: cargo doc --features drm
+      - name: Run tests (+ drm)
+        run: cargo test --features drm
   build-wasm:
     runs-on: ubuntu-latest
     env:
