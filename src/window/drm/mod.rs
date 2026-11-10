@@ -5,6 +5,7 @@
 //! dumb buffers on a separate thread.
 
 mod card;
+mod device;
 mod display_thread;
 mod error;
 mod kms;

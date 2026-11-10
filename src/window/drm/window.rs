@@ -1,9 +1,10 @@
 //! A headless window whose frames are shown on a display through DRM/KMS.
 
 use super::card::Card;
+use super::device;
 use super::display_thread::{DisplayCommand, DisplayThread, DisplayThreadConfig};
 use super::error::DrmError;
-use super::kms;
+use super::kms::DisplayConfig;
 use crate::camera::{Camera2d, Camera3d};
 use crate::context::Context;
 use crate::post_processing::PostProcessingEffect;
@@ -62,10 +63,22 @@ impl DrmWindow {
     /// Opens the DRM device (e.g. `/dev/dri/card0`) and shows frames on its first
     /// connected display, at that display's selected mode.
     pub async fn new(device_path: &str) -> Result<Self, DrmError> {
-        let card = Card::open(device_path)?;
-        kms::acquire_master(&card)?;
-        kms::validate_device_capabilities(&card)?;
-        let display_config = kms::query_display_resources(&card)?;
+        let (card, display_config) = device::open_device(device_path)?;
+        Self::from_device(card, display_config).await
+    }
+
+    /// Like [`new`](Self::new), but picks the device itself: it tries `/dev/dri/card0`,
+    /// `card1`, ... in order and uses the first one that can drive a connected display.
+    ///
+    /// Use it when the display is not always on `card0`, for example on a Raspberry Pi,
+    /// where the display controller and the 3D unit are separate nodes. If none works,
+    /// the error ([`DrmError::NoUsableDevice`]) says why each one was rejected.
+    pub async fn new_auto() -> Result<Self, DrmError> {
+        let (card, display_config) = device::open_first_usable()?;
+        Self::from_device(card, display_config).await
+    }
+
+    async fn from_device(card: Card, display_config: DisplayConfig) -> Result<Self, DrmError> {
         check_graphics_adapter().await?;
 
         // Rendering is off-screen and single-sampled, so MSAA would only waste memory.

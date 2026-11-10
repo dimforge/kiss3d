@@ -3,14 +3,19 @@ use kiss3d::window::DrmWindow;
 
 // Shows a rotating cube on a display through DRM/KMS, with no window system (e.g. on a
 // console-only Raspberry Pi). Run it from a text console, not from inside a desktop session.
-// Set `DRM_DEVICE` to pick another device than `/dev/dri/card0`.
+// By default it picks the first `/dev/dri/card*` that can drive a display. Set `DRM_DEVICE`
+// (e.g. `/dev/dri/card1`) to use a specific device.
 #[kiss3d::main]
 async fn main() {
     env_logger::init();
-    let device = std::env::var("DRM_DEVICE").unwrap_or_else(|_| "/dev/dri/card0".to_string());
-    let mut window = DrmWindow::new(&device)
-        .await
-        .unwrap_or_else(|e| panic!("Failed to open {}: {}", device, e));
+    let mut window = match std::env::var("DRM_DEVICE") {
+        Ok(device) => DrmWindow::new(&device)
+            .await
+            .unwrap_or_else(|e| panic!("Failed to open {}: {}", device, e)),
+        Err(_) => DrmWindow::new_auto()
+            .await
+            .unwrap_or_else(|e| panic!("Failed to find a DRM device: {}", e)),
+    };
     // Shadow mapping dominates the frame time on small GPUs such as the Raspberry Pi 4.
     window.set_shadows_enabled(false);
 

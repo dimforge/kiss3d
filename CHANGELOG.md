@@ -2,7 +2,7 @@
 
 ## New Features
 
-- `drm` feature (Linux only): `DrmWindow` renders through a headless `Window` and shows the frames on a display through DRM/KMS, without a window system (e.g. a console-only Raspberry Pi). Input is not supported yet. See the `drm_cube` example.
+- `drm` feature (Linux only): `DrmWindow` renders through a headless `Window` and shows the frames on a display through DRM/KMS, without a window system (e.g. a console-only Raspberry Pi). Input is not supported yet. `DrmWindow::new_auto()` selects the first `/dev/dri/card*` that can drive a display. See the `drm_cube` example.
 
 # v0.47.0
 

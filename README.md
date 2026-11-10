@@ -129,4 +129,4 @@ off with `window.set_shadows_enabled(false)`.
 [dependencies]
 kiss3d = { version = "0.47", features = ["drm"] }
 ```
-See `examples/drm_cube.rs`.
+`DrmWindow::new_auto()` picks the first `/dev/dri/card*` that can drive a display; `DrmWindow::new(path)` uses a specific device. See `examples/drm_cube.rs`.
